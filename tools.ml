@@ -50,14 +50,21 @@ let shell_tool = {
   execute = fun _ cmd ->
     try
       let channel = Unix.open_process_in cmd in
-      let output = really_input_string channel (in_channel_length channel) in
+      let output = Buffer.create 1024 in
+      (try
+        while true do
+          let line = input_line channel in
+          Buffer.add_string output line;
+          Buffer.add_char output '\n'
+        done
+      with End_of_file -> ());
       let status = Unix.close_process_in channel in
       let exit_code = match status with
         | Unix.WEXITED code -> code
         | Unix.WSIGNALED signal -> -signal
         | Unix.WSTOPPED signal -> -signal
       in
-      Printf.sprintf "Command output:\n%s\n\nExit status: %d" output exit_code
+      Printf.sprintf "Command output:\n%s\nExit status: %d" (Buffer.contents output) exit_code
     with exn ->
       Printf.sprintf "Error executing command: %s" (Printexc.to_string exn)
 }

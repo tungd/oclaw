@@ -24,7 +24,7 @@ oclaw/
 ├── llm_provider.ml/mli   # LLM provider module
 ├── memory.ml/mli         # Memory and conversation history
 ├── tools.ml/mli           # Tool system implementation
-├── config_json.ml/mli     # Configuration system
+├── config.ml/mli         # YAML-based Configuration system
 ├── oclaw.ml              # Main agent implementation
 ├── test_*.ml             # Test suites
 └── README.md              # This file

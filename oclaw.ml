@@ -6,7 +6,9 @@ module Http = Http_client
 module LLM = Llm_provider
 module Tools = Tools
 module Memory = Memory
-module Config = Nanobot_config.Config_json
+module Config = Oclaw_config.Config
+module Arg = Arg
+module Log = (val Logs.src_log Logs.default : Logs.LOG)
 
 (* Basic agent types *)
 type message = {
@@ -59,6 +61,8 @@ let call_llm_api message config session_id =
     {
       LLM.role = LLM.string_to_role role_str;
       content = content;
+      LLM.tool_call_id = None;
+      LLM.tool_calls = []
     }
   ) llm_messages in
   
@@ -116,19 +120,30 @@ let agent_loop config =
   loop ()
 
 let () =
+  (* Initialize logging *)
+  Logs.set_level (Some Logs.Info);
+  Logs.set_reporter (Logs_fmt.reporter ());
+  
   Printf.printf "OClaw OCaml version - starting...\n";
-  test_http_client ();
+  Log.info (fun m -> m "OClaw starting up");
   
   (* Load configuration *)
   let config = 
-    if Sys.file_exists "config.yaml" then
+    if Sys.file_exists "config.yaml" then (
+      Log.info (fun m -> m "Loading configuration from config.yaml");
       Config.load_config "config.yaml"
-    else (
-      Printf.printf "No config.yaml found, creating default configuration...\n";
+    ) else (
+      Log.warn (fun m -> m "No config.yaml found, creating default configuration");
       ignore (Config.create_default_config "config.yaml");
       Config.default_config
     )
   in
+  
+  (* Set log level based on debug configuration *)
+  if config.debug then (
+    Logs.set_level (Some Logs.Debug);
+    Log.info (fun m -> m "Debug mode enabled - verbose logging active")
+  );
   
   (* Validate configuration *)
   (match Config.validate_config config with

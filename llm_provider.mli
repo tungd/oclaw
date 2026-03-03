@@ -14,10 +14,20 @@ type llm_model = {
 (** Message role types *)
 type message_role = System | User | Assistant | Tool
 
+(** Tool call structure *)
+type llm_tool_call = {
+  id : string;
+  type_ : string;
+  function_name : string;
+  function_args : string;
+}
+
 (** Message type for LLM conversation *)
 type message = {
   role : message_role;
   content : string;
+  tool_call_id : string option;
+  tool_calls : llm_tool_call list;
 }
 
 (** LLM Provider configuration *)
@@ -36,6 +46,7 @@ type tool_definition = {
   description : string;
   parameters_json : string;
 }
+
 
 (** LLM Response result *)
 type llm_result = 
@@ -58,6 +69,7 @@ and llm_choice = {
   index : int;
   message : message;
   finish_reason : string;
+  tool_calls : llm_tool_call list;
 }
 
 (** Convert between message role and string *)
@@ -71,7 +83,7 @@ val qwen35_plus_model : llm_model
 val create_dashscope_provider : ?temperature:float -> ?max_tokens:int -> unit -> provider_config
 
 (** Make LLM API call *)
-val call_llm : provider_config -> message list -> ?tools:'a option -> unit -> llm_result
+val call_llm : provider_config -> message list -> ?tools:Yojson.Basic.t option -> unit -> llm_result
 
 (** Extract assistant message from response *)
 val get_assistant_message : llm_result -> message option

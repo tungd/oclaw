@@ -1,6 +1,8 @@
-(** Simple JSON-based Configuration system *)
+(** Simple YAML-based Configuration system *)
 
 open Yojson.Basic.Util
+
+module Log = (val Logs.src_log (Logs.Src.create "config") : Logs.LOG)
 
 (* Configuration types *)
 type config = {
@@ -19,6 +21,25 @@ type config = {
   agent_max_iterations : int;
   debug : bool;
   log_file : string option
+}
+
+(* Default configuration *)
+let default_config = {
+  llm_provider = "dashscope";
+  llm_model = "qwen3.5-plus";
+  llm_temperature = 0.7;
+  llm_max_tokens = 1000;
+  llm_api_key = "sk-sp-4326acec735b4e29b33b31e97d1d66fa";
+  llm_api_base = "https://coding-intl.dashscope.aliyuncs.com/v1";
+  llm_timeout = 60;
+  tools_enabled = true;
+  tools_max_concurrent = 3;
+  tools_timeout = 30;
+  agent_system_prompt = "You are a helpful AI assistant.";
+  agent_memory_window = 10;
+  agent_max_iterations = 5;
+  debug = false;
+  log_file = Some "oclaw.log"
 }
 
 (* Helper functions with defaults *)
@@ -42,29 +63,21 @@ let to_bool_with_default default = function
   | `String "false" -> false
   | _ -> default
 
-(* Default configuration *)
-let default_config = {
-  llm_provider = "dashscope";
-  llm_model = "qwen3.5-plus";
-  llm_temperature = 0.7;
-  llm_max_tokens = 1000;
-  llm_api_key = "sk-sp-4326acec735b4e29b33b31e97d1d66fa";
-  llm_api_base = "https://coding-intl.dashscope.aliyuncs.com/v1";
-  llm_timeout = 60;
-  tools_enabled = true;
-  tools_max_concurrent = 3;
-  tools_timeout = 30;
-  agent_system_prompt = "You are a helpful AI assistant.";
-  agent_memory_window = 10;
-  agent_max_iterations = 5;
-  debug = false;
-  log_file = Some "oclaw.log"
-}
-
-(* Load configuration from JSON file *)
+(* Load configuration from YAML file *)
 let load_config filename =
   try
-    let json = Yojson.Basic.from_file filename in
+    let yaml_content = In_channel.with_open_text filename In_channel.input_all in
+    let yaml_value = Yaml.of_string_exn yaml_content in
+    (* Convert Yaml.value to Yojson.Basic.json for compatibility *)
+    let rec yaml_value_to_json = function
+      | `Null -> `Null
+      | `Bool b -> `Bool b
+      | `Float f -> `Float f
+      | `String s -> `String s
+      | `A lst -> `List (List.map yaml_value_to_json lst)
+      | `O lst -> `Assoc (List.map (fun (k, v) -> (k, yaml_value_to_json v)) lst)
+    in
+    let json = yaml_value_to_json yaml_value in
     {
       llm_provider = json |> member "llm_provider" |> to_string_with_default "dashscope";
       llm_model = json |> member "llm_model" |> to_string_with_default "qwen3.5-plus";
@@ -88,7 +101,7 @@ let load_config filename =
     Printf.printf "Error loading config: %s\nUsing default configuration.\n" (Printexc.to_string exn);
     default_config
 
-(* Save configuration to JSON file *)
+(* Save configuration to JSON file (for compatibility) *)
 let save_config filename config =
   try
     let json = `Assoc [
@@ -122,35 +135,27 @@ let create_default_config filename =
 
 (* Convert config to LLM provider config *)
 let to_llm_provider_config config =
+  Log.info (fun m -> m "Converting config to LLM provider config with model: %s" config.llm_model);
+  (* Create a model based on the configured model name *)
+  let model = {
+    Llm_provider.id = config.llm_model;
+    Llm_provider.name = config.llm_model;
+    Llm_provider.reasoning = false;
+    Llm_provider.input_types = ["text"];
+    Llm_provider.cost = (0.0, 0.0, 0.0, 0.0);
+    Llm_provider.context_window = 1000000;
+    Llm_provider.max_tokens = config.llm_max_tokens
+  } in
+  if config.debug then
+    Printf.printf "Using LLM model: %s\n" config.llm_model;
   Llm_provider.{
     api_base = config.llm_api_base;
     api_key = config.llm_api_key;
-    model = Llm_provider.qwen35_plus_model; (* Use the default model *)
+    model = model;
     temperature = config.llm_temperature;
     max_tokens = config.llm_max_tokens;
     timeout = config.llm_timeout
   }
-
-(* Helper functions with defaults *)
-let to_string_with_default default = function
-  | `String s -> s
-  | _ -> default
-
-let to_float_with_default default = function
-  | `Float f -> f
-  | `Int i -> float_of_int i
-  | _ -> default
-
-let to_int_with_default default = function
-  | `Int i -> i
-  | `Float f -> int_of_float f
-  | _ -> default
-
-let to_bool_with_default default = function
-  | `Bool b -> b
-  | `String "true" -> true
-  | `String "false" -> false
-  | _ -> default
 
 (* Validate configuration *)
 let validate_config config =

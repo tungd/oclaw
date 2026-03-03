@@ -17,6 +17,8 @@ let test_dashscope_provider () =
     {
       Llm_provider.role = Llm_provider.User;
       content = "Hello! This is a test of the DashScope LLM provider.";
+      tool_call_id = None;
+      tool_calls = []
     }
   ] in
   

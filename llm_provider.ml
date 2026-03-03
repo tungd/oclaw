@@ -4,6 +4,12 @@ open Http_client
 open Yojson.Basic.Util
 
 module Http = Http_client
+module Log = (val Logs.src_log (Logs.Src.create "llm_provider") : Logs.LOG)
+
+(* Helper function to safely extract optional string from JSON *)
+let to_string_option json =
+  try Some (to_string json)
+  with _ -> None
 
 (* LLM Model configuration *)
 type llm_model = {
@@ -16,11 +22,21 @@ type llm_model = {
   max_tokens : int;
 }
 
+(* Tool call structure *)
+type llm_tool_call = {
+  id : string;
+  type_ : string;
+  function_name : string;
+  function_args : string;
+}
+
 (* Message types for LLM conversation *)
 type message_role = System | User | Assistant | Tool
 type message = {
   role : message_role;
   content : string;
+  tool_call_id : string option; (* Only used for tool messages *)
+  tool_calls : llm_tool_call list; (* Only used for assistant messages *)
 }
 
 (* LLM Provider configuration *)
@@ -33,19 +49,12 @@ type provider_config = {
   timeout : int;
 }
 
-(* Tool call definition *)
-type tool_call = {
-  id : string;
-  type_ : string;
-  function_name : string;
-  function_args : string;
-}
 
-(* LLM Response types *)
 type llm_choice = {
   index : int;
   message : message;
   finish_reason : string;
+  tool_calls : llm_tool_call list;
 }
 
 type llm_response = {
@@ -108,23 +117,42 @@ let call_llm provider messages ?(tools=None) () =
     "Authorization", "Bearer " ^ provider.api_key;
   ] in
   
-  (* Build tools JSON if provided - simplified for now *)
+  (* Build tools JSON if provided *)
   let tools_json = match tools with
-    | Some _ -> "null" (* TODO: implement proper tool serialization *)
+    | Some tools -> Yojson.Basic.to_string tools
     | None -> "null"
   in
   
   (* Build messages JSON *)
   let message_json_list = List.map (fun msg ->
-    Printf.sprintf "{\"role\": \"%s\", \"content\": \"%s\"}"
-      (role_to_string msg.role)
-      (String.escaped msg.content)
+    (* Handle tool messages with tool_call_id *)
+    if msg.role = Tool && msg.tool_call_id <> None then
+      Printf.sprintf "{\"role\": \"%s\", \"content\": \"%s\", \"tool_call_id\": \"%s\"}"
+        (role_to_string msg.role)
+        (String.escaped msg.content)
+        (match msg.tool_call_id with Some id -> id | None -> "")
+    else if msg.role = Assistant && msg.tool_calls <> [] then
+      let tool_calls_json = List.map (fun {id; type_; function_name; function_args} ->
+        Printf.sprintf "{\"id\": \"%s\", \"type\": \"%s\", \"function\": {\"name\": \"%s\", \"arguments\": \"%s\"}}"
+          (String.escaped id)
+          (String.escaped type_)
+          (String.escaped function_name)
+          (String.escaped function_args)
+      ) msg.tool_calls in
+      Printf.sprintf "{\"role\": \"%s\", \"content\": \"%s\", \"tool_calls\": [%s]}"
+        (role_to_string msg.role)
+        (String.escaped msg.content)
+        (String.concat ", " tool_calls_json)
+    else
+      Printf.sprintf "{\"role\": \"%s\", \"content\": \"%s\"}"
+        (role_to_string msg.role)
+        (String.escaped msg.content)
   ) messages in
   let messages_json = "[" ^ (String.concat ", " message_json_list) ^ "]" in
   
   (* Build request body *)
   let body = Printf.sprintf 
-    "{\"model\": \"%s\", \"messages\": %s, \"temperature\": %.2f, \"max_tokens\": %d, \"tools\": %s}"
+    "{\"model\": \"%s\", \"messages\": %s, \"temperature\": %.2f, \"max_tokens\": %d, \"tools\": %s, \"tool_choice\": \"auto\"}"
     provider.model.name messages_json provider.temperature provider.max_tokens tools_json in
   
   (* Make HTTP request *)
@@ -151,10 +179,40 @@ let call_llm provider messages ?(tools=None) () =
             let message_json = choice_json |> member "message" in
             let role_str = message_json |> member "role" |> to_string in
             let content = message_json |> member "content" |> to_string in
+            let tool_call_id = 
+              try Some (message_json |> member "tool_call_id" |> to_string)
+              with _ -> None
+            in
+            
+            (* Parse tool calls if present *)
+            let tool_calls = 
+              try
+                let tool_calls_json = message_json |> member "tool_calls" |> to_list in
+                let parsed_tool_calls = List.map (fun tool_call_json ->
+                  {
+                    id = tool_call_json |> member "id" |> to_string;
+                    type_ = tool_call_json |> member "type" |> to_string;
+                    function_name = (tool_call_json |> member "function") |> member "name" |> to_string;
+                    function_args = (tool_call_json |> member "function") |> member "arguments" |> to_string
+                  }
+                ) tool_calls_json in
+                Log.info (fun m -> m "Parsed %d tool calls" (List.length parsed_tool_calls));
+                parsed_tool_calls
+              with _ -> []
+            in
+            
+            (* Log tool calls when debug is enabled *)
+            if tool_calls <> [] then (
+              List.iter (fun tc ->
+                Log.info (fun m -> m "Tool call: %s(%s)" tc.function_name tc.function_args)
+              ) tool_calls
+            );
+            
             {
               index = index;
-              message = { role = string_to_role role_str; content = content };
-              finish_reason = finish_reason
+              message = { role = string_to_role role_str; content = content; tool_call_id = tool_call_id; tool_calls = tool_calls };
+              finish_reason = finish_reason;
+              tool_calls = tool_calls
             }
           ) choices_json in
           
@@ -187,6 +245,85 @@ let call_llm provider messages ?(tools=None) () =
             response.Http.HttpResponse.status response.Http.HttpResponse.body)
       with exn ->
         Error (Printf.sprintf "JSON parse error: %s" (Printexc.to_string exn))
+
+(* Make streaming LLM API call *)
+let call_llm_streaming provider messages ?(tools=None) chunk_callback =
+  let url = provider.api_base ^ "/chat/completions" in
+  let headers = [
+    "Content-Type", "application/json";
+    "Authorization", "Bearer " ^ provider.api_key;
+  ] in
+  
+  (* Build tools JSON if provided *)
+  let tools_json = match tools with
+    | Some tools -> Yojson.Basic.to_string tools
+    | None -> "null"
+  in
+  
+  (* Build messages JSON *)
+  let message_json_list = List.map (fun msg ->
+    (* Handle tool messages with tool_call_id *)
+    if msg.role = Tool && msg.tool_call_id <> None then
+      Printf.sprintf "{\"role\": \"%s\", \"content\": \"%s\", \"tool_call_id\": \"%s\"}"
+        (role_to_string msg.role)
+        (String.escaped msg.content)
+        (match msg.tool_call_id with Some id -> id | None -> "")
+    else if msg.role = Assistant && msg.tool_calls <> [] then
+      let tool_calls_json = List.map (fun {id; type_; function_name; function_args} ->
+        Printf.sprintf "{\"id\": \"%s\", \"type\": \"%s\", \"function\": {\"name\": \"%s\", \"arguments\": \"%s\"}}"
+          (String.escaped id)
+          (String.escaped type_)
+          (String.escaped function_name)
+          (String.escaped function_args)
+      ) msg.tool_calls in
+      Printf.sprintf "{\"role\": \"%s\", \"content\": \"%s\", \"tool_calls\": [%s]}"
+        (role_to_string msg.role)
+        (String.escaped msg.content)
+        (String.concat ", " tool_calls_json)
+    else
+      Printf.sprintf "{\"role\": \"%s\", \"content\": \"%s\"}"
+        (role_to_string msg.role)
+        (String.escaped msg.content)
+  ) messages in
+  let messages_json = "[" ^ (String.concat ", " message_json_list) ^ "]" in
+  
+  (* Build request body *)
+  let body = Printf.sprintf 
+    "{\"model\": \"%s\", \"messages\": %s, \"temperature\": %.2f, \"max_tokens\": %d, \"tools\": %s, \"stream\": true, \"tool_choice\": \"auto\"}"
+    provider.model.name messages_json provider.temperature provider.max_tokens tools_json in
+  
+  (* Make streaming HTTP request *)
+  let result = Http.post_streaming url headers body provider.timeout (fun chunk ->
+    (* Parse streaming chunks - each chunk is in format: data: {"choices":[{"delta":{"content":"..."}}]}\n\n *)
+    try
+      if String.length chunk > 0 then (
+        (* Remove any trailing data prefix and parse JSON lines *)
+        let lines = String.split_on_char '\n' chunk in
+        List.iter (fun line ->
+          if String.length line > 6 && String.sub line 0 6 = "data: " then (
+            let json_data = String.sub line 6 (String.length line - 6) in
+            if json_data <> "[DONE]" then (
+              try
+                let json = Yojson.Basic.from_string json_data in
+                let choices = json |> member "choices" |> to_list in
+                List.iter (fun choice_json ->
+                  let delta = choice_json |> member "delta" in
+                  let content = delta |> member "content" |> to_string_option in
+                  match content with
+                  | Some text -> chunk_callback text
+                  | None -> ()
+                ) choices
+              with _ -> () (* Ignore parse errors for individual chunks *)
+            )
+          )
+        ) lines
+      )
+    with _ -> () (* Ignore any parsing errors *)
+  ) in
+  
+  match result with
+  | Ok () -> Ok ()
+  | Error msg -> Error msg
 
 (* Simple tool definition type *)
 type tool_definition = {

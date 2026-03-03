@@ -81,3 +81,6 @@ val put : string -> (string * string) list -> string -> int -> HttpResponse.t
 
 (** Simple DELETE request *)
 val delete : string -> (string * string) list -> int -> HttpResponse.t
+
+(** Streaming POST request with callback *)
+val post_streaming : string -> (string * string) list -> string -> int -> (string -> unit) -> (unit, string) result

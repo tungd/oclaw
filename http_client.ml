@@ -3,6 +3,8 @@
 open Curl
 open Iomux
 
+module Log = (val Logs.src_log (Logs.Src.create "http_client") : Logs.LOG)
+
 (* Module for HTTP methods *)
 module HttpMethod = struct
   type t = GET | POST | PUT | DELETE
@@ -88,8 +90,44 @@ let init_curl_handle () =
   Curl.set_timeout handle 30;
   Curl.set_followlocation handle true;
   Curl.set_maxredirs handle 5;
-  Curl.set_useragent handle "oclaw-ocaml/1.0";
   handle
+
+(* Streaming HTTP request with callback *)
+let perform_streaming_request url headers body timeout callback =
+  let handle = init_curl_handle () in
+  
+  (* Set URL and method *)
+  Curl.set_url handle url;
+  Curl.set_post handle true;
+  
+  (* Set headers *)
+  let headers = List.map (fun (name, value) -> name ^ ": " ^ value) headers in
+  Curl.set_httpheader handle headers;
+  
+  (* Set body *)
+  Curl.set_postfields handle body;
+  
+  (* Set timeout *)
+  Curl.set_timeout handle timeout;
+  
+  (* Set streaming callback *)
+  Curl.set_writefunction handle (fun data ->
+    callback data;
+    String.length data
+  );
+  
+  (* Perform request *)
+  try
+    Curl.perform handle;
+    Curl.cleanup handle;
+    Ok ()
+  with
+  | Curl.CurlException (code, _, msg) ->
+      Curl.cleanup handle;
+      Error (msg ^ " (" ^ Curl.strerror code ^ ")")
+  | exn ->
+      Curl.cleanup handle;
+      Error (Printexc.to_string exn)
 
 let set_request_options handle req =
   Curl.set_url handle req.HttpRequest.url;
@@ -160,13 +198,17 @@ let make_request req =
   
   try
     let response = perform_request handle in
+    Log.debug (fun m -> m "HTTP Response: Status %d, Body length: %d"
+                     response.HttpResponse.status (String.length response.HttpResponse.body));
     cleanup_curl_handle handle;
     response
   with
   | Http_error msg ->
+      Log.err (fun m -> m "HTTP Error: %s" msg);
       cleanup_curl_handle handle;
       HttpResponse.create ~status:0 ~headers:[] ~body:"" ~error:msg ()
   | exn ->
+      Log.err (fun m -> m "HTTP Exception: %s" (Printexc.to_string exn));
       cleanup_curl_handle handle;
       HttpResponse.create ~status:0 ~headers:[] ~body:"" ~error:(Printexc.to_string exn) ()
 
@@ -227,6 +269,9 @@ let get url headers timeout =
 let post url headers body timeout =
   let req = HttpRequest.create ~method_:HttpMethod.POST ~url ~headers ~body:body ~timeout () in
   make_request req
+
+let post_streaming url headers body timeout callback =
+  perform_streaming_request url headers body timeout callback
 
 (* Simple PUT request *)
 let put url headers body timeout =
