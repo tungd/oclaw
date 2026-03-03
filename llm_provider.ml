@@ -196,15 +196,15 @@ let call_llm provider messages ?(tools=None) () =
                     function_args = (tool_call_json |> member "function") |> member "arguments" |> to_string
                   }
                 ) tool_calls_json in
-                Log.info (fun m -> m "Parsed %d tool calls" (List.length parsed_tool_calls));
+                Log.debug (fun m -> m "Parsed %d tool calls" (List.length parsed_tool_calls));
                 parsed_tool_calls
               with _ -> []
             in
-            
+
             (* Log tool calls when debug is enabled *)
             if tool_calls <> [] then (
               List.iter (fun tc ->
-                Log.info (fun m -> m "Tool call: %s(%s)" tc.function_name tc.function_args)
+                Log.debug (fun m -> m "Tool call: %s(%s)" tc.function_name tc.function_args)
               ) tool_calls
             );
             

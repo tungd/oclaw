@@ -25,27 +25,73 @@ type agent_config = {
   timeout : int;
 }
 
+(* Workspace directory for prompt files *)
+let workspace_dir = "workspace"
+
+(* Load a markdown file if it exists *)
+let load_workspace_file filename =
+  let path = Filename.concat workspace_dir filename in
+  if Sys.file_exists path then
+    try
+      let channel = open_in path in
+      let content = really_input_string channel (in_channel_length channel) in
+      close_in channel;
+      Some content
+    with _ -> None
+  else
+    None
+
+(* Build system prompt from workspace files and skills *)
+let build_system_prompt () =
+  let parts = ref [] in
+
+  (* Core workspace files in order *)
+  let workspace_files = [
+    "IDENTITY.md";
+    "AGENTS.md";
+    "SOUL.md";
+    "USER.md"
+  ] in
+
+  (* Load workspace files *)
+  List.iter (fun filename ->
+    match load_workspace_file filename with
+    | Some content -> parts := !parts @ [content]
+    | None -> ()
+  ) workspace_files;
+
+  (* Load skills *)
+  let skills = Skills.load_skills () in
+  if skills <> [] then
+    parts := !parts @ [Skills.skills_to_prompt skills];
+
+  (* Build final prompt *)
+  if !parts = [] then
+    "You are a helpful AI assistant with access to tools. Use tools when helpful to answer questions about files, directories, or to search the web."
+  else
+    String.concat "\n\n---\n\n" !parts
+
 (* Enhanced agent that uses our LLM provider with memory *)
 let call_llm_api message config session_id =
   (* Get or create conversation session *)
-  let session = 
+  let session =
     match Memory.get_history session_id 1 with
     | Some _ -> Memory.create_session session_id (* Already exists, just get it *)
     | None -> Memory.create_session session_id
   in
-  
+
   (* Build context with conversation history *)
-  let system_prompt = "You are a helpful AI assistant." in
-  let context_json = 
+  let system_prompt = build_system_prompt () in
+  let context_json =
     match Memory.build_context session_id system_prompt 4000 with
     | Some json -> json
-    | None -> 
+    | None ->
         `List [`Assoc [("role", `String "system"); ("content", `String system_prompt)]]
   in
-  
+
   (* Convert context to LLM message format *)
   let context_messages = context_json |> to_list in
-  let llm_messages = 
+  let llm_messages =
     context_messages @ [
       `Assoc [
         ("role", `String "user");
@@ -53,7 +99,7 @@ let call_llm_api message config session_id =
       ]
     ]
   in
-  
+
   (* Convert JSON messages to LLM message format *)
   let llm_messages_structured = List.map (fun msg_json ->
     let role_str = msg_json |> member "role" |> to_string in
@@ -65,20 +111,64 @@ let call_llm_api message config session_id =
       LLM.tool_calls = []
     }
   ) llm_messages in
-  
-  (* Call the LLM provider *)
-  let result = LLM.call_llm config.provider llm_messages_structured () in
-  
+
+  (* Get tools JSON for LLM *)
+  let tools_json = Tools.tools_to_json () in
+
+  (* Call the LLM provider with tools *)
+  let result = LLM.call_llm config.provider llm_messages_structured ~tools:(Some tools_json) () in
+
   match result with
   | LLM.Error error -> `Error error
   | LLM.Success llm_response ->
-      (* The LLM provider already parsed the JSON, so we can use the structured response *)
-      (* Extract the assistant's response from the parsed LLM response *)
+      (* Check if there are tool calls in the response *)
       if llm_response.LLM.choices <> [] then
         let first_choice = List.hd llm_response.LLM.choices in
-        (* Add assistant response to memory *)
-        let _ = Memory.add_message session first_choice.LLM.message.LLM.content "assistant" Memory.default_cleanup_policy in
-        `Success first_choice.LLM.message.LLM.content
+        let tool_calls = first_choice.LLM.message.LLM.tool_calls in
+
+        if tool_calls <> [] then (
+          (* Execute tool calls and return results *)
+          Log.debug (fun m -> m "Processing %d tool calls" (List.length tool_calls));
+          let tool_results = List.map (fun tool_call ->
+            let args_json = Yojson.Basic.from_string tool_call.LLM.function_args in
+            let result = Tools.execute_tool tool_call.LLM.function_name args_json in
+            Log.debug (fun m -> m "Tool %s returned: %s" tool_call.LLM.function_name
+              (if String.length result > 100 then String.sub result 0 100 ^ "..." else result));
+            (tool_call.LLM.id, tool_call.LLM.function_name, result)
+          ) tool_calls in
+
+          (* Add assistant message with tool calls to memory *)
+          let _ = Memory.add_message session first_choice.LLM.message.LLM.content "assistant" Memory.default_cleanup_policy in
+
+          (* Create tool response messages and recurse *)
+          let tool_messages = List.map (fun (id, name, result) ->
+            {
+              LLM.role = LLM.Tool;
+              content = result;
+              LLM.tool_call_id = Some id;
+              LLM.tool_calls = []
+            }
+          ) tool_results in
+
+          (* Recurse with tool results *)
+          let new_messages = llm_messages_structured @ [first_choice.LLM.message] @ tool_messages in
+          let result2 = LLM.call_llm config.provider new_messages ~tools:(Some tools_json) () in
+
+          match result2 with
+          | LLM.Error error -> `Error error
+          | LLM.Success llm_response2 ->
+              if llm_response2.LLM.choices <> [] then
+                let choice2 = List.hd llm_response2.LLM.choices in
+                (* Add final response to memory *)
+                let _ = Memory.add_message session choice2.LLM.message.LLM.content "assistant" Memory.default_cleanup_policy in
+                `Success choice2.LLM.message.LLM.content
+              else
+                `Error "No choices in LLM response after tool execution"
+        ) else (
+          (* No tool calls, just return the text response *)
+          let _ = Memory.add_message session first_choice.LLM.message.LLM.content "assistant" Memory.default_cleanup_policy in
+          `Success first_choice.LLM.message.LLM.content
+        )
       else
         `Error "No choices in LLM response"
 
@@ -119,7 +209,18 @@ let agent_loop config =
   in
   loop ()
 
+(* Command line flags *)
+let single_shot = ref false
+
+(* Parse command line arguments *)
+let spec = [
+  ("--single-shot", Arg.Unit (fun () -> single_shot := true), " Run in single-shot mode (read from stdin, output response, exit)");
+  ("--test", Arg.Unit (fun () -> single_shot := true), " Alias for --single-shot");
+]
+
 let () =
+  (* Parse command line arguments *)
+  Arg.parse spec (fun _ -> ()) "Usage: oclaw [--single-shot]";
   (* Initialize logging *)
   Logs.set_level (Some Logs.Info);
   Logs.set_reporter (Logs_fmt.reporter ());
@@ -155,42 +256,54 @@ let () =
   
   (* Initialize tools system *)
   Tools.init_default_tools ();
-  let tool_count = 
-    [Tools.get_tool "web_search"; Tools.get_tool "read_file"; Tools.get_tool "execute_command"] 
-    |> List.filter (fun x -> x <> None) 
+  let tool_count =
+    [Tools.get_tool "web_search"; Tools.get_tool "read_file"; Tools.get_tool "execute_command"; Tools.get_tool "list_directory"]
+    |> List.filter (fun x -> x <> None)
     |> List.length
   in
   Printf.printf "Tools system initialized with %d tools\n" tool_count;
   
   (* Create LLM provider configuration from config *)
   let provider = Config.to_llm_provider_config config in
-  
-  (* Simple test - make a test API call *)
+
+  (* Create agent config *)
   let config = {
     provider = provider;
     temperature = 0.7;
-    max_tokens = 100;
+    max_tokens = config.llm_max_tokens;
     timeout = 60;
   } in
-  
-  let test_message = {
-    content = "Hello! This is OClaw OCaml version talking to Qwen3.5+. What's the capital of France?";
-    sender = "test_user";
-    channel = "test";
-    chat_id = "test_session"
-  } in
-  
-  Printf.printf "Testing LLM API call with DashScope Qwen3.5+...\n";
-  match call_llm_api test_message config "test_session" with
-  | `Error error -> Printf.printf "LLM API Error: %s\n" error
-  | `Success response -> 
-      Printf.printf "LLM API Response:\n%s\n" response;
-      Printf.printf "Response length: %d characters\n" (String.length response)
-  ;
-  
-  Printf.printf "OClaw initialization complete.\n";
-  Printf.printf "Successfully connected to DashScope Qwen3.5+ API!\n";
-  
-  (* Start interactive agent loop *)
-  Printf.printf "\nStarting interactive mode (type 'exit' to quit)...\n";
-  agent_loop config
+
+  (* In single-shot mode, skip the test output *)
+  if not !single_shot then (
+    Printf.printf "OClaw initialization complete.\n";
+    Printf.printf "Successfully connected to DashScope Qwen3.5+ API!\n"
+  );
+
+  (* Handle single-shot mode vs interactive mode *)
+  if !single_shot then (
+    (* Single-shot mode: read from stdin, process, output and exit *)
+    Log.info (fun m -> m "Running in single-shot mode");
+    try
+      let input = read_line () in
+      let message = {
+        content = input;
+        sender = "user";
+        channel = "cli";
+        chat_id = "single_shot"
+      } in
+      match call_llm_api message config "single_shot_session" with
+      | `Error error ->
+          Printf.printf "Error: %s\n" error;
+          exit 1
+      | `Success response ->
+          Printf.printf "%s\n" response;
+          exit 0
+    with End_of_file ->
+      Log.info (fun m -> m "No input provided in single-shot mode");
+      exit 0
+  ) else (
+    (* Start interactive agent loop *)
+    Printf.printf "\nStarting interactive mode (type 'exit' to quit)...\n";
+    agent_loop config
+  )

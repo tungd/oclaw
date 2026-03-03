@@ -14,9 +14,9 @@ type tool_definition = {
 (* Web search tool *)
 let web_search_tool = {
   name = "web_search";
-  description = "Search the web for information";
+  description = "Search the web for current information on any topic";
   parameters = [
-    "query", `String "The search query"
+    "query", `String "string: The search query to look up"
   ];
   execute = fun _ query ->
     (* In a real implementation, this would call a search API *)
@@ -26,9 +26,9 @@ let web_search_tool = {
 (* File read tool *)
 let file_read_tool = {
   name = "read_file";
-  description = "Read the contents of a file";
+  description = "Read and return the complete contents of a file from the filesystem";
   parameters = [
-    "path", `String "The file path"
+    "path", `String "string: The absolute or relative path to the file to read"
   ];
   execute = fun _ path ->
     try
@@ -43,9 +43,9 @@ let file_read_tool = {
 (* Shell command tool *)
 let shell_tool = {
   name = "execute_command";
-  description = "Execute a shell command";
+  description = "Execute a shell command in the current directory and return the output";
   parameters = [
-    "command", `String "The command to execute"
+    "command", `String "string: The shell command to execute (e.g., 'ls -la', 'pwd', 'echo hello')"
   ];
   execute = fun _ cmd ->
     try
@@ -69,6 +69,38 @@ let shell_tool = {
       Printf.sprintf "Error executing command: %s" (Printexc.to_string exn)
 }
 
+(* Directory list tool - added to answer "what files are in current directory" *)
+let list_directory_tool = {
+  name = "list_directory";
+  description = "List files and directories in the current or specified path";
+  parameters = [
+    "path", `String "string: The directory path to list (default: current directory)"
+  ];
+  execute = fun _ path ->
+    let cmd = if path = "" || path = "." then "ls -la" else "ls -la " ^ path in
+    try
+      let channel = Unix.open_process_in cmd in
+      let output = Buffer.create 1024 in
+      (try
+        while true do
+          let line = input_line channel in
+          Buffer.add_string output line;
+          Buffer.add_char output '\n'
+        done
+      with End_of_file -> ());
+      let status = Unix.close_process_in channel in
+      let exit_code = match status with
+        | Unix.WEXITED code -> code
+        | Unix.WSIGNALED signal -> -signal
+        | Unix.WSTOPPED signal -> -signal
+      in
+      Printf.sprintf "Directory listing for %s:\n%s\nExit status: %d"
+        (if path = "" || path = "." then "current directory" else path)
+        (Buffer.contents output) exit_code
+    with exn ->
+      Printf.sprintf "Error listing directory: %s" (Printexc.to_string exn)
+}
+
 (* Tool registry *)
 let tool_registry = ref []
 
@@ -84,10 +116,17 @@ let get_tool name =
 let execute_tool tool_name arguments =
   match get_tool tool_name with
   | Some tool ->
-      (* Parse arguments - simple implementation for now *)
+      (* Parse arguments from JSON *)
       let arg_string = match arguments with
         | `Assoc args ->
-            List.map (fun (k, v) -> Printf.sprintf "%s=%s" k (to_string v)) args |> String.concat ", "
+            (* Extract parameter values - for single param tools, just get the value *)
+            if List.length args = 1 then
+              (* Single parameter - return just the value *)
+              to_string (snd (List.hd args))
+            else
+              (* Multiple parameters - could be enhanced to pass named args *)
+              List.map (fun (k, v) -> Printf.sprintf "%s=%s" k (to_string v)) args |> String.concat ", "
+        | `String s -> s
         | _ -> to_string arguments
       in
       tool.execute tool_name arg_string
@@ -98,19 +137,47 @@ let execute_tool tool_name arguments =
 let init_default_tools () =
   register_tool web_search_tool;
   register_tool file_read_tool;
-  register_tool shell_tool
+  register_tool shell_tool;
+  register_tool list_directory_tool
 
-(* Convert tools to JSON for LLM API *)
+(* Convert tools to JSON for LLM API - OpenAI format *)
 let tools_to_json () =
   let tool_list = List.map (fun tool ->
+    (* Build JSON Schema for parameters *)
+    let parameters_obj = `Assoc [
+      ("type", `String "object");
+      ("properties", `Assoc (
+        List.map (fun (name, schema) ->
+          (* Each parameter has type and description *)
+          match schema with
+          | `String desc ->
+              (* Parse "type: description" format if present *)
+              let parts = String.split_on_char ':' desc in
+              if List.length parts >= 2 then
+                let param_type = String.trim (List.hd (List.rev parts)) in
+                let param_desc = String.trim (String.concat ":" (List.rev (List.tl (List.rev parts)))) in
+                (name, `Assoc [
+                  ("type", `String param_type);
+                  ("description", `String param_desc)
+                ])
+              else
+                (name, `Assoc [
+                  ("type", `String "string");
+                  ("description", `String desc)
+                ])
+          | _ -> (name, `Assoc [("type", `String "string"); ("description", `String "")])
+        ) tool.parameters
+      ));
+      ("required", `List (
+        List.map (fun (name, _) -> `String name) tool.parameters
+      ))
+    ] in
     `Assoc [
       ("type", `String "function");
       ("function", `Assoc [
         ("name", `String tool.name);
         ("description", `String tool.description);
-        ("parameters", `Assoc (
-          List.map (fun (name, schema) -> (name, schema)) tool.parameters
-        ))
+        ("parameters", parameters_obj)
       ])
     ]
   ) !tool_registry in
