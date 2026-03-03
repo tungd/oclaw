@@ -1,0 +1,69 @@
+(library
+ (name http_client)
+ (modules http_client)
+ (libraries curl iomux yojson)
+ (preprocess (pps ppx_deriving.show))
+ (flags :standard -w -A))
+
+(library
+ (name llm_provider)
+ (modules llm_provider)
+ (libraries http_client curl iomux yojson)
+ (preprocess (pps ppx_deriving.show))
+ (flags :standard -w -A))
+
+(library
+ (name tools)
+ (modules tools)
+ (libraries http_client curl iomux yojson)
+ (preprocess (pps ppx_deriving.show))
+ (flags :standard -w -A))
+
+(library
+ (name memory)
+ (modules memory)
+ (libraries yojson unix)
+ (preprocess (pps ppx_deriving.show))
+ (flags :standard -w -A))
+
+(library
+ (name nanobot_config)
+ (modules config_json)
+ (libraries yojson llm_provider)
+ (preprocess (pps ppx_deriving.show))
+ (flags :standard -w -A))
+
+(executable
+ (name nanobot)
+ (modules nanobot)
+ (libraries nanobot_config memory tools llm_provider http_client curl iomux yojson)
+ (preprocess (pps ppx_deriving.show))
+ (flags :standard -w -A))
+
+(executable
+ (name test_http)
+ (modules test_http)
+ (libraries http_client curl iomux yojson)
+ (preprocess (pps ppx_deriving.show))
+ (flags :standard -w -A))
+
+(executable
+ (name test_llm)
+ (modules test_llm)
+ (libraries llm_provider http_client curl iomux yojson)
+ (preprocess (pps ppx_deriving.show))
+ (flags :standard -w -A))
+
+(executable
+ (name test_memory)
+ (modules test_memory)
+ (libraries memory yojson unix)
+ (preprocess (pps ppx_deriving.show))
+ (flags :standard -w -A))
+
+(executable
+ (name test_memory_cleanup)
+ (modules test_memory_cleanup)
+ (libraries memory yojson unix)
+ (preprocess (pps ppx_deriving.show))
+ (flags :standard -w -A))
