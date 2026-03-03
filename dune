@@ -27,16 +27,16 @@
  (flags :standard -w -A))
 
 (library
- (name nanobot_config)
+ (name oclaw_config)
  (modules config_json)
  (libraries yojson llm_provider)
  (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))
 
 (executable
- (name nanobot)
- (modules nanobot)
- (libraries nanobot_config memory tools llm_provider http_client curl iomux yojson)
+ (name oclaw)
+ (modules oclaw)
+ (libraries oclaw_config memory tools llm_provider http_client curl iomux yojson)
  (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))
 

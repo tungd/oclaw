@@ -58,7 +58,7 @@ let default_config = {
   agent_memory_window = 10;
   agent_max_iterations = 5;
   debug = false;
-  log_file = Some "nanobot.log"
+  log_file = Some "oclaw.log"
 }
 
 (* Load configuration from JSON file *)
@@ -82,7 +82,7 @@ let load_config filename =
       debug = json |> member "debug" |> to_bool_with_default false;
       log_file = 
         try Some (json |> member "log_file" |> to_string)
-        with _ -> Some "nanobot.log"
+        with _ -> Some "oclaw.log"
     }
   with exn ->
     Printf.printf "Error loading config: %s\nUsing default configuration.\n" (Printexc.to_string exn);

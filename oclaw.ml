@@ -1,4 +1,4 @@
-(* nanobot - OCaml port of the ultra-lightweight personal AI assistant *)
+(* OClaw - OCaml port of the ultra-lightweight personal AI assistant *)
 
 open Yojson.Basic.Util
 
@@ -87,7 +87,7 @@ let test_http_client () =
 
 (* Simple agent loop *)
 let agent_loop config =
-  Printf.printf "nanobot agent started with model: %s\n" config.provider.LLM.model.LLM.name;
+  Printf.printf "OClaw agent started with model: %s\n" config.provider.LLM.model.LLM.name;
   
   (* Main loop - in a real implementation this would process messages from a queue *)
   let rec loop () =
@@ -116,7 +116,7 @@ let agent_loop config =
   loop ()
 
 let () =
-  Printf.printf "nanobot OCaml version - starting...\n";
+  Printf.printf "OClaw OCaml version - starting...\n";
   test_http_client ();
   
   (* Load configuration *)
@@ -159,7 +159,7 @@ let () =
   } in
   
   let test_message = {
-    content = "Hello! This is nanobot OCaml version talking to Qwen3.5+. What's the capital of France?";
+    content = "Hello! This is OClaw OCaml version talking to Qwen3.5+. What's the capital of France?";
     sender = "test_user";
     channel = "test";
     chat_id = "test_session"
@@ -173,7 +173,7 @@ let () =
       Printf.printf "Response length: %d characters\n" (String.length response)
   ;
   
-  Printf.printf "nanobot initialization complete.\n";
+  Printf.printf "OClaw initialization complete.\n";
   Printf.printf "Successfully connected to DashScope Qwen3.5+ API!\n";
   
   (* Start interactive agent loop *)

@@ -1,8 +1,8 @@
-# OCaml Nanobot - Ultra-Lightweight Personal AI Assistant
+# OCaml OClaw - Ultra-Lightweight Personal AI Assistant
 
 ## Overview
 
-**OCaml Nanobot** is a port of the Python nanobot project to OCaml, leveraging OCaml 5's native Domains capability for parallelism. This implementation replaces Python's httpx HTTP client with curl/curl.multi and iomux for efficient concurrent requests.
+**OCaml OClaw** is a port of the Python nanobot project to OCaml, leveraging OCaml 5's native Domains capability for parallelism. This implementation replaces Python's httpx HTTP client with curl/curl.multi and iomux for efficient concurrent requests.
 
 ## Features
 
@@ -25,7 +25,7 @@ oclaw/
 ├── memory.ml/mli         # Memory and conversation history
 ├── tools.ml/mli           # Tool system implementation
 ├── config_json.ml/mli     # Configuration system
-├── nanobot.ml            # Main agent implementation
+├── oclaw.ml              # Main agent implementation
 ├── test_*.ml             # Test suites
 └── README.md              # This file
 ```
@@ -204,10 +204,10 @@ dune exec ./test_llm.exe
 
 ```bash
 # Start interactive mode
-dune exec ./nanobot.exe
+dune exec ./oclaw.exe
 
 # Single-shot mode
-echo "What is the capital of France?" | dune exec ./nanobot.exe -- --single-shot
+echo "What is the capital of France?" | dune exec ./oclaw.exe -- --single-shot
 ```
 
 ## Configuration
@@ -238,7 +238,7 @@ The agent uses a JSON configuration file (`config.json`):
 
 ## Parallel Execution
 
-OCaml Nanobot leverages OCaml 5's Domains for parallel tool execution:
+OCaml OClaw leverages OCaml 5's Domains for parallel tool execution:
 
 ```ocaml
 (* Example: Parallel tool execution *)
@@ -284,6 +284,6 @@ This project is licensed under the MIT License. See the LICENSE file for details
 
 ## Acknowledgments
 
-- Inspired by the original Python nanobot project
+- Inspired by the original Python nanobot project (but named OClaw)
 - Built with OCaml 5's advanced concurrency features
 - Uses efficient system libraries for optimal performance

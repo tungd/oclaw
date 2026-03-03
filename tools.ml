@@ -1,4 +1,4 @@
-(** Tools module for nanobot - web search, file operations, etc. *)
+(** Tools module for OClaw - web search, file operations, etc. *)
 
 open Http_client
 open Yojson.Basic.Util

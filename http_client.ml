@@ -88,7 +88,7 @@ let init_curl_handle () =
   Curl.set_timeout handle 30;
   Curl.set_followlocation handle true;
   Curl.set_maxredirs handle 5;
-  Curl.set_useragent handle "nanobot-ocaml/1.0";
+  Curl.set_useragent handle "oclaw-ocaml/1.0";
   handle
 
 let set_request_options handle req =

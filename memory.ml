@@ -1,4 +1,4 @@
-(** Memory and conversation history system for nanobot *)
+(** Memory and conversation history system for OClaw *)
 
 open Yojson.Basic.Util
 

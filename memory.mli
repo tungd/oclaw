@@ -1,4 +1,4 @@
-(** Memory and conversation history system for nanobot *)
+(** Memory and conversation history system for OClaw *)
 
 (** Conversation message type *)
 type conversation_message = {
