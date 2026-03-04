@@ -1,11 +1,28 @@
 (** Tools module for OClaw - web search, file operations, etc. *)
 
+(** Sandbox and safety configuration for tools. *)
+type sandbox_config = {
+  workspace_root : string;
+  restrict_to_workspace : bool;
+  allow_read_paths : string list;
+  allow_write_paths : string list;
+  exec_timeout_seconds : int;
+  exec_enable_deny_patterns : bool;
+  exec_custom_deny_patterns : string list;
+  exec_custom_allow_patterns : string list;
+  web_fetch_max_chars : int;
+  web_fetch_max_bytes : int;
+}
+
+val default_sandbox_config : sandbox_config
+val set_sandbox_config : sandbox_config -> unit
+
 (** Tool definition type *)
 type tool_definition = {
   name : string;
   description : string;
   parameters : (string * Yojson.Safe.t) list;
-  execute : string -> string -> string
+  execute : Yojson.Safe.t -> string;
 }
 
 (** Web search tool *)
@@ -30,7 +47,7 @@ val get_all_tools : unit -> (string * string) list
 val execute_tool : string -> Yojson.Safe.t -> string
 
 (** Initialize default tools *)
-val init_default_tools : unit -> unit
+val init_default_tools : ?sandbox_config:sandbox_config -> unit -> unit
 
 (** Convert tools to JSON for LLM API *)
 val tools_to_json : unit -> Yojson.Safe.t

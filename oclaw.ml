@@ -274,19 +274,28 @@ let () =
     else `interactive
   in
 
+  let sandbox_config = {
+    Tools.workspace_root = config.tools_workspace;
+    restrict_to_workspace = config.tools_restrict_to_workspace;
+    allow_read_paths = config.tools_allow_read_paths;
+    allow_write_paths = config.tools_allow_write_paths;
+    exec_timeout_seconds = config.tools_exec_timeout_seconds;
+    exec_enable_deny_patterns = config.tools_exec_enable_deny_patterns;
+    exec_custom_deny_patterns = config.tools_exec_custom_deny_patterns;
+    exec_custom_allow_patterns = config.tools_exec_custom_allow_patterns;
+    web_fetch_max_chars = config.tools_web_fetch_max_chars;
+    web_fetch_max_bytes = config.tools_web_fetch_max_bytes;
+  } in
+
+  Tools.init_default_tools ~sandbox_config ();
+  let tool_count = List.length (Tools.get_all_tools ()) in
+  Printf.printf "Tools system initialized with %d tools\n" tool_count;
+
   (match mode with
   | `server ->
       Printf.printf "Starting in server mode with effect handlers...\n";
       run_server_mode config
   | `single_shot | `interactive ->
-      Tools.init_default_tools ();
-      let tool_count =
-        [Tools.get_tool "web_search"; Tools.get_tool "read_file"; Tools.get_tool "execute_command"; Tools.get_tool "list_directory"]
-        |> List.filter (fun x -> x <> None)
-        |> List.length
-      in
-      Printf.printf "Tools system initialized with %d tools\n" tool_count;
-
       let provider = Config.to_llm_provider_config config in
       let agent_config = {
         provider = provider;

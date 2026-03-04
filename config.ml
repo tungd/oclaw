@@ -16,6 +16,16 @@ type config = {
   tools_enabled : bool [@default true];
   tools_max_concurrent : int [@default 3];
   tools_timeout : int [@default 30];
+  tools_workspace : string [@default "."];
+  tools_restrict_to_workspace : bool [@default true];
+  tools_allow_read_paths : string list [@default []];
+  tools_allow_write_paths : string list [@default []];
+  tools_exec_timeout_seconds : int [@default 60];
+  tools_exec_enable_deny_patterns : bool [@default true];
+  tools_exec_custom_deny_patterns : string list [@default []];
+  tools_exec_custom_allow_patterns : string list [@default []];
+  tools_web_fetch_max_chars : int [@default 50000];
+  tools_web_fetch_max_bytes : int [@default 10485760];
   agent_system_prompt : string [@default "You are a helpful AI assistant."];
   agent_memory_window : int [@default 10];
   agent_max_iterations : int [@default 5];
@@ -99,6 +109,12 @@ let validate_config config =
     errors := "Tools max_concurrent must be positive" :: !errors;
   if config.tools_timeout <= 0 then
     errors := "Tools timeout must be positive" :: !errors;
+  if config.tools_exec_timeout_seconds <= 0 then
+    errors := "Tools exec_timeout_seconds must be positive" :: !errors;
+  if config.tools_web_fetch_max_chars <= 0 then
+    errors := "Tools web_fetch_max_chars must be positive" :: !errors;
+  if config.tools_web_fetch_max_bytes <= 0 then
+    errors := "Tools web_fetch_max_bytes must be positive" :: !errors;
 
   (* Check agent configuration *)
   if config.agent_memory_window <= 0 then

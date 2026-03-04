@@ -118,14 +118,16 @@ let handle_llm_request ~llm_config (req : Llm_types.llm_request) =
 
 let handle_tool_call (tool_call : Llm_types.tool_call) =
   Log.debug (fun m -> m "Handling tool call: %s" tool_call.function_name);
-  let _args_json = Yojson.Safe.from_string tool_call.function_args in
   try
-    match Tools.get_tool tool_call.function_name with
-    | Some tool ->
-        let result_str = tool.Tools.execute tool_call.function_name tool_call.function_args in
-        { Session_types.name = tool_call.function_name; result = result_str; error = None }
-    | None ->
-        { Session_types.name = tool_call.function_name; result = ""; error = Some "Tool not found" }
+    let args_json =
+      try Yojson.Safe.from_string tool_call.function_args
+      with _ -> `Assoc []
+    in
+    let result_str = Tools.execute_tool tool_call.function_name args_json in
+    if String.starts_with ~prefix:"Tool " result_str && String.ends_with ~suffix:" not found" result_str then
+      { Session_types.name = tool_call.function_name; result = ""; error = Some "Tool not found" }
+    else
+      { Session_types.name = tool_call.function_name; result = result_str; error = None }
   with exn ->
     Log.err (fun m -> m "Tool execution error: %s" (Printexc.to_string exn));
     { Session_types.name = tool_call.function_name; result = ""; error = Some (Printexc.to_string exn) }

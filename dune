@@ -16,7 +16,7 @@
 (library
  (name tools)
  (modules tools)
- (libraries http_client curl iomux yojson)
+ (libraries http_client curl iomux yojson unix)
  (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))
 
