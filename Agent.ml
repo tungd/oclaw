@@ -3,6 +3,7 @@
 open Effect.Deep
 open Effects
 open Llm_types
+open Yojson.Safe.Util
 
 module Log = (val Logs.src_log (Logs.Src.create "agent") : Logs.LOG)
 
@@ -156,6 +157,163 @@ module Knowledge = struct
     result
 end
 
+module Subagent_runtime = struct
+  type status = Running | Completed | Failed | Killed
+
+  type task = {
+    id : string;
+    label : string;
+    task : string;
+    mutable status : status;
+    mutable result : string option;
+    mutable error : string option;
+    created_at : float;
+    mutable started_at : float option;
+    mutable finished_at : float option;
+    mutable cancel_requested : bool;
+  }
+
+  type t = {
+    tasks : (string, task) Hashtbl.t;
+    mutex : Mutex.t;
+    mutable next_id : int;
+  }
+
+  let create () =
+    { tasks = Hashtbl.create 32; mutex = Mutex.create (); next_id = 1 }
+
+  let with_lock t f =
+    Mutex.lock t.mutex;
+    try
+      let v = f () in
+      Mutex.unlock t.mutex;
+      v
+    with exn ->
+      Mutex.unlock t.mutex;
+      raise exn
+
+  let now () = Unix.gettimeofday ()
+
+  let status_to_string = function
+    | Running -> "running"
+    | Completed -> "completed"
+    | Failed -> "failed"
+    | Killed -> "killed"
+
+  let task_to_json task =
+    `Assoc [
+      ("id", `String task.id);
+      ("label", `String task.label);
+      ("task", `String task.task);
+      ("status", `String (status_to_string task.status));
+      ("result", match task.result with Some s -> `String s | None -> `Null);
+      ("error", match task.error with Some s -> `String s | None -> `Null);
+      ("created_at", `Float task.created_at);
+      ("started_at", match task.started_at with Some s -> `Float s | None -> `Null);
+      ("finished_at", match task.finished_at with Some s -> `Float s | None -> `Null)
+    ]
+
+  let spawn t ~task ~label ~run =
+    let id, created =
+      with_lock t (fun () ->
+        let id = Printf.sprintf "subagent-%d" t.next_id in
+        t.next_id <- t.next_id + 1;
+        let created = now () in
+        let sub_task = {
+          id;
+          label = Option.value ~default:id label;
+          task;
+          status = Running;
+          result = None;
+          error = None;
+          created_at = created;
+          started_at = Some created;
+          finished_at = None;
+          cancel_requested = false;
+        } in
+        Hashtbl.replace t.tasks id sub_task;
+        id, created)
+    in
+    let _ =
+      Domain.spawn (fun () ->
+        let cancelled () =
+          with_lock t (fun () ->
+            match Hashtbl.find_opt t.tasks id with
+            | Some sub_task -> sub_task.cancel_requested || sub_task.status = Killed
+            | None -> true)
+        in
+        let finish status result error =
+          with_lock t (fun () ->
+            match Hashtbl.find_opt t.tasks id with
+            | None -> ()
+            | Some sub_task ->
+                if sub_task.status = Killed then (
+                  sub_task.finished_at <- Some (now ());
+                  if sub_task.error = None then sub_task.error <- Some "Subagent canceled"
+                ) else (
+                  sub_task.status <- status;
+                  sub_task.result <- result;
+                  sub_task.error <- error;
+                  sub_task.finished_at <- Some (now ())
+                ))
+        in
+        try
+          if cancelled () then
+            finish Killed None (Some "Subagent canceled before execution")
+          else
+            match run ~cancel_requested:cancelled with
+            | Ok output -> finish Completed (Some output) None
+            | Error err ->
+                if cancelled () then
+                  finish Killed None (Some "Subagent canceled")
+                else
+                  finish Failed None (Some err)
+        with exn ->
+          finish Failed None (Some (Printexc.to_string exn)))
+    in
+    id, created
+
+  let list_tasks ?status t () =
+    with_lock t (fun () ->
+      let status_filter = Option.map (fun s -> String.lowercase_ascii (String.trim s)) status in
+      let tasks =
+        Hashtbl.fold (fun _ sub_task acc ->
+          let should_include =
+            match status_filter with
+            | None -> true
+            | Some s -> String.equal s (status_to_string sub_task.status)
+          in
+          if should_include then sub_task :: acc else acc
+        ) t.tasks []
+        |> List.sort (fun a b -> Float.compare b.created_at a.created_at)
+      in
+      `Assoc [
+        ("count", `Int (List.length tasks));
+        ("tasks", `List (List.map task_to_json tasks))
+      ])
+
+  let status t id =
+    with_lock t (fun () ->
+      match Hashtbl.find_opt t.tasks id with
+      | None -> Error (Printf.sprintf "Subagent not found: %s" id)
+      | Some sub_task -> Ok (task_to_json sub_task))
+
+  let kill t id =
+    with_lock t (fun () ->
+      match Hashtbl.find_opt t.tasks id with
+      | None -> Error (Printf.sprintf "Subagent not found: %s" id)
+      | Some sub_task ->
+          if sub_task.status <> Running then
+            Error (Printf.sprintf "Subagent %s is not running (status: %s)" id (status_to_string sub_task.status))
+          else (
+            sub_task.cancel_requested <- true;
+            sub_task.status <- Killed;
+            sub_task.finished_at <- Some (now ());
+            sub_task.error <- Some "Subagent canceled by user request";
+            Ok (task_to_json sub_task)
+          ))
+end
+
 (* {1 Agent } *)
 
 module Agent = struct
@@ -166,12 +324,14 @@ module Agent = struct
     model : string;
     default_temperature : float;
     max_tokens : int;
+    subagents : Subagent_runtime.t;
   }
 
   let create ~llm_config ~model ?(temperature=0.7) ?(max_tokens=4096) () =
     let session_manager = Session_manager.create () in
     let knowledge = Knowledge.load () in
-    { llm_config; session_manager; knowledge; model; default_temperature = temperature; max_tokens }
+    let subagents = Subagent_runtime.create () in
+    { llm_config; session_manager; knowledge; model; default_temperature = temperature; max_tokens; subagents }
 
   let refresh_knowledge agent =
     Knowledge.refresh agent.knowledge
@@ -203,8 +363,11 @@ module Agent = struct
       metadata = [];
     }
 
-  let get_tools_json () =
-    let all_tools = Tools.get_all_tools () in
+  let get_tools_json ?(exclude=[]) () =
+    let all_tools =
+      Tools.get_all_tools ()
+      |> List.filter (fun (name, _) -> not (List.exists (String.equal name) exclude))
+    in
     List.map (fun (name, desc) ->
       let tool = match Tools.get_tool name with
         | Some t -> t
@@ -218,8 +381,8 @@ module Agent = struct
               | `String s ->
                   let parts = String.split_on_char ':' s in
                   if List.length parts >= 2 then
-                    let ptype = String.trim (List.hd (List.rev parts)) in
-                    let pdesc = String.trim (String.concat ":" (List.rev (List.tl (List.rev parts)))) in
+                    let ptype = String.trim (List.hd parts) in
+                    let pdesc = String.trim (String.concat ":" (List.tl parts)) in
                     (pname, `Assoc [("type", `String ptype); ("description", `String pdesc)])
                   else
                     (pname, `Assoc [("type", `String "string"); ("description", `String s)])
@@ -235,12 +398,156 @@ module Agent = struct
       { type_ = "function"; function_ = { name = tool.Tools.name; description = tool.Tools.description; parameters } }
     ) all_tools
 
+  let llm_tools_to_json (tools : Llm_types.tool_definition list) : Yojson.Safe.t =
+    `List (List.map (fun (tool : Llm_types.tool_definition) ->
+      `Assoc [
+        ("type", `String tool.type_);
+        ("function", `Assoc [
+          ("name", `String tool.function_.name);
+          ("description", `String tool.function_.description);
+          ("parameters", tool.function_.parameters);
+        ])
+      ]
+    ) tools)
+
+  let parse_tool_args tool_call =
+    try Yojson.Safe.from_string tool_call.Llm_types.function_args
+    with _ -> `Assoc []
+
+  let json_string_opt json field =
+    match member field json with
+    | `String s ->
+        let s = String.trim s in
+        if s = "" then None else Some s
+    | _ -> None
+
+  let run_subagent_task agent ~subagent_tools_json ~task ~cancel_requested =
+    let llm_config = {
+      agent.llm_config with
+      temperature = agent.default_temperature;
+      max_tokens = agent.max_tokens;
+    } in
+    let max_tool_rounds = 8 in
+    let rec resolve_with_tools current_messages rounds_remaining =
+      if cancel_requested () then
+        Error "Subagent canceled"
+      else
+        match Llm_provider.call_llm llm_config current_messages ~tools:(Some subagent_tools_json) () with
+        | Llm_provider.Error err -> Error err
+        | Llm_provider.Success resp ->
+            if resp.Llm_provider.choices = [] then
+              Error "No choices in subagent LLM response"
+            else
+              let choice = List.hd resp.Llm_provider.choices in
+              let tool_calls = choice.Llm_provider.message.Llm_provider.tool_calls in
+              if tool_calls = [] then
+                Ok choice.Llm_provider.message.Llm_provider.content
+              else if rounds_remaining <= 0 then
+                Error "Subagent tool-call recursion limit exceeded"
+              else
+                let tool_messages = List.map (fun tool_call ->
+                  let args_json =
+                    try Yojson.Safe.from_string tool_call.Llm_provider.function_args
+                    with _ -> `Assoc []
+                  in
+                  let result = Tools.execute_tool tool_call.Llm_provider.function_name args_json in
+                  {
+                    Llm_provider.role = Llm_provider.Tool;
+                    content = result;
+                    Llm_provider.tool_call_id = Some tool_call.Llm_provider.id;
+                    Llm_provider.tool_calls = [];
+                  }
+                ) tool_calls in
+                let next_messages = current_messages @ [choice.Llm_provider.message] @ tool_messages in
+                resolve_with_tools next_messages (rounds_remaining - 1)
+    in
+    let subagent_messages = [
+      {
+        Llm_provider.role = Llm_provider.System;
+        content = "You are a background subagent. Complete the delegated task independently. Use tools when useful, then return a concise final result.";
+        Llm_provider.tool_call_id = None;
+        Llm_provider.tool_calls = [];
+      };
+      {
+        Llm_provider.role = Llm_provider.User;
+        content = task;
+        Llm_provider.tool_call_id = None;
+        Llm_provider.tool_calls = [];
+      };
+    ] in
+    resolve_with_tools subagent_messages max_tool_rounds
+
+  let handle_subagent_tool_call agent ~subagent_tools_json (call : Llm_types.tool_call)
+      : Session_types.tool_response option =
+    let args = parse_tool_args call in
+    match call.function_name with
+    | "spawn" ->
+        (match json_string_opt args "task" with
+         | None ->
+             Some { Session_types.name = call.function_name; result = ""; error = Some "task is required" }
+         | Some task ->
+             let label = json_string_opt args "label" in
+             let id, created_at =
+               Subagent_runtime.spawn
+                 agent.subagents
+                 ~task
+                 ~label
+                 ~run:(fun ~cancel_requested ->
+                   run_subagent_task agent ~subagent_tools_json ~task ~cancel_requested)
+             in
+             let payload =
+               `Assoc [
+                 ("status", `String "ok");
+                 ("id", `String id);
+                 ("label", match label with Some s -> `String s | None -> `Null);
+                 ("created_at", `Float created_at);
+                 ("message", `String (Printf.sprintf "Spawned subagent %s" id));
+               ]
+               |> Yojson.Safe.pretty_to_string
+             in
+             Some { Session_types.name = call.function_name; result = payload; error = None })
+    | "subagent_list" ->
+        let status = json_string_opt args "status" in
+        let result =
+          Subagent_runtime.list_tasks ?status agent.subagents ()
+          |> Yojson.Safe.pretty_to_string
+        in
+        Some { Session_types.name = call.function_name; result; error = None }
+    | "subagent_manage" ->
+        (match json_string_opt args "action", json_string_opt args "id" with
+         | None, _ ->
+             Some { Session_types.name = call.function_name; result = ""; error = Some "action is required" }
+         | _, None ->
+             Some { Session_types.name = call.function_name; result = ""; error = Some "id is required" }
+         | Some action, Some id ->
+             let action = String.lowercase_ascii action in
+             let handled =
+               match action with
+               | "status" -> Subagent_runtime.status agent.subagents id
+               | "kill" -> Subagent_runtime.kill agent.subagents id
+               | _ -> Error "Invalid action. Expected: status | kill"
+             in
+             (match handled with
+              | Ok json ->
+                  Some {
+                    Session_types.name = call.function_name;
+                    result = (`Assoc [("status", `String "ok"); ("task", json)] |> Yojson.Safe.pretty_to_string);
+                    error = None;
+                  }
+              | Error err ->
+                  Some { Session_types.name = call.function_name; result = ""; error = Some err }))
+    | _ -> None
+
   let rec process_query_internal agent session_id content =
     let session = Session_manager.create_or_get agent.session_manager session_id "." in
     Session.touch session;
 
     let messages = build_messages agent session content in
     let tools = get_tools_json () in
+    let subagent_tools =
+      get_tools_json ~exclude:["spawn"; "subagent_list"; "subagent_manage"] ()
+    in
+    let subagent_tools_json = llm_tools_to_json subagent_tools in
 
     let max_tool_rounds = 8 in
 
@@ -268,7 +575,10 @@ module Agent = struct
 
           (* Execute tools in parallel using domains *)
           let tool_results = List.map (fun call ->
-            Domain.spawn (fun () -> Effects.tool_call call)
+            Domain.spawn (fun () ->
+              match handle_subagent_tool_call agent ~subagent_tools_json call with
+              | Some resp -> resp
+              | None -> Effects.tool_call call)
           ) calls in
 
           (* Wait for all tool results *)
@@ -278,9 +588,15 @@ module Agent = struct
           let tool_msgs =
             List.map2
               (fun (call : Llm_types.tool_call) (result : Session_types.tool_response) ->
+                let content =
+                  match result.error with
+                  | Some e when result.result = "" -> "Error: " ^ e
+                  | Some e -> result.result ^ "\nError: " ^ e
+                  | None -> result.result
+                in
                 {
                   role = Llm_types.Tool;
-                  content = result.result;
+                  content;
                   tool_calls = None;
                   tool_call_id = Some call.id;
                 }

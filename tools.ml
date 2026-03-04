@@ -957,6 +957,46 @@ let cron_tool = {
   );
 }
 
+let spawn_tool = {
+  name = "spawn";
+  description = "Spawn a background subagent to handle a task asynchronously";
+  parameters = [
+    "task", `String "string: Task description for the subagent"
+  ];
+  execute = (fun args ->
+    let args = json_assoc_or_empty args in
+    match required_string_arg args "task" with
+    | Error e -> e
+    | Ok _ ->
+        "Spawn request accepted. (The agent runtime handles execution and tracking.)"
+  );
+}
+
+let subagent_list_tool = {
+  name = "subagent_list";
+  description = "List background subagent tasks";
+  parameters = [];
+  execute = (fun _ ->
+    "Subagent list is provided by the agent runtime."
+  );
+}
+
+let subagent_manage_tool = {
+  name = "subagent_manage";
+  description = "Manage a subagent task: status or kill";
+  parameters = [
+    "action", `String "string: status | kill";
+    "id", `String "string: Subagent task ID"
+  ];
+  execute = (fun args ->
+    let args = json_assoc_or_empty args in
+    match required_string_arg args "action", required_string_arg args "id" with
+    | Error e, _ | _, Error e -> e
+    | Ok _, Ok _ ->
+        "Subagent management is provided by the agent runtime."
+  );
+}
+
 (* Tool registry *)
 let tool_registry = ref []
 
@@ -1007,7 +1047,10 @@ let init_default_tools ?sandbox_config () =
   register_tool list_dir_tool;
   register_tool find_skills_tool;
   register_tool install_skill_tool;
-  register_tool cron_tool
+  register_tool cron_tool;
+  register_tool spawn_tool;
+  register_tool subagent_list_tool;
+  register_tool subagent_manage_tool
 
 let tools_to_json () =
   let tool_list =

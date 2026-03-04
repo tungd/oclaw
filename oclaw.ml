@@ -292,12 +292,14 @@ let () =
       run_server_mode config
   | `single_shot | `interactive ->
       let provider = Config.to_llm_provider_config config in
-      let agent_config = {
-        provider = provider;
-        temperature = 0.7;
-        max_tokens = config.llm_max_tokens;
-        timeout = 60;
-      } in
+      let runtime_agent =
+        Agent.create
+          ~llm_config:provider
+          ~model:config.llm_model
+          ~temperature:config.llm_temperature
+          ~max_tokens:config.llm_max_tokens
+          ()
+      in
 
       if not !single_shot then (
         Printf.printf "OClaw initialization complete.\n";
@@ -308,17 +310,11 @@ let () =
         Log.info (fun m -> m "Running in single-shot mode");
         try
           let input = read_line () in
-          let message = {
-            content = input;
-            sender = "user";
-            channel = "cli";
-            chat_id = "single_shot"
-          } in
-          match call_llm_api message agent_config "single_shot_session" with
-          | `Error error ->
+          match Agent.process_query runtime_agent ~session_id:"single_shot_session" ~content:input with
+          | Error error ->
               Printf.printf "Error: %s\n" error;
               exit 1
-          | `Success response ->
+          | Ok response ->
               Printf.printf "%s\n" response;
               exit 0
         with End_of_file ->
@@ -326,6 +322,19 @@ let () =
           exit 0
       ) else (
         Printf.printf "\nStarting interactive mode (type 'exit' to quit)...\n";
-        agent_loop agent_config
+        let rec loop () =
+          Printf.printf "> ";
+          flush stdout;
+          let input = read_line () in
+          if input = "exit" || input = "quit" then
+            Printf.printf "Goodbye!\n"
+          else (
+            match Agent.process_query runtime_agent ~session_id:"cli_session" ~content:input with
+            | Error error -> Printf.printf "Error: %s\n" error
+            | Ok response -> Printf.printf "Response: %s\n" response;
+            loop ()
+          )
+        in
+        loop ()
       ));
   exit 0
