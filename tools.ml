@@ -152,14 +152,17 @@ let rec mkdir_p dir =
   )
 
 let read_file_full path =
-  let ch = open_in_bin path in
   try
-    let len = in_channel_length ch in
-    let content = really_input_string ch len in
-    close_in ch;
-    Ok content
+    let ch = open_in_bin path in
+    try
+      let len = in_channel_length ch in
+      let content = really_input_string ch len in
+      close_in ch;
+      Ok content
+    with exn ->
+      close_in_noerr ch;
+      Error (Printexc.to_string exn)
   with exn ->
-    close_in_noerr ch;
     Error (Printexc.to_string exn)
 
 let write_file_atomic path content =
@@ -972,7 +975,8 @@ let execute_tool tool_name arguments =
   match get_tool tool_name with
   | Some tool ->
       let normalized = json_assoc_or_empty arguments in
-      tool.execute normalized
+      (try tool.execute normalized
+       with exn -> Printf.sprintf "Error executing tool %s: %s" tool_name (Printexc.to_string exn))
   | None ->
       Printf.sprintf "Tool %s not found" tool_name
 

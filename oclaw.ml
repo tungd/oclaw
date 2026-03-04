@@ -107,54 +107,49 @@ let call_llm_api message config session_id =
 
   let tools_json = Tools.tools_to_json () in
 
-  let result = LLM.call_llm config.provider llm_messages_structured ~tools:(Some tools_json) () in
+  let max_tool_rounds = 8 in
 
-  match result with
-  | LLM.Error error -> `Error error
-  | LLM.Success llm_response ->
-      if llm_response.LLM.choices <> [] then
-        let first_choice = List.hd llm_response.LLM.choices in
-        let tool_calls = first_choice.LLM.message.LLM.tool_calls in
+  let rec resolve_with_tools messages rounds_remaining =
+    let result = LLM.call_llm config.provider messages ~tools:(Some tools_json) () in
+    match result with
+    | LLM.Error error -> `Error error
+    | LLM.Success llm_response ->
+        if llm_response.LLM.choices = [] then
+          `Error "No choices in LLM response"
+        else
+          let choice = List.hd llm_response.LLM.choices in
+          let tool_calls = choice.LLM.message.LLM.tool_calls in
+          if tool_calls = [] then
+            `Success choice.LLM.message.LLM.content
+          else if rounds_remaining <= 0 then
+            `Error "Tool-call recursion limit exceeded"
+          else (
+            Log.debug (fun m -> m "Processing %d tool calls" (List.length tool_calls));
+            let tool_messages = List.map (fun tool_call ->
+              let args_json =
+                try Yojson.Safe.from_string tool_call.LLM.function_args
+                with _ -> `Assoc []
+              in
+              let result = Tools.execute_tool tool_call.LLM.function_name args_json in
+              Log.debug (fun m -> m "Tool %s returned: %s" tool_call.LLM.function_name
+                (if String.length result > 100 then String.sub result 0 100 ^ "..." else result));
+              {
+                LLM.role = LLM.Tool;
+                content = result;
+                LLM.tool_call_id = Some tool_call.LLM.id;
+                LLM.tool_calls = []
+              }
+            ) tool_calls in
+            let next_messages = messages @ [choice.LLM.message] @ tool_messages in
+            resolve_with_tools next_messages (rounds_remaining - 1)
+          )
+  in
 
-        if tool_calls <> [] then (
-          Log.debug (fun m -> m "Processing %d tool calls" (List.length tool_calls));
-          let tool_results = List.map (fun tool_call ->
-            let args_json = Yojson.Safe.from_string tool_call.LLM.function_args in
-            let result = Tools.execute_tool tool_call.LLM.function_name args_json in
-            Log.debug (fun m -> m "Tool %s returned: %s" tool_call.LLM.function_name
-              (if String.length result > 100 then String.sub result 0 100 ^ "..." else result));
-            (tool_call.LLM.id, tool_call.LLM.function_name, result)
-          ) tool_calls in
-
-          let _ = Memory.add_message session first_choice.LLM.message.LLM.content "assistant" Memory.default_cleanup_policy in
-
-          let tool_messages = List.map (fun (id, name, result) ->
-            {
-              LLM.role = LLM.Tool;
-              content = result;
-              LLM.tool_call_id = Some id;
-              LLM.tool_calls = []
-            }
-          ) tool_results in
-
-          let new_messages = llm_messages_structured @ [first_choice.LLM.message] @ tool_messages in
-          let result2 = LLM.call_llm config.provider new_messages ~tools:(Some tools_json) () in
-
-          match result2 with
-          | LLM.Error error -> `Error error
-          | LLM.Success llm_response2 ->
-              if llm_response2.LLM.choices <> [] then
-                let choice2 = List.hd llm_response2.LLM.choices in
-                let _ = Memory.add_message session choice2.LLM.message.LLM.content "assistant" Memory.default_cleanup_policy in
-                `Success choice2.LLM.message.LLM.content
-              else
-                `Error "No choices in LLM response after tool execution"
-        ) else (
-          let _ = Memory.add_message session first_choice.LLM.message.LLM.content "assistant" Memory.default_cleanup_policy in
-          `Success first_choice.LLM.message.LLM.content
-        )
-      else
-        `Error "No choices in LLM response"
+  match resolve_with_tools llm_messages_structured max_tool_rounds with
+  | `Error error -> `Error error
+  | `Success content ->
+      let _ = Memory.add_message session content "assistant" Memory.default_cleanup_policy in
+      `Success content
 
 (* Simple agent loop *)
 let agent_loop config =

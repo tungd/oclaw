@@ -242,84 +242,62 @@ module Agent = struct
     let messages = build_messages agent session content in
     let tools = get_tools_json () in
 
-    (* Call LLM using effect *)
-    let llm_req = {
-      model = agent.model;
-      messages;
-      tools = Some tools;
-      temperature = Some agent.default_temperature;
-      max_tokens = Some agent.max_tokens;
-    } in
+    let max_tool_rounds = 8 in
 
-    let llm_resp = Effects.llm_request llm_req in
+    let rec resolve_with_tools current_messages rounds_remaining =
+      let llm_req = {
+        model = agent.model;
+        messages = current_messages;
+        tools = Some tools;
+        temperature = Some agent.default_temperature;
+        max_tokens = Some agent.max_tokens;
+      } in
 
-    (* Get the main response *)
-    if llm_resp.choices = [] then
-      raise (Failure "No choices in LLM response");
+      let llm_resp = Effects.llm_request llm_req in
+      if llm_resp.choices = [] then
+        raise (Failure "No choices in LLM response");
 
-    let main_choice = List.hd llm_resp.choices in
-    let response_content = main_choice.message.content in
+      let choice = List.hd llm_resp.choices in
+      let response_content = choice.message.content in
 
-    (* Handle tool calls *)
-    (match main_choice.message.tool_calls with
-     | Some calls when calls <> [] ->
-         Log.debug (fun m -> m "Processing %d tool calls" (List.length calls));
+      match choice.message.tool_calls with
+      | Some calls when calls <> [] ->
+          if rounds_remaining <= 0 then
+            raise (Failure "Tool-call recursion limit exceeded");
+          Log.debug (fun m -> m "Processing %d tool calls" (List.length calls));
 
-         (* Save assistant message with tool calls *)
-         Session.add_message session (make_memory_message "assistant" response_content);
+          (* Execute tools in parallel using domains *)
+          let tool_results = List.map (fun call ->
+            Domain.spawn (fun () -> Effects.tool_call call)
+          ) calls in
 
-         (* Execute tools in parallel using domains *)
-         let tool_results = List.map (fun call ->
-           Domain.spawn (fun () ->
-             Effects.tool_call call
-           )
-         ) calls in
+          (* Wait for all tool results *)
+          let results = List.map (fun d -> Domain.join d) tool_results in
 
-         (* Wait for all tool results *)
-         let results = List.map (fun d -> Domain.join d) tool_results in
+          (* Build tool response messages *)
+          let tool_msgs =
+            List.map2
+              (fun (call : Llm_types.tool_call) (result : Session_types.tool_response) ->
+                {
+                  role = Llm_types.Tool;
+                  content = result.result;
+                  tool_calls = None;
+                  tool_call_id = Some call.id;
+                }
+              )
+              calls results
+          in
 
-         (* Build tool response messages *)
-         let tool_msgs =
-           List.map2
-             (fun (call : Llm_types.tool_call) (result : Session_types.tool_response) ->
-               {
-                 role = Llm_types.Tool;
-                 content = result.result;
-                 tool_calls = None;
-                 tool_call_id = Some call.id;
-               }
-             )
-             calls results
-         in
+          let next_messages = current_messages @ [choice.message] @ tool_msgs in
+          resolve_with_tools next_messages (rounds_remaining - 1)
 
-         (* Add user message and tool results to history *)
-         Session.add_message session (make_memory_message "user" content);
+      | _ -> response_content
+    in
 
-         (* Continue conversation with tool results *)
-         let messages_with_tools = messages @ [main_choice.message] @ tool_msgs in
-         let followup_req = {
-           model = agent.model;
-           messages = messages_with_tools;
-           tools = Some tools;
-           temperature = Some agent.default_temperature;
-           max_tokens = Some agent.max_tokens;
-         } in
-
-         let followup_resp = Effects.llm_request followup_req in
-         let followup_choice = List.hd followup_resp.choices in
-         let final_content = followup_choice.message.content in
-
-         (* Save final response *)
-         Session.add_message session (make_memory_message "assistant" final_content);
-
-         final_content
-
-     | _ ->
-         (* No tool calls, save conversation and return *)
-         Session.add_message session (make_memory_message "user" content);
-         Session.add_message session (make_memory_message "assistant" response_content);
-
-         response_content)
+    Session.add_message session (make_memory_message "user" content);
+    let final_content = resolve_with_tools messages max_tool_rounds in
+    Session.add_message session (make_memory_message "assistant" final_content);
+    final_content
 
   let process_query agent ~session_id ~content =
     Effects.run_with_handlers ~llm_config:agent.llm_config (fun () ->
