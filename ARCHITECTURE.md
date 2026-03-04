@@ -88,23 +88,14 @@ and function_def = {
 
 ## HTTP Server
 
-Simple implementation without Miou/vif:
+Production path uses `h1` + `iomux`:
 
 ```ocaml
-(* Simple HTTP server using Unix sockets *)
-
-type http_handler = {
-  method_ : string;
-  path : string;
-  handler : Yojson.Basic.t -> Yojson.Basic.t;  (* JSON request -> JSON response *)
-}
-
-let start_server ~host ~port ~handlers =
-  (* Create socket *)
-  (* Accept connections in a loop *)
-  (* Parse HTTP request *)
-  (* Route to handler based on method + path *)
-  (* Return JSON response *)
+(* Event-driven HTTP server *)
+(* - h1 handles HTTP/1.1 parsing and serialization *)
+(* - iomux poll loop drives read/write readiness *)
+(* - route handlers receive H1.Reqd.t *)
+(* - blocking route work can be offloaded to worker domains *)
 ```
 
 ## Module Structure
@@ -129,8 +120,8 @@ lib/
     rpc_handler.ml  - RPC client/server handler
 
   server/           - HTTP server and API
-    http.ml         - Simple HTTP server
-    api.ml          - API endpoints using effects
+    http_server.ml  - h1 + iomux server runtime
+    Oclaw_server.ml - API endpoints and route registration
 
   client/           - Client implementations
     tui.ml          - TUI client using RPC effect

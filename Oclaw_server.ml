@@ -27,55 +27,70 @@ type t = {
 
 (* {1 API Handlers } *)
 
-let health_handler _req =
-  Response.json (`Assoc [
+let health_handler reqd =
+  respond_json reqd (`Assoc [
     ("status", `String "healthy");
     ("timestamp", `Float (Unix.gettimeofday ()));
     ("version", `String "1.0.0");
   ])
 
-let chat_handler agent req =
-  (* Parse request body *)
-  match Yojson.Safe.from_string req.Request.body with
-  | exception _ ->
-      Response.json ~status:400 (`Assoc [
-        ("error", `String "Invalid JSON");
-      ])
-  | json ->
-      try
-        let session_id = match member "session_id" json with
-          | `String s -> s
-          | _ -> raise Not_found
-        in
-        let content = match member "content" json with
-          | `String s -> s
-          | _ -> raise Not_found
-        in
+let chat_handler server reqd =
+  let body_reader = Reqd.request_body reqd in
+  read_body body_reader (function
+    | Error (`Too_large max_bytes) ->
+        respond_json ~status:`Payload_too_large reqd (`Assoc [
+          ("error", `String "Request body too large");
+          ("max_bytes", `Int max_bytes);
+        ])
+    | Error (`Exception exn) ->
+        Log.err (fun m -> m "Chat body read error: %s" (Printexc.to_string exn));
+        respond_json ~status:`Bad_request reqd (`Assoc [
+          ("error", `String "Invalid request body");
+        ])
+    | Ok body ->
+        begin
+          match Yojson.Safe.from_string body with
+          | exception _ ->
+              respond_json ~status:`Bad_request reqd (`Assoc [
+                ("error", `String "Invalid JSON");
+              ])
+          | json ->
+              (try
+                 let session_id =
+                   match member "session_id" json with
+                   | `String s -> s
+                   | _ -> raise Not_found
+                 in
+                 let content =
+                   match member "content" json with
+                   | `String s -> s
+                   | _ -> raise Not_found
+                 in
+                 submit_job server.http_server reqd (fun () ->
+                   match Agent.process_query server.agent ~session_id ~content with
+                   | Ok response ->
+                       Async_response.json (`Assoc [
+                         ("response", `String response);
+                         ("session_id", `String session_id);
+                         ("created_at", `Float (Unix.gettimeofday ()));
+                       ])
+                   | Error err ->
+                       Async_response.json ~status:`Internal_server_error (`Assoc [
+                         ("error", `String err);
+                       ]))
+               with
+               | Not_found ->
+                   respond_json ~status:`Bad_request reqd (`Assoc [
+                     ("error", `String "Missing required fields: session_id, content");
+                   ])
+               | exn ->
+                   Log.err (fun m -> m "Chat handler error: %s" (Printexc.to_string exn));
+                   respond_json ~status:`Internal_server_error reqd (`Assoc [
+                     ("error", `String "Internal server error");
+                   ]))
+        end)
 
-        (* Process query using agent *)
-        match Agent.process_query agent ~session_id ~content with
-        | Ok response ->
-            Response.json (`Assoc [
-              ("response", `String response);
-              ("session_id", `String session_id);
-              ("created_at", `Float (Unix.gettimeofday ()));
-            ])
-        | Error err ->
-            Response.json ~status:500 (`Assoc [
-              ("error", `String err);
-            ])
-      with
-      | Not_found ->
-          Response.json ~status:400 (`Assoc [
-            ("error", `String "Missing required fields");
-          ])
-      | exn ->
-          Log.err (fun m -> m "Chat handler error: %s" (Printexc.to_string exn));
-          Response.json ~status:500 (`Assoc [
-            ("error", `String (Printexc.to_string exn));
-          ])
-
-let sessions_handler agent _req =
+let sessions_handler agent reqd =
   let sessions = Agent.list_sessions agent in
   let session_list = List.map (fun (id, info) ->
     `Assoc [
@@ -84,13 +99,13 @@ let sessions_handler agent _req =
       ("last_active", `Float info.last_active);
     ]
   ) sessions in
-  Response.json (`Assoc [
+  respond_json reqd (`Assoc [
     ("sessions", `List session_list);
   ])
 
-let knowledge_handler agent _req =
+let knowledge_handler agent reqd =
   let knowledge = Agent.get_knowledge agent in
-  Response.json (`Assoc [
+  respond_json reqd (`Assoc [
     ("identity", `String knowledge.identity);
     ("skills", `List (List.map (fun (s : Skills.Skill.t) ->
       `Assoc [
@@ -101,9 +116,9 @@ let knowledge_handler agent _req =
     ("last_updated", `Float knowledge.last_updated);
   ])
 
-let tools_handler _req =
+let tools_handler reqd =
   let all_tools = Tools.get_all_tools () in
-  Response.json (`List (List.map (fun (name, desc) ->
+  respond_json reqd (`List (List.map (fun (name, desc) ->
     `Assoc [
       ("name", `String name);
       ("description", `String desc);
@@ -113,14 +128,12 @@ let tools_handler _req =
 (* {1 Server Creation and Lifecycle } *)
 
 let create (config : config) =
-  (* Create HTTP server *)
   let http_server = Http_server.create
     ~host:config.host
     ~port:config.port
     ~max_connections:config.max_connections
     () in
 
-  (* Create agent *)
   let agent = Agent.create
     ~llm_config:config.llm_config
     ~model:config.model
@@ -139,40 +152,32 @@ let create (config : config) =
   }
 
 let setup_routes server =
-  (* Health check *)
   Http_server.add_route server.http_server
-    ~method_:None
-    ~match_type:Wildcard
+    ~method_:(Some `GET)
+    ~match_type:Exact
     "/api/health"
-    (fun req ->
-      if String.equal req.Request.path "/api/health" then health_handler req
-      else Response.not_found "Not found"
-    );
+    health_handler;
 
-  (* Chat endpoint *)
   Http_server.add_route server.http_server
-    ~method_:(Some Http_server.Method.POST)
+    ~method_:(Some `POST)
     ~match_type:Exact
     "/api/chat"
-    (chat_handler server.agent);
+    (chat_handler server);
 
-  (* Sessions endpoint *)
   Http_server.add_route server.http_server
-    ~method_:(Some Http_server.Method.GET)
+    ~method_:(Some `GET)
     ~match_type:Exact
     "/api/sessions"
     (sessions_handler server.agent);
 
-  (* Knowledge endpoint *)
   Http_server.add_route server.http_server
-    ~method_:(Some Http_server.Method.GET)
+    ~method_:(Some `GET)
     ~match_type:Exact
     "/api/knowledge"
     (knowledge_handler server.agent);
 
-  (* Tools endpoint *)
   Http_server.add_route server.http_server
-    ~method_:(Some Http_server.Method.GET)
+    ~method_:(Some `GET)
     ~match_type:Exact
     "/api/tools"
     tools_handler;

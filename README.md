@@ -2,12 +2,13 @@
 
 ## Overview
 
-**OCaml OClaw** is a port of the Python nanobot project to OCaml, leveraging OCaml 5's native Domains capability for parallelism. This implementation replaces Python's httpx HTTP client with curl/curl.multi and iomux for efficient concurrent requests.
+**OCaml OClaw** is a port of the Python nanobot project to OCaml, leveraging OCaml 5's native Domains capability for parallelism. This implementation uses `h1` + `iomux` for the HTTP server and curl/curl.multi + iomux for the HTTP client.
 
 ## Features
 
 - **OCaml 5 Native Domains**: Full support for parallel execution using OCaml's native concurrency
 - **Efficient HTTP Client**: Built on curl.multi and iomux for concurrent requests
+- **HTTP Server Core**: Event-driven HTTP/1.1 server built on h1 + iomux
 - **LLM Provider Integration**: OpenAI-compatible API support with DashScope Qwen3.5+ integration
 - **Modular Tool System**: Web search, file operations, and command execution tools
 - **Memory Management**: Conversation history with time-based decay and token-based limitations
@@ -21,6 +22,8 @@ oclaw/
 ├── dune                  # OCaml build system configuration
 ├── dune-project          # Project metadata
 ├── http_client.ml/mli    # HTTP client using curl.multi
+├── http_server.ml        # HTTP server using h1 + iomux
+├── Oclaw_server.ml       # API routes and server integration
 ├── llm_provider.ml/mli   # LLM provider module
 ├── memory.ml/mli         # Memory and conversation history
 ├── tools.ml/mli           # Tool system implementation

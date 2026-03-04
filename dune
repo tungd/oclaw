@@ -145,3 +145,10 @@
  (libraries memory yojson)
  (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))
+
+(executable
+ (name test_http_server_integration)
+ (modules test_http_server_integration)
+ (libraries http_server http_client logs logs.fmt unix yojson)
+ (preprocess (pps ppx_deriving.show))
+ (flags :standard -w -A))
