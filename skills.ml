@@ -1,6 +1,7 @@
 (** Skills module for OClaw - loading and prompt injection of SKILL.md files. *)
 
-open Yojson.Basic.Util
+open Yojson.Safe
+open Yojson.Safe.Util
 
 module Skill = struct
   type t = {
@@ -16,7 +17,7 @@ end
 let strip_quotes s =
   let s = String.trim s in
   let len = String.length s in
-  if len >= 2 && 
+  if len >= 2 &&
      ((s.[0] = '"' && s.[len-1] = '"') || (s.[0] = '\'' && s.[len-1] = '\'')) then
     String.sub s 1 (len - 2)
   else s
@@ -49,7 +50,7 @@ let get_fm_string pairs key default =
 
 let get_fm_bool pairs key default =
   match List.assoc_opt key pairs with
-  | Some v -> 
+  | Some v ->
       let v = String.lowercase_ascii (String.trim v) in
       v = "true" || v = "yes" || v = "1"
   | None -> default
@@ -59,14 +60,14 @@ let load_skill_md path =
     let channel = open_in path in
     let content = really_input_string channel (in_channel_length channel) in
     close_in channel;
-    
+
     let fm, body = parse_front_matter content in
     let dir = Filename.dirname path in
     let name = get_fm_string fm "name" (Filename.basename dir) in
     let description = get_fm_string fm "description" "No description" in
     let version = get_fm_string fm "version" "0.1.0" in
     let always = get_fm_bool fm "always" false in
-    
+
     Some {
       Skill.name;
       description;
@@ -113,13 +114,13 @@ let skills_to_prompt skills =
     Buffer.add_string b "Skill instructions and tool metadata are preloaded below.\n";
     Buffer.add_string b "Follow these instructions directly; do not read skill files at runtime unless the user asks.\n\n";
     Buffer.add_string b "<available_skills>\n";
-    
+
     List.iter (fun (skill : Skill.t) ->
       Buffer.add_string b "  <skill>\n";
       Printf.bprintf b "    <name>%s</name>\n" (escape_xml skill.name);
       Printf.bprintf b "    <description>%s</description>\n" (escape_xml skill.description);
       Printf.bprintf b "    <location>%s</location>\n" (escape_xml skill.location);
-      
+
       if skill.prompts <> [] then (
         Buffer.add_string b "    <instructions>\n";
         List.iter (fun p ->
@@ -127,9 +128,9 @@ let skills_to_prompt skills =
         ) skill.prompts;
         Buffer.add_string b "    </instructions>\n"
       );
-      
+
       Buffer.add_string b "  </skill>\n"
     ) skills;
-    
+
     Buffer.add_string b "</available_skills>";
     Buffer.contents b

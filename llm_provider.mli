@@ -83,7 +83,7 @@ val qwen35_plus_model : llm_model
 val create_dashscope_provider : ?temperature:float -> ?max_tokens:int -> unit -> provider_config
 
 (** Make LLM API call *)
-val call_llm : provider_config -> message list -> ?tools:Yojson.Basic.t option -> unit -> llm_result
+val call_llm : provider_config -> message list -> ?tools:Yojson.Safe.t option -> unit -> llm_result
 
 (** Extract assistant message from response *)
 val get_assistant_message : llm_result -> message option

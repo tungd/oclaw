@@ -1,6 +1,7 @@
 (** Memory and conversation history system for OClaw *)
 
-open Yojson.Basic.Util
+open Yojson.Safe
+open Yojson.Safe.Util
 
 (* Message type for conversation history *)
 type conversation_message = {
@@ -74,7 +75,7 @@ let add_message session message role cleanup_policy =
     estimated_tokens = estimated_tokens;
     metadata = [("source", "user_input")]
   } in
-  
+
   (* Apply cleanup policy *)
   let filtered_messages : conversation_message list = List.filter (fun msg ->
     (* Age filter: keep messages within max_age_seconds *)
@@ -82,7 +83,7 @@ let add_message session message role cleanup_policy =
     (* Importance filter: keep messages above threshold *)
     msg.importance >= cleanup_policy.importance_threshold
   ) session.messages in
-  
+
   (* Token limit enforcement *)
   let rec limit_by_tokens (msgs : conversation_message list) current_tokens acc =
     match msgs with
@@ -91,12 +92,12 @@ let add_message session message role cleanup_policy =
         limit_by_tokens rest (current_tokens + msg.estimated_tokens) (msg::acc)
     | _ -> List.rev acc
   in
-  
+
   let token_limited = limit_by_tokens filtered_messages 0 [] in
   let final_messages = List.take cleanup_policy.max_messages token_limited in
-  
-  let updated_session = 
-    { session with 
+
+  let updated_session =
+    { session with
       messages = conversation_msg :: final_messages;
       current_context = if List.length session.current_context >= 5 then
                           List.tl session.current_context @ [message]
@@ -133,13 +134,13 @@ let build_context session_id system_prompt max_tokens =
   | Some messages ->
       (* Sort by timestamp (oldest first) *)
       let sorted_messages = List.sort (fun a b -> compare a.timestamp b.timestamp) messages in
-      
+
       (* Calculate system prompt tokens *)
       let system_tokens = estimate_tokens system_prompt in
       let remaining_tokens = max_tokens - system_tokens in
-      
+
       if remaining_tokens <= 0 then None else
-      
+
       (* Filter messages to fit within token limit *)
       let rec select_messages (msgs : conversation_message list) current_tokens acc =
         match msgs with
@@ -148,17 +149,17 @@ let build_context session_id system_prompt max_tokens =
             select_messages rest (current_tokens + msg.estimated_tokens) (msg::acc)
         | _ -> List.rev acc
       in
-      
+
       let selected_messages = select_messages sorted_messages 0 [] in
-      
+
       let message_json_list = List.map (fun msg ->
         `Assoc [
           ("role", `String msg.role);
           ("content", `String msg.content)
         ]
       ) selected_messages in
-      
-      let context = 
+
+      let context =
         `List ([`Assoc [("role", `String "system"); ("content", `String system_prompt)]] @ message_json_list)
       in
       Some context
@@ -184,8 +185,9 @@ let save_memory filename =
       ]
     ) !memory_store in
     let json = `List json_list in
+    let json_string = Yojson.Safe.to_string json in
     let channel = open_out filename in
-    output_string channel (Yojson.Basic.to_string json);
+    output_string channel json_string;
     close_out channel;
     true
   with exn ->
@@ -198,26 +200,26 @@ let load_memory filename =
     let channel = open_in filename in
     let content = really_input_string channel (in_channel_length channel) in
     close_in channel;
-    let json = Yojson.Basic.from_string content in
-    let session_list = json |> to_list in
+    let json = Yojson.Safe.from_string content in
+    let session_list = Yojson.Safe.Util.to_list json in
     let loaded_sessions = List.map (fun session_json ->
-      let session_id = session_json |> member "session_id" |> to_string in
-      let created_at = session_json |> member "created_at" |> to_float in
-      let messages_json = session_json |> member "messages" |> to_list in
+      let session_id = Yojson.Safe.Util.member "session_id" session_json |> Yojson.Safe.Util.to_string in
+      let created_at = Yojson.Safe.Util.member "created_at" session_json |> Yojson.Safe.Util.to_float in
+      let messages_json = Yojson.Safe.Util.member "messages" session_json |> Yojson.Safe.Util.to_list in
       let messages = List.map (fun msg_json ->
-        let role = msg_json |> member "role" |> to_string in
-        let content = msg_json |> member "content" |> to_string in
-        let timestamp = msg_json |> member "timestamp" |> to_float in
-        let importance = 
-          try msg_json |> member "importance" |> to_float
+        let role = Yojson.Safe.Util.member "role" msg_json |> Yojson.Safe.Util.to_string in
+        let content = Yojson.Safe.Util.member "content" msg_json |> Yojson.Safe.Util.to_string in
+        let timestamp = Yojson.Safe.Util.member "timestamp" msg_json |> Yojson.Safe.Util.to_float in
+        let importance =
+          try Yojson.Safe.Util.member "importance" msg_json |> Yojson.Safe.Util.to_float
           with _ -> 0.5 in
-        let estimated_tokens = 
-          try msg_json |> member "estimated_tokens" |> to_int
+        let estimated_tokens =
+          try Yojson.Safe.Util.member "estimated_tokens" msg_json |> Yojson.Safe.Util.to_int
           with _ -> estimate_tokens content in
-        let metadata_json = msg_json |> member "metadata" in
-        let metadata = 
+        let metadata_json = Yojson.Safe.Util.member "metadata" msg_json in
+        let metadata =
           try
-            metadata_json |> to_assoc |> List.map (fun (k, v) -> (k, to_string v))
+            Yojson.Safe.Util.to_assoc metadata_json |> List.map (fun (k, v) -> (k, Yojson.Safe.Util.to_string v))
           with _ -> []
         in
         { role; content; timestamp; importance; estimated_tokens; metadata }

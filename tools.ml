@@ -1,13 +1,14 @@
 (** Tools module for OClaw - web search, file operations, etc. *)
 
 open Http_client
-open Yojson.Basic.Util
+open Yojson.Safe
+open Yojson.Safe.Util
 
 (* Tool definition type *)
 type tool_definition = {
   name : string;
   description : string;
-  parameters : (string * Yojson.Basic.t) list;
+  parameters : (string * Yojson.Safe.t) list;
   execute : string -> string -> string
 }
 
@@ -112,6 +113,10 @@ let register_tool tool =
 let get_tool name =
   List.find_opt (fun tool -> tool.name = name) !tool_registry
 
+(* Get all tools as (name, description) list *)
+let get_all_tools () =
+  List.map (fun tool -> (tool.name, tool.description)) !tool_registry
+
 (* Execute a tool call *)
 let execute_tool tool_name arguments =
   match get_tool tool_name with
@@ -122,12 +127,12 @@ let execute_tool tool_name arguments =
             (* Extract parameter values - for single param tools, just get the value *)
             if List.length args = 1 then
               (* Single parameter - return just the value *)
-              to_string (snd (List.hd args))
+              Yojson.Safe.Util.to_string (snd (List.hd args))
             else
               (* Multiple parameters - could be enhanced to pass named args *)
-              List.map (fun (k, v) -> Printf.sprintf "%s=%s" k (to_string v)) args |> String.concat ", "
+              List.map (fun (k, v) -> Printf.sprintf "%s=%s" k (Yojson.Safe.Util.to_string v)) args |> String.concat ", "
         | `String s -> s
-        | _ -> to_string arguments
+        | _ -> Yojson.Safe.Util.to_string arguments
       in
       tool.execute tool_name arg_string
   | None ->
@@ -186,13 +191,14 @@ let tools_to_json () =
 (* Parse tool calls from LLM response *)
 let parse_tool_calls json =
   try
-    let choices = json |> member "choices" |> to_list in
-    if choices <> [] then
-      let first_choice = List.hd choices in
-      let message = first_choice |> member "message" in
+    let choices = Yojson.Safe.Util.member "choices" json in
+    let choices_list = Yojson.Safe.Util.to_list choices in
+    if choices_list <> [] then
+      let first_choice = List.hd choices_list in
+      let message = Yojson.Safe.Util.member "message" first_choice in
       try
-        let tool_calls = message |> member "tool_calls" in
-        Some (tool_calls |> to_list)
+        let tool_calls = Yojson.Safe.Util.member "tool_calls" message in
+        Some (Yojson.Safe.Util.to_list tool_calls)
       with _ -> None
     else
       None
@@ -201,6 +207,7 @@ let parse_tool_calls json =
 (* Extract tool call arguments *)
 let extract_tool_arguments tool_call =
   try
-    let arguments_json = tool_call |> member "function" |> member "arguments" in
-    Some (to_string arguments_json)
+    let function_ = Yojson.Safe.Util.member "function" tool_call in
+    let arguments_json = Yojson.Safe.Util.member "arguments" function_ in
+    Some (Yojson.Safe.Util.to_string arguments_json)
   with _ -> None

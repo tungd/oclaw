@@ -174,13 +174,13 @@ type tool_definition = {
 
 - OCaml 5.4.0+
 - opam package manager
-- Required libraries: `curl`, `iomux`, `yojson`, `ppx_deriving`
+- Required libraries: `curl`, `iomux`, `yojson`, `yaml`, `ppx_protocol_conv`, `ppx_protocol_conv_json`, `ppx_protocol_conv_yaml`
 
 ### Installation
 
 ```bash
 # Install dependencies
-opam install curl iomux yojson ppx_deriving
+opam install curl iomux yojson yaml ppx_protocol_conv ppx_protocol_conv_json ppx_protocol_conv_yaml
 
 # Build the project
 cd oclaw

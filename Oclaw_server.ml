@@ -1,0 +1,203 @@
+(** OClaw server - integrates HTTP server with agent and effect handlers *)
+
+open Http_server
+open Session_types
+open Agent
+open Yojson.Safe.Util
+
+module Log = (val Logs.src_log (Logs.Src.create "oclaw_server") : Logs.LOG)
+
+(* {1 Server Configuration } *)
+
+type config = {
+  host : string;
+  port : int;
+  llm_config : Llm_provider.provider_config;
+  model : string;
+  max_connections : int;
+}
+
+type t = {
+  http_server : Http_server.t;
+  agent : Agent.t;
+  config : config;
+  mutable running : bool;
+  mutex : Mutex.t;
+}
+
+(* {1 API Handlers } *)
+
+let health_handler _req =
+  Response.json (`Assoc [
+    ("status", `String "healthy");
+    ("timestamp", `Float (Unix.gettimeofday ()));
+    ("version", `String "1.0.0");
+  ])
+
+let chat_handler agent req =
+  (* Parse request body *)
+  match Yojson.Safe.from_string req.Request.body with
+  | exception _ ->
+      Response.json ~status:400 (`Assoc [
+        ("error", `String "Invalid JSON");
+      ])
+  | json ->
+      try
+        let session_id = match member "session_id" json with
+          | `String s -> s
+          | _ -> raise Not_found
+        in
+        let content = match member "content" json with
+          | `String s -> s
+          | _ -> raise Not_found
+        in
+
+        (* Process query using agent *)
+        match Agent.process_query agent ~session_id ~content with
+        | Ok response ->
+            Response.json (`Assoc [
+              ("response", `String response);
+              ("session_id", `String session_id);
+              ("created_at", `Float (Unix.gettimeofday ()));
+            ])
+        | Error err ->
+            Response.json ~status:500 (`Assoc [
+              ("error", `String err);
+            ])
+      with
+      | Not_found ->
+          Response.json ~status:400 (`Assoc [
+            ("error", `String "Missing required fields");
+          ])
+      | exn ->
+          Log.err (fun m -> m "Chat handler error: %s" (Printexc.to_string exn));
+          Response.json ~status:500 (`Assoc [
+            ("error", `String (Printexc.to_string exn));
+          ])
+
+let sessions_handler agent _req =
+  let sessions = Agent.list_sessions agent in
+  let session_list = List.map (fun (id, info) ->
+    `Assoc [
+      ("id", `String id);
+      ("created_at", `Float info.created_at);
+      ("last_active", `Float info.last_active);
+    ]
+  ) sessions in
+  Response.json (`Assoc [
+    ("sessions", `List session_list);
+  ])
+
+let knowledge_handler agent _req =
+  let knowledge = Agent.get_knowledge agent in
+  Response.json (`Assoc [
+    ("identity", `String knowledge.identity);
+    ("skills", `List (List.map (fun (s : Skills.Skill.t) ->
+      `Assoc [
+        ("name", `String s.name);
+        ("description", `String s.description);
+      ]
+    ) knowledge.skills));
+    ("last_updated", `Float knowledge.last_updated);
+  ])
+
+let tools_handler _req =
+  let all_tools = Tools.get_all_tools () in
+  Response.json (`List (List.map (fun (name, desc) ->
+    `Assoc [
+      ("name", `String name);
+      ("description", `String desc);
+    ]
+  ) all_tools))
+
+(* {1 Server Creation and Lifecycle } *)
+
+let create (config : config) =
+  (* Create HTTP server *)
+  let http_server = Http_server.create
+    ~host:config.host
+    ~port:config.port
+    ~max_connections:config.max_connections
+    () in
+
+  (* Create agent *)
+  let agent = Agent.create
+    ~llm_config:config.llm_config
+    ~model:config.model
+    ~temperature:0.7
+    ~max_tokens:4096
+    () in
+
+  Log.info (fun m -> m "OClaw server created");
+
+  {
+    http_server;
+    agent;
+    config;
+    running = false;
+    mutex = Mutex.create ();
+  }
+
+let setup_routes server =
+  (* Health check *)
+  Http_server.add_route server.http_server
+    ~method_:None
+    ~match_type:Wildcard
+    "/api/health"
+    (fun req ->
+      if String.equal req.Request.path "/api/health" then health_handler req
+      else Response.not_found "Not found"
+    );
+
+  (* Chat endpoint *)
+  Http_server.add_route server.http_server
+    ~method_:(Some Http_server.Method.POST)
+    ~match_type:Exact
+    "/api/chat"
+    (chat_handler server.agent);
+
+  (* Sessions endpoint *)
+  Http_server.add_route server.http_server
+    ~method_:(Some Http_server.Method.GET)
+    ~match_type:Exact
+    "/api/sessions"
+    (sessions_handler server.agent);
+
+  (* Knowledge endpoint *)
+  Http_server.add_route server.http_server
+    ~method_:(Some Http_server.Method.GET)
+    ~match_type:Exact
+    "/api/knowledge"
+    (knowledge_handler server.agent);
+
+  (* Tools endpoint *)
+  Http_server.add_route server.http_server
+    ~method_:(Some Http_server.Method.GET)
+    ~match_type:Exact
+    "/api/tools"
+    tools_handler;
+
+  Log.info (fun m -> m "Routes configured")
+
+let start server =
+  if server.running then
+    Log.warn (fun m -> m "Server already running")
+  else begin
+    server.running <- true;
+    setup_routes server;
+    ignore (Http_server.start server.http_server);
+    Log.info (fun m -> m "OClaw server started on http://%s:%d"
+      server.config.host server.config.port)
+  end
+
+let stop server =
+  if not server.running then
+    Log.warn (fun m -> m "Server not running")
+  else begin
+    Log.info (fun m -> m "Stopping OClaw server");
+    server.running <- false;
+    Http_server.stop server.http_server
+  end
+
+let is_running server =
+  server.running

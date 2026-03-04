@@ -4,7 +4,7 @@
 type tool_definition = {
   name : string;
   description : string;
-  parameters : (string * Yojson.Basic.t) list;
+  parameters : (string * Yojson.Safe.t) list;
   execute : string -> string -> string
 }
 
@@ -23,17 +23,20 @@ val register_tool : tool_definition -> unit
 (** Get tool by name *)
 val get_tool : string -> tool_definition option
 
+(** Get all tools as (name, description) list *)
+val get_all_tools : unit -> (string * string) list
+
 (** Execute a tool call *)
-val execute_tool : string -> Yojson.Basic.t -> string
+val execute_tool : string -> Yojson.Safe.t -> string
 
 (** Initialize default tools *)
 val init_default_tools : unit -> unit
 
 (** Convert tools to JSON for LLM API *)
-val tools_to_json : unit -> Yojson.Basic.t
+val tools_to_json : unit -> Yojson.Safe.t
 
 (** Parse tool calls from LLM response *)
-val parse_tool_calls : Yojson.Basic.t -> Yojson.Basic.t list option
+val parse_tool_calls : Yojson.Safe.t -> Yojson.Safe.t list option
 
 (** Extract tool call arguments *)
-val extract_tool_arguments : Yojson.Basic.t -> string option
+val extract_tool_arguments : Yojson.Safe.t -> string option
