@@ -24,49 +24,6 @@ type config = {
   tools_exec_enable_deny_patterns : bool [@default true];
   tools_exec_custom_deny_patterns : string list [@default []];
   tools_exec_custom_allow_patterns : string list [@default []];
-  tools_web_fetch_max_chars : int [@default 50000];
-  tools_web_fetch_max_bytes : int [@default 10485760];
-  tools_python_sessions_enabled : bool [@default false];
-  tools_python_session_idle_ttl_seconds : int [@default 1200];
-  tools_python_session_max_count : int [@default 8];
-  tools_python_timeout_seconds : int [@default 30];
-  tools_python_max_output_chars : int [@default 20000];
-  tools_python_max_code_chars : int [@default 50000];
-  tools_python_allowed_imports : string list [@default [
-    "helium";
-    "selenium";
-    "urllib3";
-    "json";
-    "re";
-    "math";
-    "time";
-    "datetime";
-    "itertools";
-    "functools";
-    "collections";
-    "pathlib";
-    "typing";
-    "urllib";
-    "os";
-    "sys";
-    "logging";
-    "traceback";
-    "io";
-    "contextlib";
-  ]];
-  tools_python_allowed_subprocess_bins : string list [@default [
-    "chromedriver";
-    "geckodriver";
-    "msedgedriver";
-    "safaridriver";
-    "google-chrome";
-    "google-chrome-stable";
-    "chromium";
-    "chromium-browser";
-    "chrome";
-    "msedge";
-  ]];
-  tools_python_capability_profile : string [@default "automation"];
   tasks_db_path : string [@default "workspace/state/tasks.db"];
   tasks_default_limit : int [@default 50];
   tasks_max_limit : int [@default 200];
@@ -157,22 +114,6 @@ let validate_config config =
     errors := "Tools timeout must be positive" :: !errors;
   if config.tools_exec_timeout_seconds <= 0 then
     errors := "Tools exec_timeout_seconds must be positive" :: !errors;
-  if config.tools_web_fetch_max_chars <= 0 then
-    errors := "Tools web_fetch_max_chars must be positive" :: !errors;
-  if config.tools_web_fetch_max_bytes <= 0 then
-    errors := "Tools web_fetch_max_bytes must be positive" :: !errors;
-  if config.tools_python_session_idle_ttl_seconds <= 0 then
-    errors := "Tools python_session_idle_ttl_seconds must be positive" :: !errors;
-  if config.tools_python_session_max_count <= 0 then
-    errors := "Tools python_session_max_count must be positive" :: !errors;
-  if config.tools_python_timeout_seconds <= 0 then
-    errors := "Tools python_timeout_seconds must be positive" :: !errors;
-  if config.tools_python_max_output_chars <= 0 then
-    errors := "Tools python_max_output_chars must be positive" :: !errors;
-  if config.tools_python_max_code_chars <= 0 then
-    errors := "Tools python_max_code_chars must be positive" :: !errors;
-  if String.trim config.tools_python_capability_profile = "" then
-    errors := "Tools python_capability_profile must not be empty" :: !errors;
   if config.tasks_default_limit <= 0 then
     errors := "Tasks default_limit must be positive" :: !errors;
   if config.tasks_max_limit <= 0 then

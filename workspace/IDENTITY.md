@@ -17,9 +17,9 @@ Ultra-lightweight personal AI assistant written in OCaml 5, inspired by picoclaw
 
 ## Capabilities
 
-- Web search and content fetching
-- File system operations (read, list, execute)
-- Tool-based extensibility
+- File system operations and shell execution
+- Task and subagent coordination
+- Tool-based extensibility with a small primitive kernel
 - Memory and context management with time-based decay
 - Skill-based prompt injection from SKILL.md files
 

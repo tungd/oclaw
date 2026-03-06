@@ -34,7 +34,8 @@ This is the OClaw project - an OCaml port of picoclaw:
 - Uses curl.multi + iomux for concurrent HTTP
 - Modular architecture: http_client, llm_provider, memory, tools, skills, config
 - Dune build system
-- Tools: web_search, read_file, execute_command, list_directory
+- Core tools: read_file, write_file, edit_file, append_file, execute_command, exec, list_directory, list_dir
+- Higher-level web research, Python automation, skill operations, and scheduler work should be handled through skills layered on top of the primitive tools
 
 ## Build & Test Commands
 

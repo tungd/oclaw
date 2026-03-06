@@ -1,4 +1,4 @@
-(** Tools module for OClaw - web search, file operations, etc. *)
+(** Tools module for OClaw - filesystem, shell, and task operations. *)
 
 (** Sandbox and safety configuration for tools. *)
 type sandbox_config = {
@@ -10,17 +10,6 @@ type sandbox_config = {
   exec_enable_deny_patterns : bool;
   exec_custom_deny_patterns : string list;
   exec_custom_allow_patterns : string list;
-  web_fetch_max_chars : int;
-  web_fetch_max_bytes : int;
-  python_sessions_enabled : bool;
-  python_session_idle_ttl_seconds : int;
-  python_session_max_count : int;
-  python_timeout_seconds : int;
-  python_max_output_chars : int;
-  python_max_code_chars : int;
-  python_allowed_imports : string list;
-  python_allowed_subprocess_bins : string list;
-  python_capability_profile : string;
 }
 
 val default_sandbox_config : sandbox_config
@@ -33,9 +22,6 @@ type tool_definition = {
   parameters : (string * Yojson.Safe.t) list;
   execute : Yojson.Safe.t -> string;
 }
-
-(** Web search tool *)
-val web_search_tool : tool_definition
 
 (** File read tool *)
 val file_read_tool : tool_definition

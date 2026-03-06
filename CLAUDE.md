@@ -36,7 +36,7 @@ The project is organized as separate libraries (defined in `dune`):
 - **http_client** - HTTP client using curl.multi and iomux for concurrent requests
 - **llm_provider** - OpenAI-compatible LLM API integration
 - **memory** - Conversation history with time-based decay and token limits
-- **tools** - Extensible tool system (web_search, file_read, execute_command, list_directory)
+- **tools** - Primitive runtime tool system (filesystem, shell, tasks, subagents)
 - **skills** - SKILL.md file loading and prompt injection
 - **oclaw_config** - YAML-based configuration system
 
@@ -153,11 +153,13 @@ OClaw implements OpenAI-compatible function calling:
 5. Tool results are sent back to LLM as messages with `role = Tool`
 6. Process repeats until LLM responds with a text message
 
-Available tools:
-- `web_search` - Search the web (mock implementation, returns placeholder results)
-- `read_file` - Read file contents from filesystem
-- `execute_command` - Execute shell commands
-- `list_directory` - List files in a directory (ls -la)
+Default runtime tools:
+- `read_file` / `write_file` / `edit_file` / `append_file`
+- `list_directory` / `list_dir`
+- `execute_command` / `exec`
+- task and subagent tools remain built-in
+
+Higher-level web research, Python automation, skill operations, and scheduler workflows are skill-guided and should be done through the primitive tools rather than dedicated built-in tools.
 
 Tool parameters use format: `"name", `String "type: description"` (e.g., `"path", `String "string: The file path"`)
 

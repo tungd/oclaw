@@ -10,7 +10,7 @@
 - **Efficient HTTP Client**: Built on curl.multi and iomux for concurrent requests
 - **HTTP Server Core**: Event-driven HTTP/1.1 server built on h1 + iomux
 - **LLM Provider Integration**: OpenAI-compatible API support with DashScope Qwen3.5+ integration
-- **Modular Tool System**: Web search, file operations, and command execution tools
+- **Primitive Tool Kernel**: Filesystem and shell tools, with higher-level workflows pushed into skills
 - **Memory Management**: Conversation history with time-based decay and token-based limitations
 - **Configuration System**: JSON-based configuration with automatic file creation and validation
 - **Extensible Architecture**: Modular design for easy addition of new features
@@ -160,7 +160,7 @@ type conversation_message = {
 
 ### Tool System
 
-The `tools` module provides extensible tool functionality:
+The `tools` module provides a small runtime kernel:
 
 ```ocaml
 type tool_definition = {
@@ -171,18 +171,18 @@ type tool_definition = {
 }
 ```
 
-Python session tools are available when enabled in config:
+Default built-in tools are:
 
-- `python_session_start`
-- `python_session_run`
-- `python_session_end`
-- `python_session_list`
+- `read_file`
+- `write_file`
+- `edit_file`
+- `append_file`
+- `list_directory`
+- `list_dir`
+- `execute_command`
+- `exec`
 
-These tools provide persistent per-session Python execution with:
-- Idle TTL cleanup
-- Session-level state persistence
-- Workspace-aware file helper functions (`read_file`, `write_file`, `append_file`, `list_dir`)
-- Import and subprocess policy guards for automation workflows
+Task and subagent tools remain built-in. Web research, one-shot Python automation, skill operations, and scheduler workflows now live in `skills/` as prompt-only guidance layered on top of the primitive tool kernel.
 
 ## Building and Running
 
@@ -190,7 +190,7 @@ These tools provide persistent per-session Python execution with:
 
 - OCaml 5.4.0+
 - opam package manager
-- Python 3 (for persistent Python session worker processes)
+- Python 3 (recommended for skill-guided automation and web research workflows)
 - Required libraries: `curl`, `iomux`, `yojson`, `yaml`, `ppx_protocol_conv`, `ppx_protocol_conv_json`, `ppx_protocol_conv_yaml`
 
 ### Installation
@@ -216,8 +216,11 @@ dune exec ./test_memory.exe
 # Run LLM provider tests
 dune exec ./test_llm.exe
 
-# Run Python session tool smoke test
-dune exec ./test_python_sessions.exe
+# Run tool registry smoke test
+dune exec ./test_tools_registry.exe
+
+# Run skills smoke test
+dune exec ./test_skills.exe
 ```
 
 ### Running the Agent
@@ -232,30 +235,18 @@ echo "What is the capital of France?" | dune exec ./oclaw.exe -- --single-shot
 
 ## Configuration
 
-The agent uses a YAML configuration file (`config.yaml`). For Python sessions:
+The agent uses a YAML configuration file (`config.yaml`). Tool-related settings now focus on workspace and shell safety:
 
 ```yaml
-tools_python_sessions_enabled: true
-tools_python_session_idle_ttl_seconds: 1200
-tools_python_session_max_count: 8
-tools_python_timeout_seconds: 30
-tools_python_max_output_chars: 20000
-tools_python_max_code_chars: 50000
-tools_python_capability_profile: automation
-tools_python_allowed_imports:
-  - helium
-  - selenium
-  - urllib3
-  - json
-  - re
-  - math
-  - time
-tools_python_allowed_subprocess_bins:
-  - chromedriver
-  - geckodriver
-  - msedgedriver
-  - safaridriver
+tools_workspace: .
+tools_restrict_to_workspace: true
+tools_exec_timeout_seconds: 60
+tools_exec_enable_deny_patterns: true
+tools_allow_read_paths: []
+tools_allow_write_paths: []
 ```
+
+For browsing, Python automation, skill management, and scheduler updates, use the corresponding skills in `skills/` with `execute_command` and the filesystem tools.
 
 ## Parallel Execution
 

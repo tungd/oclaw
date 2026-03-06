@@ -177,8 +177,15 @@
  (flags :standard -w -A))
 
 (executable
- (name test_python_sessions)
- (modules test_python_sessions)
+ (name test_tools_registry)
+ (modules test_tools_registry)
  (libraries tools yojson unix)
+ (preprocess (pps ppx_deriving.show))
+ (flags :standard -w -A))
+
+(executable
+ (name test_skills)
+ (modules test_skills)
+ (libraries skills unix)
  (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))

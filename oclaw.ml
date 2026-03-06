@@ -65,7 +65,7 @@ let build_system_prompt () =
     parts := !parts @ [Skills.skills_to_prompt skills];
 
   if !parts = [] then
-    "You are a helpful AI assistant with access to tools. Use tools when helpful to answer questions about files, directories, or to search the web."
+    "You are a helpful AI assistant with access to filesystem and shell tools. Use skills and primitive tools together when helpful."
   else
     String.concat "\n\n---\n\n" !parts
 
@@ -287,17 +287,6 @@ let () =
     exec_enable_deny_patterns = config.tools_exec_enable_deny_patterns;
     exec_custom_deny_patterns = config.tools_exec_custom_deny_patterns;
     exec_custom_allow_patterns = config.tools_exec_custom_allow_patterns;
-    web_fetch_max_chars = config.tools_web_fetch_max_chars;
-    web_fetch_max_bytes = config.tools_web_fetch_max_bytes;
-    python_sessions_enabled = config.tools_python_sessions_enabled;
-    python_session_idle_ttl_seconds = config.tools_python_session_idle_ttl_seconds;
-    python_session_max_count = config.tools_python_session_max_count;
-    python_timeout_seconds = config.tools_python_timeout_seconds;
-    python_max_output_chars = config.tools_python_max_output_chars;
-    python_max_code_chars = config.tools_python_max_code_chars;
-    python_allowed_imports = config.tools_python_allowed_imports;
-    python_allowed_subprocess_bins = config.tools_python_allowed_subprocess_bins;
-    python_capability_profile = config.tools_python_capability_profile;
   } in
 
   Tools.init_default_tools ~sandbox_config ();
