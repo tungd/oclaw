@@ -7,18 +7,20 @@ module Log = (val Logs.src_log (Logs.Src.create "http_client") : Logs.LOG)
 
 (* Module for HTTP methods *)
 module HttpMethod = struct
-  type t = GET | POST | PUT | DELETE
+  type t = GET | POST | PUT | PATCH | DELETE
   
   let to_string = function
     | GET -> "GET"
     | POST -> "POST" 
     | PUT -> "PUT"
+    | PATCH -> "PATCH"
     | DELETE -> "DELETE"
   
   let of_string = function
     | "GET" -> Some GET
     | "POST" -> Some POST
     | "PUT" -> Some PUT
+    | "PATCH" -> Some PATCH
     | "DELETE" -> Some DELETE
     | _ -> None
 end
@@ -47,6 +49,7 @@ module HttpRequest = struct
      | HttpMethod.GET -> Curl.set_httpget handle true
      | HttpMethod.POST -> Curl.set_post handle true
      | HttpMethod.PUT -> Curl.set_upload handle true
+     | HttpMethod.PATCH -> Curl.set_customrequest handle "PATCH"
      | HttpMethod.DELETE -> Curl.set_customrequest handle "DELETE");
     
     (* Set headers *)
@@ -55,7 +58,7 @@ module HttpRequest = struct
     
     (* Set body for POST/PUT *)
     (match req.method_, req.body with
-     | (HttpMethod.POST | HttpMethod.PUT), Some body -> Curl.set_postfields handle body
+     | (HttpMethod.POST | HttpMethod.PUT | HttpMethod.PATCH), Some body -> Curl.set_postfields handle body
      | _ -> ());
     
     handle
@@ -136,6 +139,7 @@ let set_request_options handle req =
   begin match req.HttpRequest.method_ with
     | HttpMethod.POST -> Curl.set_post handle true
     | HttpMethod.PUT -> Curl.set_customrequest handle "PUT"
+    | HttpMethod.PATCH -> Curl.set_customrequest handle "PATCH"
     | HttpMethod.DELETE -> Curl.set_customrequest handle "DELETE"
     | HttpMethod.GET -> () (* GET is default *)
   end;
@@ -146,7 +150,7 @@ let set_request_options handle req =
   
   (* Set body for POST/PUT *)
   begin match req.HttpRequest.method_, req.HttpRequest.body with
-    | (HttpMethod.POST | HttpMethod.PUT), Some body -> Curl.set_postfields handle body
+    | (HttpMethod.POST | HttpMethod.PUT | HttpMethod.PATCH), Some body -> Curl.set_postfields handle body
     | _ -> ()
   end;
   

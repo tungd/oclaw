@@ -9,6 +9,7 @@ module Tools = Tools
 module Memory = Memory
 module Config = Oclaw_config.Config
 module Log = (val Logs.src_log Logs.default : Logs.LOG)
+module LogColor = Log_color
 
 (* {1 Legacy agent types for backwards compatibility } *)
 
@@ -107,7 +108,7 @@ let call_llm_api message config session_id =
 
   let tools_json = Tools.tools_to_json () in
 
-  let max_tool_rounds = 8 in
+  let max_tool_rounds = 64 in
 
   let rec resolve_with_tools messages rounds_remaining =
     let result = LLM.call_llm config.provider messages ~tools:(Some tools_json) () in
@@ -186,6 +187,9 @@ let run_server_mode config =
   Log.info (fun m -> m "Starting OClaw in server mode with effect handlers");
 
   let provider = Config.to_llm_provider_config config in
+  let base_url = "http://127.0.0.1:8080" in
+  Task_api_client.set_default_base_url base_url;
+  Task_api_client.set_default_timeout config.llm_timeout;
 
   let server_config = {
     Oclaw_server.host = "127.0.0.1";
@@ -193,6 +197,11 @@ let run_server_mode config =
     Oclaw_server.llm_config = provider;
     model = config.llm_model;
     max_connections = 100;
+    tasks_db_path = config.tasks_db_path;
+    tasks_default_limit = config.tasks_default_limit;
+    tasks_max_limit = config.tasks_max_limit;
+    tasks_busy_timeout_ms = config.tasks_busy_timeout_ms;
+    tasks_event_retention_days = config.tasks_event_retention_days;
   } in
 
   let server = Oclaw_server.create server_config in
@@ -234,8 +243,8 @@ let spec = [
 let () =
   Arg.parse spec (fun _ -> ()) "Usage: oclaw [--single-shot|--server]";
 
-  Logs.set_level (Some Logs.Info);
-  Logs.set_reporter (Logs_fmt.reporter ());
+  (* Setup colored logging *)
+  LogColor.setup_auto ~level:(Some Logs.Info) ~format_time:true ();
 
   Printf.printf "OClaw OCaml version - starting...\n";
   Log.info (fun m -> m "OClaw starting up");
@@ -252,7 +261,7 @@ let () =
   in
 
   if config.debug then (
-    Logs.set_level (Some Logs.Debug);
+    LogColor.setup_auto ~level:(Some Logs.Debug) ~format_time:true ();
     Log.info (fun m -> m "Debug mode enabled - verbose logging active")
   );
 
@@ -280,6 +289,15 @@ let () =
     exec_custom_allow_patterns = config.tools_exec_custom_allow_patterns;
     web_fetch_max_chars = config.tools_web_fetch_max_chars;
     web_fetch_max_bytes = config.tools_web_fetch_max_bytes;
+    python_sessions_enabled = config.tools_python_sessions_enabled;
+    python_session_idle_ttl_seconds = config.tools_python_session_idle_ttl_seconds;
+    python_session_max_count = config.tools_python_session_max_count;
+    python_timeout_seconds = config.tools_python_timeout_seconds;
+    python_max_output_chars = config.tools_python_max_output_chars;
+    python_max_code_chars = config.tools_python_max_code_chars;
+    python_allowed_imports = config.tools_python_allowed_imports;
+    python_allowed_subprocess_bins = config.tools_python_allowed_subprocess_bins;
+    python_capability_profile = config.tools_python_capability_profile;
   } in
 
   Tools.init_default_tools ~sandbox_config ();

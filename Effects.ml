@@ -13,11 +13,13 @@ type llm_effect_req = { req : Llm_types.llm_request }
 type tool_effect_req = { call : Llm_types.tool_call }
 type wait_effect_req = { seconds : float }
 type skill_effect_req = { name : string }
+type task_effect_req = { operation : string; payload : Yojson.Safe.t }
 
 type _ Effect.t += Llm_request_effect : llm_effect_req -> Llm_types.llm_response Effect.t
 type _ Effect.t += Tool_call_effect : tool_effect_req -> Session_types.tool_response Effect.t
 type _ Effect.t += Agent_wait_effect : wait_effect_req -> unit Effect.t
 type _ Effect.t += Load_skill_effect : skill_effect_req -> Skills.Skill.t option Effect.t
+type _ Effect.t += Task_operation_effect : task_effect_req -> Yojson.Safe.t Effect.t
 
 (* {1 Effect performance functions } *)
 
@@ -32,6 +34,9 @@ let agent_wait (seconds : float) : unit =
 
 let load_skill (name : string) : Skills.Skill.t option =
   perform (Load_skill_effect { name })
+
+let task_operation ~(operation : string) ~(payload : Yojson.Safe.t) : Yojson.Safe.t =
+  perform (Task_operation_effect { operation; payload })
 
 (* {1 Effect handlers } *)
 
@@ -118,16 +123,36 @@ let handle_llm_request ~llm_config (req : Llm_types.llm_request) =
 
 let handle_tool_call (tool_call : Llm_types.tool_call) =
   Log.debug (fun m -> m "Handling tool call: %s" tool_call.function_name);
+  let classify_tool_result (name : string) (result_str : string) : Session_types.tool_response =
+    let trimmed = String.trim result_str in
+    let lower = String.lowercase_ascii trimmed in
+    let is_tool_not_found =
+      String.starts_with ~prefix:"Tool " result_str && String.ends_with ~suffix:" not found" result_str
+    in
+    let is_error_like =
+      String.starts_with ~prefix:"error" lower
+      || String.starts_with ~prefix:"invalid " lower
+      || String.ends_with ~suffix:" is required" lower
+    in
+    if is_tool_not_found then
+      { Session_types.name = name; result = ""; error = Some "Tool not found" }
+    else if is_error_like then
+      { Session_types.name = name; result = result_str; error = Some trimmed }
+    else
+      { Session_types.name = name; result = result_str; error = None }
+  in
   try
     let args_json =
       try Yojson.Safe.from_string tool_call.function_args
       with _ -> `Assoc []
     in
     let result_str = Tools.execute_tool tool_call.function_name args_json in
-    if String.starts_with ~prefix:"Tool " result_str && String.ends_with ~suffix:" not found" result_str then
-      { Session_types.name = tool_call.function_name; result = ""; error = Some "Tool not found" }
-    else
-      { Session_types.name = tool_call.function_name; result = result_str; error = None }
+    let resp = classify_tool_result tool_call.function_name result_str in
+    (match resp.error with
+     | Some err ->
+         Log.warn (fun m -> m "Tool %s returned error: %s" tool_call.function_name err)
+     | None -> ());
+    resp
   with exn ->
     Log.err (fun m -> m "Tool execution error: %s" (Printexc.to_string exn));
     { Session_types.name = tool_call.function_name; result = ""; error = Some (Printexc.to_string exn) }
@@ -160,5 +185,10 @@ let run_with_handlers ~llm_config f =
                 skills
             in
             continue k skill_opt)
+      | Task_operation_effect task_req ->
+          Some (fun (k : (a, _) continuation) ->
+            match Task_service.dispatch_with_default ~operation:task_req.operation ~payload:task_req.payload with
+            | Ok json -> continue k json
+            | Error err -> raise (Failure err))
       | _ -> None
   }

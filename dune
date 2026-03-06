@@ -1,3 +1,9 @@
+(library
+ (name log_color)
+ (modules log_color)
+ (libraries logs logs.fmt unix)
+ (flags :standard -w -A))
+
 ; Existing libraries
 (library
  (name http_client)
@@ -16,7 +22,7 @@
 (library
  (name tools)
  (modules tools)
- (libraries http_client curl iomux yojson unix)
+ (libraries http_client curl iomux yojson unix task_system)
  (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))
 
@@ -44,15 +50,23 @@
 (library
  (name types)
  (wrapped false)
- (modules llm_types session_types rpc_types)
- (libraries ppx_protocol_conv_json)
+ (modules llm_types session_types rpc_types task_types)
+ (libraries ppx_protocol_conv_json unix)
  (preprocess (pps ppx_protocol_conv))
+ (flags :standard -w -A))
+
+(library
+ (name task_system)
+ (wrapped false)
+ (modules task_store task_service task_api_client)
+ (libraries types http_client sqlite3 domainslib logs yojson unix)
+ (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))
 
 (library
  (name effects)
  (modules Effects)
- (libraries types llm_provider tools skills logs)
+ (libraries types llm_provider tools skills logs task_system)
  (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))
 
@@ -60,7 +74,7 @@
  (name agent_lib)
  (wrapped false)
  (modules Agent)
- (libraries effects types memory tools skills llm_provider logs)
+ (libraries effects types memory tools skills llm_provider logs task_system)
  (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))
 
@@ -74,7 +88,7 @@
 (library
  (name oclaw_server)
  (modules Oclaw_server)
- (libraries http_server effects agent_lib memory logs unix)
+ (libraries http_server effects agent_lib memory logs unix task_system types)
  (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))
 
@@ -94,9 +108,11 @@
   skills
   logs
   logs.fmt
+  log_color
   types
   effects
   agent_lib
+  task_system
   http_server
   oclaw_server
   unix)
@@ -149,6 +165,20 @@
 (executable
  (name test_http_server_integration)
  (modules test_http_server_integration)
- (libraries http_server http_client logs logs.fmt unix yojson)
+ (libraries http_server http_client logs logs.fmt log_color unix yojson)
+ (preprocess (pps ppx_deriving.show))
+ (flags :standard -w -A))
+
+(executable
+ (name test_task_store)
+ (modules test_task_store)
+ (libraries task_system types unix)
+ (preprocess (pps ppx_deriving.show))
+ (flags :standard -w -A))
+
+(executable
+ (name test_python_sessions)
+ (modules test_python_sessions)
+ (libraries tools yojson unix)
  (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))

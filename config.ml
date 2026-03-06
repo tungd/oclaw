@@ -9,7 +9,7 @@ type config = {
   llm_provider : string [@default "dashscope"];
   llm_model : string [@default "qwen3.5-plus"];
   llm_temperature : float [@default 0.7];
-  llm_max_tokens : int [@default 1000];
+  llm_max_tokens : int [@default 8192];
   llm_api_key : string [@default "sk-sp-4326acec735b4e29b33b31e97d1d66fa"];
   llm_api_base : string [@default "https://coding-intl.dashscope.aliyuncs.com/v1"];
   llm_timeout : int [@default 60];
@@ -26,6 +26,52 @@ type config = {
   tools_exec_custom_allow_patterns : string list [@default []];
   tools_web_fetch_max_chars : int [@default 50000];
   tools_web_fetch_max_bytes : int [@default 10485760];
+  tools_python_sessions_enabled : bool [@default false];
+  tools_python_session_idle_ttl_seconds : int [@default 1200];
+  tools_python_session_max_count : int [@default 8];
+  tools_python_timeout_seconds : int [@default 30];
+  tools_python_max_output_chars : int [@default 20000];
+  tools_python_max_code_chars : int [@default 50000];
+  tools_python_allowed_imports : string list [@default [
+    "helium";
+    "selenium";
+    "urllib3";
+    "json";
+    "re";
+    "math";
+    "time";
+    "datetime";
+    "itertools";
+    "functools";
+    "collections";
+    "pathlib";
+    "typing";
+    "urllib";
+    "os";
+    "sys";
+    "logging";
+    "traceback";
+    "io";
+    "contextlib";
+  ]];
+  tools_python_allowed_subprocess_bins : string list [@default [
+    "chromedriver";
+    "geckodriver";
+    "msedgedriver";
+    "safaridriver";
+    "google-chrome";
+    "google-chrome-stable";
+    "chromium";
+    "chromium-browser";
+    "chrome";
+    "msedge";
+  ]];
+  tools_python_capability_profile : string [@default "automation"];
+  tasks_db_path : string [@default "workspace/state/tasks.db"];
+  tasks_default_limit : int [@default 50];
+  tasks_max_limit : int [@default 200];
+  tasks_busy_timeout_ms : int [@default 5000];
+  tasks_event_retention_days : int [@default 30];
   agent_system_prompt : string [@default "You are a helpful AI assistant."];
   agent_memory_window : int [@default 10];
   agent_max_iterations : int [@default 5];
@@ -115,6 +161,26 @@ let validate_config config =
     errors := "Tools web_fetch_max_chars must be positive" :: !errors;
   if config.tools_web_fetch_max_bytes <= 0 then
     errors := "Tools web_fetch_max_bytes must be positive" :: !errors;
+  if config.tools_python_session_idle_ttl_seconds <= 0 then
+    errors := "Tools python_session_idle_ttl_seconds must be positive" :: !errors;
+  if config.tools_python_session_max_count <= 0 then
+    errors := "Tools python_session_max_count must be positive" :: !errors;
+  if config.tools_python_timeout_seconds <= 0 then
+    errors := "Tools python_timeout_seconds must be positive" :: !errors;
+  if config.tools_python_max_output_chars <= 0 then
+    errors := "Tools python_max_output_chars must be positive" :: !errors;
+  if config.tools_python_max_code_chars <= 0 then
+    errors := "Tools python_max_code_chars must be positive" :: !errors;
+  if String.trim config.tools_python_capability_profile = "" then
+    errors := "Tools python_capability_profile must not be empty" :: !errors;
+  if config.tasks_default_limit <= 0 then
+    errors := "Tasks default_limit must be positive" :: !errors;
+  if config.tasks_max_limit <= 0 then
+    errors := "Tasks max_limit must be positive" :: !errors;
+  if config.tasks_busy_timeout_ms <= 0 then
+    errors := "Tasks busy_timeout_ms must be positive" :: !errors;
+  if config.tasks_event_retention_days <= 0 then
+    errors := "Tasks event_retention_days must be positive" :: !errors;
 
   (* Check agent configuration *)
   if config.agent_memory_window <= 0 then

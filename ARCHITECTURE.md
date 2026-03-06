@@ -130,6 +130,33 @@ lib/
   oclaw.ml          - Main entry point with effect handlers
 ```
 
+## Task API and Storage
+
+OClaw now includes a Beads-inspired task layer for durable agent/subagent coordination:
+
+- **SQLite-backed storage** (`task_store.ml`)
+  - Tables: `tasks`, `task_dependencies`, `task_events`
+  - WAL mode + busy timeout
+  - Transactional write path with event append on every mutation
+- **Task service** (`task_service.ml`)
+  - Lifecycle rules and status transitions
+  - Ready-task query with dependency blocking semantics
+  - CRUD + claim/close/cancel + dependency/event operations
+- **Task API client** (`task_api_client.ml`)
+  - Internal tools call the central server via HTTP JSON endpoints
+- **Server endpoints** (`Oclaw_server.ml`)
+  - `POST /api/tasks`
+  - `GET /api/tasks`
+  - `GET /api/tasks/ready`
+  - `GET /api/tasks/:id`
+  - `POST /api/tasks/:id/update`
+  - `POST /api/tasks/:id/claim`
+  - `POST /api/tasks/:id/close`
+  - `POST /api/tasks/:id/cancel`
+  - `POST /api/tasks/:id/dependencies`
+  - `GET /api/tasks/:id/dependencies`
+  - `GET /api/tasks/:id/events`
+
 ## Example Usage
 
 ```ocaml

@@ -171,12 +171,26 @@ type tool_definition = {
 }
 ```
 
+Python session tools are available when enabled in config:
+
+- `python_session_start`
+- `python_session_run`
+- `python_session_end`
+- `python_session_list`
+
+These tools provide persistent per-session Python execution with:
+- Idle TTL cleanup
+- Session-level state persistence
+- Workspace-aware file helper functions (`read_file`, `write_file`, `append_file`, `list_dir`)
+- Import and subprocess policy guards for automation workflows
+
 ## Building and Running
 
 ### Prerequisites
 
 - OCaml 5.4.0+
 - opam package manager
+- Python 3 (for persistent Python session worker processes)
 - Required libraries: `curl`, `iomux`, `yojson`, `yaml`, `ppx_protocol_conv`, `ppx_protocol_conv_json`, `ppx_protocol_conv_yaml`
 
 ### Installation
@@ -201,6 +215,9 @@ dune exec ./test_memory.exe
 
 # Run LLM provider tests
 dune exec ./test_llm.exe
+
+# Run Python session tool smoke test
+dune exec ./test_python_sessions.exe
 ```
 
 ### Running the Agent
@@ -215,28 +232,29 @@ echo "What is the capital of France?" | dune exec ./oclaw.exe -- --single-shot
 
 ## Configuration
 
-The agent uses a JSON configuration file (`config.json`):
+The agent uses a YAML configuration file (`config.yaml`). For Python sessions:
 
-```json
-{
-  "provider": {
-    "name": "dashscope",
-    "api_key": "your-api-key-here",
-    "model": "qwen3.5-plus",
-    "timeout": 30
-  },
-  "memory": {
-    "max_age_seconds": 3600,
-    "max_tokens": 4000,
-    "max_messages": 50,
-    "importance_threshold": 0.3
-  },
-  "tools": [
-    {"name": "web_search", "enabled": true},
-    {"name": "file_read", "enabled": true},
-    {"name": "execute_command", "enabled": false}
-  ]
-}
+```yaml
+tools_python_sessions_enabled: true
+tools_python_session_idle_ttl_seconds: 1200
+tools_python_session_max_count: 8
+tools_python_timeout_seconds: 30
+tools_python_max_output_chars: 20000
+tools_python_max_code_chars: 50000
+tools_python_capability_profile: automation
+tools_python_allowed_imports:
+  - helium
+  - selenium
+  - urllib3
+  - json
+  - re
+  - math
+  - time
+tools_python_allowed_subprocess_bins:
+  - chromedriver
+  - geckodriver
+  - msedgedriver
+  - safaridriver
 ```
 
 ## Parallel Execution

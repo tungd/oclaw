@@ -110,50 +110,60 @@ let create_dashscope_provider ?(temperature=0.7) ?(max_tokens=4096) () = {
   timeout = 60;
 }
 
+let normalize_function_args_for_request raw =
+  let raw = String.trim raw in
+  if raw = "" then "{}"
+  else
+    try
+      match Yojson.Safe.from_string raw with
+      | `Assoc _ as json -> Yojson.Safe.to_string json
+      | _ -> "{}"
+    with _ -> "{}"
+
+let message_to_json (msg : message) : Yojson.Safe.t =
+  let base = [("role", `String (role_to_string msg.role)); ("content", `String msg.content)] in
+  if msg.role = Tool && msg.tool_call_id <> None then
+    `Assoc (base @ [("tool_call_id", `String (Option.value ~default:"" msg.tool_call_id))])
+  else if msg.role = Assistant && msg.tool_calls <> [] then
+    let tool_calls =
+      List.map (fun {id; type_; function_name; function_args} ->
+        `Assoc [
+          ("id", `String id);
+          ("type", `String type_);
+          ("function", `Assoc [
+            ("name", `String function_name);
+            ("arguments", `String (normalize_function_args_for_request function_args))
+          ])
+        ]
+      ) msg.tool_calls
+    in
+    `Assoc (base @ [("tool_calls", `List tool_calls)])
+  else
+    `Assoc base
+
+let build_request_json ~(provider : provider_config) ~(messages : message list)
+    ~(tools : Yojson.Safe.t option) ?(stream=false) () =
+  let fields = [
+    ("model", `String provider.model.name);
+    ("messages", `List (List.map message_to_json messages));
+    ("temperature", `Float provider.temperature);
+    ("max_tokens", `Int provider.max_tokens);
+    ("tools", (match tools with Some t -> t | None -> `Null));
+    ("tool_choice", `String "auto");
+  ] in
+  let fields = if stream then fields @ [("stream", `Bool true)] else fields in
+  `Assoc fields
+
 let call_llm provider messages ?(tools=None) () =
   let url = provider.api_base ^ "/chat/completions" in
   let headers = [
     "Content-Type", "application/json";
     "Authorization", "Bearer " ^ provider.api_key;
   ] in
-
-  (* Build tools JSON if provided *)
-  let tools_json = match tools with
-    | Some tools -> Yojson.Safe.to_string tools
-    | None -> "null"
+  let body =
+    build_request_json ~provider ~messages ~tools ()
+    |> Yojson.Safe.to_string
   in
-
-  (* Build messages JSON *)
-  let message_json_list = List.map (fun msg ->
-    (* Handle tool messages with tool_call_id *)
-    if msg.role = Tool && msg.tool_call_id <> None then
-      Printf.sprintf "{\"role\": \"%s\", \"content\": \"%s\", \"tool_call_id\": \"%s\"}"
-        (role_to_string msg.role)
-        (String.escaped msg.content)
-        (match msg.tool_call_id with Some id -> id | None -> "")
-    else if msg.role = Assistant && msg.tool_calls <> [] then
-      let tool_calls_json = List.map (fun {id; type_; function_name; function_args} ->
-        Printf.sprintf "{\"id\": \"%s\", \"type\": \"%s\", \"function\": {\"name\": \"%s\", \"arguments\": \"%s\"}}"
-          (String.escaped id)
-          (String.escaped type_)
-          (String.escaped function_name)
-          (String.escaped function_args)
-      ) msg.tool_calls in
-      Printf.sprintf "{\"role\": \"%s\", \"content\": \"%s\", \"tool_calls\": [%s]}"
-        (role_to_string msg.role)
-        (String.escaped msg.content)
-        (String.concat ", " tool_calls_json)
-    else
-      Printf.sprintf "{\"role\": \"%s\", \"content\": \"%s\"}"
-        (role_to_string msg.role)
-        (String.escaped msg.content)
-  ) messages in
-  let messages_json = "[" ^ (String.concat ", " message_json_list) ^ "]" in
-
-  (* Build request body *)
-  let body = Printf.sprintf
-    "{\"model\": \"%s\", \"messages\": %s, \"temperature\": %.2f, \"max_tokens\": %d, \"tools\": %s, \"tool_choice\": \"auto\"}"
-    provider.model.name messages_json provider.temperature provider.max_tokens tools_json in
 
   (* Make HTTP request *)
   let response = Http.post url headers body provider.timeout in
@@ -253,44 +263,10 @@ let call_llm_streaming provider messages ?(tools=None) chunk_callback =
     "Content-Type", "application/json";
     "Authorization", "Bearer " ^ provider.api_key;
   ] in
-
-  (* Build tools JSON if provided *)
-  let tools_json = match tools with
-    | Some tools -> Yojson.Safe.to_string tools
-    | None -> "null"
+  let body =
+    build_request_json ~provider ~messages ~tools ~stream:true ()
+    |> Yojson.Safe.to_string
   in
-
-  (* Build messages JSON *)
-  let message_json_list = List.map (fun msg ->
-    (* Handle tool messages with tool_call_id *)
-    if msg.role = Tool && msg.tool_call_id <> None then
-      Printf.sprintf "{\"role\": \"%s\", \"content\": \"%s\", \"tool_call_id\": \"%s\"}"
-        (role_to_string msg.role)
-        (String.escaped msg.content)
-        (match msg.tool_call_id with Some id -> id | None -> "")
-    else if msg.role = Assistant && msg.tool_calls <> [] then
-      let tool_calls_json = List.map (fun {id; type_; function_name; function_args} ->
-        Printf.sprintf "{\"id\": \"%s\", \"type\": \"%s\", \"function\": {\"name\": \"%s\", \"arguments\": \"%s\"}}"
-          (String.escaped id)
-          (String.escaped type_)
-          (String.escaped function_name)
-          (String.escaped function_args)
-      ) msg.tool_calls in
-      Printf.sprintf "{\"role\": \"%s\", \"content\": \"%s\", \"tool_calls\": [%s]}"
-        (role_to_string msg.role)
-        (String.escaped msg.content)
-        (String.concat ", " tool_calls_json)
-    else
-      Printf.sprintf "{\"role\": \"%s\", \"content\": \"%s\"}"
-        (role_to_string msg.role)
-        (String.escaped msg.content)
-  ) messages in
-  let messages_json = "[" ^ (String.concat ", " message_json_list) ^ "]" in
-
-  (* Build request body *)
-  let body = Printf.sprintf
-    "{\"model\": \"%s\", \"messages\": %s, \"temperature\": %.2f, \"max_tokens\": %d, \"tools\": %s, \"stream\": true, \"tool_choice\": \"auto\"}"
-    provider.model.name messages_json provider.temperature provider.max_tokens tools_json in
 
   (* Make streaming HTTP request *)
   let result = Http.post_streaming url headers body provider.timeout (fun chunk ->

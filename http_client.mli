@@ -3,7 +3,7 @@
 (** Module for HTTP methods *)
 module HttpMethod : sig
   (** HTTP method type *)
-  type t = GET | POST | PUT | DELETE
+  type t = GET | POST | PUT | PATCH | DELETE
   
   (** Convert HTTP method to string *)
   val to_string : t -> string
