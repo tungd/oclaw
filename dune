@@ -1,7 +1,7 @@
 (library
  (name log_color)
  (modules log_color)
- (libraries logs logs.fmt unix)
+ (libraries fmt.tty logs logs.fmt unix)
  (flags :standard -w -A))
 
 ; Existing libraries
