@@ -10,6 +10,9 @@ module Memory = Memory
 module Config = Oclaw_config.Config
 module Log = (val Logs.src_log Logs.default : Logs.LOG)
 module LogColor = Log_color
+module AcpTransport = Acp_transport
+module AcpClient = Acp_client
+module AcpServer = Acp_server
 
 (* {1 Legacy agent types for backwards compatibility } *)
 
@@ -183,20 +186,16 @@ let agent_loop config =
 
 (* {1 Server mode with effect handlers } *)
 
-let run_server_mode config =
-  Log.info (fun m -> m "Starting OClaw in server mode with effect handlers");
+let run_server_mode config endpoint =
+  Log.info (fun m -> m "Starting OClaw ACP server mode");
 
   let provider = Config.to_llm_provider_config config in
-  let base_url = "http://127.0.0.1:8080" in
-  Task_api_client.set_default_base_url base_url;
-  Task_api_client.set_default_timeout config.llm_timeout;
 
   let server_config = {
-    Oclaw_server.host = "127.0.0.1";
-    port = 8080;
-    Oclaw_server.llm_config = provider;
+    AcpServer.host = endpoint.AcpTransport.host;
+    port = endpoint.port;
+    AcpServer.llm_config = provider;
     model = config.llm_model;
-    max_connections = 100;
     tasks_db_path = config.tasks_db_path;
     tasks_default_limit = config.tasks_default_limit;
     tasks_max_limit = config.tasks_max_limit;
@@ -204,44 +203,64 @@ let run_server_mode config =
     tasks_event_retention_days = config.tasks_event_retention_days;
   } in
 
-  let server = Oclaw_server.create server_config in
+  let server = AcpServer.create server_config in
 
   Sys.set_signal Sys.sigint (Sys.Signal_handle (fun _ ->
     Log.info (fun m -> m "Received shutdown signal");
-    Oclaw_server.stop server;
+    AcpServer.stop server;
     Printf.printf "\nOClaw server stopped.\n";
     exit 0
   ));
 
   Sys.set_signal Sys.sigterm (Sys.Signal_handle (fun _ ->
     Log.info (fun m -> m "Received shutdown signal");
-    Oclaw_server.stop server;
+    AcpServer.stop server;
     Printf.printf "\nOClaw server stopped.\n";
     exit 0
   ));
 
-  Printf.printf "Starting OClaw server with effect handlers on http://127.0.0.1:8080\n";
+  Printf.printf "Starting OClaw ACP server on %s\n" (AcpTransport.endpoint_to_string endpoint);
   Printf.printf "Press Ctrl+C to stop\n\n";
 
-  Oclaw_server.start server;
+  AcpServer.start server;
 
-  while Oclaw_server.is_running server do
+  while AcpServer.is_running server do
     Unix.sleepf 1.0
   done
+
+let read_single_shot_input () =
+  let lines = ref [] in
+  try
+    while true do
+      lines := read_line () :: !lines
+    done;
+    ""
+  with End_of_file ->
+    List.rev !lines |> String.concat "\n"
+
+let run_client_mode endpoint ~single_shot =
+  if single_shot then
+    let input = read_single_shot_input () in
+    if String.trim input = "" then Ok ()
+    else AcpClient.run_single_shot endpoint input
+  else
+    AcpClient.run_interactive endpoint
 
 (* {1 Command line interface } *)
 
 let single_shot = ref false
 let server_mode = ref false
+let connect_target = ref None
 
 let spec = [
   ("--single-shot", Arg.Unit (fun () -> single_shot := true), " Run in single-shot mode (read from stdin, output response, exit)");
   ("--test", Arg.Unit (fun () -> single_shot := true), " Alias for --single-shot");
-  ("--server", Arg.Unit (fun () -> server_mode := true), " Run in server mode with effect handlers");
+  ("--server", Arg.Unit (fun () -> server_mode := true), " Run in ACP server mode");
+  ("--connect", Arg.String (fun s -> connect_target := Some s), " Connect to ACP agent endpoint (host:port)");
 ]
 
 let () =
-  Arg.parse spec (fun _ -> ()) "Usage: oclaw [--single-shot|--server]";
+  Arg.parse spec (fun _ -> ()) "Usage: oclaw [--server] [--connect host:port] [--single-shot]";
 
   (* Setup colored logging *)
   LogColor.setup_auto ~level:(Some Logs.Info) ~format_time:true ();
@@ -272,76 +291,39 @@ let () =
       List.iter (fun err -> Printf.printf "  - %s\n" err) errors;
       Printf.printf "Using default configuration\n");
 
-  let mode =
-    if !server_mode then `server
-    else if !single_shot then `single_shot
-    else `interactive
+  let endpoint =
+    match !connect_target with
+    | None -> AcpTransport.default_endpoint
+    | Some raw ->
+        begin
+          match AcpTransport.parse_endpoint raw with
+          | Ok endpoint -> endpoint
+          | Error err ->
+              Printf.eprintf "Invalid ACP endpoint: %s\n" err;
+              exit 2
+        end
   in
 
-  let sandbox_config = {
-    Tools.workspace_root = config.tools_workspace;
-    restrict_to_workspace = config.tools_restrict_to_workspace;
-    allow_read_paths = config.tools_allow_read_paths;
-    allow_write_paths = config.tools_allow_write_paths;
-    exec_timeout_seconds = config.tools_exec_timeout_seconds;
-    exec_enable_deny_patterns = config.tools_exec_enable_deny_patterns;
-    exec_custom_deny_patterns = config.tools_exec_custom_deny_patterns;
-    exec_custom_allow_patterns = config.tools_exec_custom_allow_patterns;
-  } in
-
-  Tools.init_default_tools ~sandbox_config ();
-  let tool_count = List.length (Tools.get_all_tools ()) in
-  Printf.printf "Tools system initialized with %d tools\n" tool_count;
-
-  (match mode with
-  | `server ->
-      Printf.printf "Starting in server mode with effect handlers...\n";
-      run_server_mode config
-  | `single_shot | `interactive ->
-      let provider = Config.to_llm_provider_config config in
-      let runtime_agent =
-        Agent.create
-          ~llm_config:provider
-          ~model:config.llm_model
-          ~temperature:config.llm_temperature
-          ~max_tokens:config.llm_max_tokens
-          ()
-      in
-
-      if not !single_shot then (
-        Printf.printf "OClaw initialization complete.\n";
-        Printf.printf "Successfully connected to DashScope Qwen3.5+ API!\n"
-      );
-
-      if !single_shot then (
-        Log.info (fun m -> m "Running in single-shot mode");
-        try
-          let input = read_line () in
-          match Agent.process_query runtime_agent ~session_id:"single_shot_session" ~content:input with
-          | Error error ->
-              Printf.printf "Error: %s\n" error;
-              exit 1
-          | Ok response ->
-              Printf.printf "%s\n" response;
-              exit 0
-        with End_of_file ->
-          Log.info (fun m -> m "No input provided in single-shot mode");
-          exit 0
-      ) else (
-        Printf.printf "\nStarting interactive mode (type 'exit' to quit)...\n";
-        let rec loop () =
-          Printf.printf "> ";
-          flush stdout;
-          let input = read_line () in
-          if input = "exit" || input = "quit" then
-            Printf.printf "Goodbye!\n"
-          else (
-            match Agent.process_query runtime_agent ~session_id:"cli_session" ~content:input with
-            | Error error -> Printf.printf "Error: %s\n" error
-            | Ok response -> Printf.printf "Response: %s\n" response;
-            loop ()
-          )
-        in
-        loop ()
-      ));
+  if !server_mode then (
+    let sandbox_config = {
+      Tools.workspace_root = config.tools_workspace;
+      restrict_to_workspace = config.tools_restrict_to_workspace;
+      allow_read_paths = config.tools_allow_read_paths;
+      allow_write_paths = config.tools_allow_write_paths;
+      exec_timeout_seconds = config.tools_exec_timeout_seconds;
+      exec_enable_deny_patterns = config.tools_exec_enable_deny_patterns;
+      exec_custom_deny_patterns = config.tools_exec_custom_deny_patterns;
+      exec_custom_allow_patterns = config.tools_exec_custom_allow_patterns;
+    } in
+    Tools.init_default_tools ~sandbox_config ();
+    let tool_count = List.length (Tools.get_all_tools ()) in
+    Printf.printf "Tools system initialized with %d tools\n" tool_count;
+    run_server_mode config endpoint
+  ) else (
+    match run_client_mode endpoint ~single_shot:!single_shot with
+    | Ok () -> ()
+    | Error err ->
+        Printf.eprintf "ACP client error: %s\n" err;
+        exit 1
+  );
   exit 0

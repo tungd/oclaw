@@ -5,6 +5,20 @@ open Iomux
 
 module Log = (val Logs.src_log (Logs.Src.create "http_client") : Logs.LOG)
 
+let default_user_agent = "OpenAI/Go 3.22.0"
+
+let has_ci_header name headers =
+  let lname = String.lowercase_ascii name in
+  List.exists (fun (k, _v) -> String.equal (String.lowercase_ascii k) lname) headers
+
+let with_default_request_headers headers =
+  if has_ci_header "user-agent" headers then headers
+  else ("User-Agent", default_user_agent) :: headers
+
+let to_curl_headers headers =
+  with_default_request_headers headers
+  |> List.map (fun (k, v) -> k ^ ": " ^ v)
+
 (* Module for HTTP methods *)
 module HttpMethod = struct
   type t = GET | POST | PUT | PATCH | DELETE
@@ -53,7 +67,7 @@ module HttpRequest = struct
      | HttpMethod.DELETE -> Curl.set_customrequest handle "DELETE");
     
     (* Set headers *)
-    let headers_list = List.map (fun (k, v) -> k ^ ": " ^ v) req.headers in
+    let headers_list = to_curl_headers req.headers in
     Curl.set_httpheader handle headers_list;
     
     (* Set body for POST/PUT *)
@@ -104,7 +118,7 @@ let perform_streaming_request url headers body timeout callback =
   Curl.set_post handle true;
   
   (* Set headers *)
-  let headers = List.map (fun (name, value) -> name ^ ": " ^ value) headers in
+  let headers = to_curl_headers headers in
   Curl.set_httpheader handle headers;
   
   (* Set body *)
@@ -145,7 +159,7 @@ let set_request_options handle req =
   end;
   
   (* Set headers *)
-  let headers = List.map (fun (name, value) -> name ^ ": " ^ value) req.HttpRequest.headers in
+  let headers = to_curl_headers req.HttpRequest.headers in
   Curl.set_httpheader handle headers;
   
   (* Set body for POST/PUT *)

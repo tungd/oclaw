@@ -4,8 +4,16 @@ let fail msg =
   Printf.eprintf "FAIL: %s\n" msg;
   exit 1
 
+let expected_user_agent = "OpenAI/Go 3.22.0"
+
 let assert_true label condition =
   if not condition then fail label
+
+let find_header_ci name headers =
+  let lname = String.lowercase_ascii name in
+  headers
+  |> List.find_map (fun (k, v) ->
+       if String.equal (String.lowercase_ascii k) lname then Some v else None)
 
 let assert_status label expected response =
   match response.Http_client.HttpResponse.error with
@@ -60,6 +68,19 @@ let () =
       Http_server.respond_json reqd (`Assoc [ ("status", `String "ok") ]));
 
   Http_server.add_route server
+    ~method_:(Some `GET)
+    ~match_type:Http_server.Exact
+    "/echo-user-agent"
+    (fun reqd ->
+      let request = Http_server.Reqd.request reqd in
+      let user_agent =
+        Http_server.Headers.to_list request.headers
+        |> find_header_ci "user-agent"
+        |> Option.value ~default:""
+      in
+      Http_server.respond_text reqd user_agent);
+
+  Http_server.add_route server
     ~method_:(Some `POST)
     ~match_type:Http_server.Exact
     "/echo"
@@ -83,6 +104,20 @@ let () =
 
       let missing = Http_client.get "http://127.0.0.1:18081/missing" [] 5 in
       assert_status "GET /missing" 404 missing;
+
+      let default_ua = Http_client.get "http://127.0.0.1:18081/echo-user-agent" [] 5 in
+      assert_status "GET /echo-user-agent default UA" 200 default_ua;
+      assert_true "GET /echo-user-agent should send OpenAI SDK user agent"
+        (String.equal default_ua.Http_client.HttpResponse.body expected_user_agent);
+
+      let custom_ua = Http_client.get
+        "http://127.0.0.1:18081/echo-user-agent"
+        [ ("User-Agent", "CustomAgent/9.9") ]
+        5
+      in
+      assert_status "GET /echo-user-agent custom UA" 200 custom_ua;
+      assert_true "Explicit User-Agent header should override default"
+        (String.equal custom_ua.Http_client.HttpResponse.body "CustomAgent/9.9");
 
       let echo = Http_client.post
         "http://127.0.0.1:18081/echo"

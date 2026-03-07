@@ -79,6 +79,14 @@
  (flags :standard -w -A))
 
 (library
+ (name acp)
+ (wrapped false)
+ (modules acp_transport acp_client acp_server)
+ (libraries agent_lib llm_provider logs task_system unix yojson)
+ (preprocess (pps ppx_deriving.show))
+ (flags :standard -w -A))
+
+(library
  (name http_server)
  (modules Http_server)
  (libraries h1 iomux logs unix yojson types)
@@ -112,6 +120,7 @@
   types
   effects
   agent_lib
+  acp
   task_system
   http_server
   oclaw_server
