@@ -4,7 +4,6 @@
  (libraries fmt.tty logs logs.fmt unix)
  (flags :standard -w -A))
 
-; Existing libraries
 (library
  (name http_client)
  (modules http_client)
@@ -20,168 +19,38 @@
  (flags :standard -w -A))
 
 (library
- (name tools)
- (modules tools)
- (libraries http_client curl iomux yojson unix task_system)
- (preprocess (pps ppx_deriving.show))
- (flags :standard -w -A))
-
-(library
- (name memory)
- (modules memory)
- (libraries yojson unix)
- (preprocess (pps ppx_deriving.show))
- (flags :standard -w -A))
-
-(library
  (name oclaw_config)
  (modules config)
- (libraries ppx_protocol_conv_yaml yaml llm_provider logs)
+ (libraries ppx_protocol_conv_yaml yaml llm_provider)
  (preprocess (pps ppx_protocol_conv))
  (flags :standard -w -A))
 
 (library
- (name skills)
- (modules skills)
+ (name tools)
+ (modules tools)
  (libraries yojson unix)
  (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))
 
 (library
- (name types)
- (wrapped false)
- (modules llm_types session_types rpc_types task_types)
- (libraries ppx_protocol_conv_json unix)
- (preprocess (pps ppx_protocol_conv))
- (flags :standard -w -A))
-
-(library
- (name task_system)
- (wrapped false)
- (modules task_store task_service task_api_client)
- (libraries types http_client sqlite3 domainslib logs yojson unix)
+ (name assistant_runtime)
+ (modules assistant_runtime)
+ (libraries llm_provider tools logs unix yojson)
  (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))
 
-(library
- (name effects)
- (modules Effects)
- (libraries types llm_provider tools skills logs task_system)
- (preprocess (pps ppx_deriving.show))
- (flags :standard -w -A))
-
-(library
- (name agent_lib)
- (wrapped false)
- (modules Agent)
- (libraries effects types memory tools skills llm_provider logs task_system)
- (preprocess (pps ppx_deriving.show))
- (flags :standard -w -A))
-
-(library
- (name acp)
- (wrapped false)
- (modules acp_transport acp_client acp_server)
- (libraries agent_lib llm_provider logs task_system unix yojson)
- (preprocess (pps ppx_deriving.show))
- (flags :standard -w -A))
-
-(library
- (name http_server)
- (modules Http_server)
- (libraries h1 iomux logs unix yojson types)
- (preprocess (pps ppx_deriving.show))
- (flags :standard -w -A))
-
-(library
- (name oclaw_server)
- (modules Oclaw_server)
- (libraries http_server effects agent_lib memory logs unix task_system types)
- (preprocess (pps ppx_deriving.show))
- (flags :standard -w -A))
-
-; Main executable
 (executable
  (name oclaw)
  (modules oclaw)
  (libraries
-  oclaw_config
-  memory
-  tools
+  assistant_runtime
   llm_provider
-  http_client
-  curl
-  iomux
-  yojson
-  skills
+  log_color
   logs
   logs.fmt
-  log_color
-  types
-  effects
-  agent_lib
-  acp
-  task_system
-  http_server
-  oclaw_server
+  oclaw_config
+  tools
   unix)
- (preprocess (pps ppx_deriving.show))
- (flags :standard -w -A))
-
-; Test executables
-(executable
- (name test_http)
- (modules test_http)
- (libraries http_client curl iomux yojson)
- (preprocess (pps ppx_deriving.show))
- (flags :standard -w -A))
-
-(executable
- (name test_llm)
- (modules test_llm)
- (libraries llm_provider http_client curl iomux yojson)
- (preprocess (pps ppx_deriving.show))
- (flags :standard -w -A))
-
-(executable
- (name test_memory)
- (modules test_memory)
- (libraries memory yojson unix)
- (preprocess (pps ppx_deriving.show))
- (flags :standard -w -A))
-
-(executable
- (name test_memory_cleanup)
- (modules test_memory_cleanup)
- (libraries memory yojson unix)
- (preprocess (pps ppx_deriving.show))
- (flags :standard -w -A))
-
-(executable
- (name test_memory_demo)
- (modules test_memory_demo)
- (libraries memory yojson)
- (preprocess (pps ppx_deriving.show))
- (flags :standard -w -A))
-
-(executable
- (name test_memory_persistence)
- (modules test_memory_persistence)
- (libraries memory yojson)
- (preprocess (pps ppx_deriving.show))
- (flags :standard -w -A))
-
-(executable
- (name test_http_server_integration)
- (modules test_http_server_integration)
- (libraries http_server http_client logs logs.fmt log_color unix yojson)
- (preprocess (pps ppx_deriving.show))
- (flags :standard -w -A))
-
-(executable
- (name test_task_store)
- (modules test_task_store)
- (libraries task_system types unix)
  (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))
 
@@ -193,8 +62,15 @@
  (flags :standard -w -A))
 
 (executable
- (name test_skills)
- (modules test_skills)
- (libraries skills unix)
+ (name test_assistant_runtime)
+ (modules test_assistant_runtime)
+ (libraries assistant_runtime llm_provider tools unix yojson)
+ (preprocess (pps ppx_deriving.show))
+ (flags :standard -w -A))
+
+(executable
+ (name test_config)
+ (modules test_config)
+ (libraries oclaw_config llm_provider)
  (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))

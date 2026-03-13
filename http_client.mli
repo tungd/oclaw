@@ -84,3 +84,6 @@ val delete : string -> (string * string) list -> int -> HttpResponse.t
 
 (** Streaming POST request with callback *)
 val post_streaming : string -> (string * string) list -> string -> int -> (string -> unit) -> (unit, string) result
+
+(** Streaming GET request with callback *)
+val get_streaming : string -> (string * string) list -> int -> (string -> unit) -> (unit, string) result
