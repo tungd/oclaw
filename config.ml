@@ -14,7 +14,7 @@ type config = {
   data_dir : string [@default "workspace"];
   skills_dir : string [@default ""];
   max_history_messages : int [@default 24];
-  max_tool_iterations : int [@default 16];
+  max_tool_iterations : int [@default 256];
   tools_workspace : string [@default "."];
   tools_restrict_to_workspace : bool [@default true];
   tools_allow_read_paths : string list [@default []];

@@ -116,18 +116,53 @@ let assistant_blocks_of_response response =
          | Llm.Response_tool_use { id; name; input } ->
              Some (Llm.Tool_use { id; name; input }))
 
+let execute_tool_parallel state ~chat_id (id, name, input) =
+  let result = Tools.execute state.Runtime.tools ~chat_id name input in
+  (id, result)
+
 let tool_results_of_response state ~chat_id response =
-  response.Llm.content
-  |> List.filter_map (function
-         | Llm.Response_tool_use { id; name; input } ->
-             let result = Tools.execute state.Runtime.tools ~chat_id name input in
-             Some
-               (Llm.Tool_result {
-                  tool_use_id = id;
-                  content = result.Tools.content;
-                  is_error = if result.Tools.is_error then Some true else None;
-                })
-         | Llm.Response_text _ -> None)
+  let tool_calls = 
+    response.Llm.content
+    |> List.filter_map (function
+           | Llm.Response_tool_use { id; name; input } -> Some (id, name, input)
+           | Llm.Response_text _ -> None)
+  in
+  let tool_results =
+    if List.length tool_calls <= 1 then
+      (* Sequential execution for single tool call *)
+      List.map (fun (id, name, input) ->
+        let result = Tools.execute state.Runtime.tools ~chat_id name input in
+        (id, result)
+      ) tool_calls
+    else
+      (* Parallel execution using Domainslib for multiple tool calls *)
+      let pool = Domainslib.Task.setup_pool ~num_domains:(min 4 (Sys.cpu_count ())) () in
+      try
+        let futures = List.map (fun tool_call ->
+          Domainslib.Task.run pool (fun _ ->
+            execute_tool_parallel state ~chat_id tool_call
+          )
+        ) tool_calls in
+        
+        let results = List.map (Domainslib.Task.await pool) futures in
+        Domainslib.Task.teardown_pool pool;
+        results
+      with exn ->
+        Domainslib.Task.teardown_pool pool;
+        Log.err (fun m -> m "Parallel tool execution failed: %s" (Printexc.to_string exn));
+        (* Fallback to sequential execution on error *)
+        List.map (fun (id, name, input) ->
+          let result = Tools.execute state.Runtime.tools ~chat_id name input in
+          (id, result)
+        ) tool_calls
+  in
+  List.map (fun (id, result) ->
+    Llm.Tool_result {
+      tool_use_id = id;
+      content = result.Tools.content;
+      is_error = if result.Tools.is_error then Some true else None;
+    }
+  ) tool_results
 
 let process state ~chat_id prompt =
   let prompt = String.trim prompt in
