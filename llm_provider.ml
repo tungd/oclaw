@@ -231,16 +231,30 @@ let send_message provider ~system_prompt messages ~tools =
     build_request_json provider ~system_prompt messages ~tools ~stream:false
     |> Yojson.Safe.to_string
   in
-  let response = Http.post url headers body provider.timeout in
-  match response.Http.HttpResponse.error with
-  | Some error -> Error error
-  | None when response.Http.HttpResponse.status < 200 || response.Http.HttpResponse.status >= 300 ->
+  
+  (* Use curl.multi for better concurrency *)
+  let request = Http.HttpRequest.create 
+      ~method_:Http.HttpMethod.POST 
+      ~url 
+      ~headers 
+      ~body 
+      ~timeout:provider.timeout 
+      () 
+  in
+  
+  (* For single request, use the multi interface anyway for consistency *)
+  let responses = Http.perform_multi_requests [request] in
+  
+  match List.hd responses with
+  | response when response.Http.HttpResponse.error <> None ->
+      Error (Option.get response.Http.HttpResponse.error)
+  | response when response.Http.HttpResponse.status < 200 || response.Http.HttpResponse.status >= 300 ->
       Error
         (Printf.sprintf
            "LLM request failed: status %d, body: %s"
            response.Http.HttpResponse.status
            response.Http.HttpResponse.body)
-  | None ->
+  | response ->
       try
         response.Http.HttpResponse.body
         |> Yojson.Safe.from_string

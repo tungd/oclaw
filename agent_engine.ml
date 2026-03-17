@@ -3,6 +3,22 @@ open Yojson.Safe
 module Llm = Llm_types
 module Log = (val Logs.src_log (Logs.Src.create "agent_engine") : Logs.LOG)
 
+(* Status indicators for user feedback *)
+let print_status msg =
+  print_string "\r\027[K";  (* Clear line and return to beginning *)
+  print_string msg;
+  flush stdout
+
+let clear_status () =
+  print_string "\r\027[K";  (* Clear line *)
+  flush stdout
+
+let thinking_indicator = ref 0
+let spin () =
+  let spinner = [|"-"; "\\"; "|"; "/"|] in
+  thinking_indicator := (!thinking_indicator + 1) mod 4;
+  print_status ("Thinking " ^ spinner.(!thinking_indicator))
+
 let read_optional_file path =
   try Some (Stdlib.In_channel.with_open_bin path Stdlib.In_channel.input_all)
   with _ -> None
@@ -144,6 +160,20 @@ let tool_results_of_response state ~chat_id response =
            | Llm.Response_tool_use { id; name; input } -> Some (id, name, input)
            | Llm.Response_text _ -> None)
   in
+  
+  (* Show tool call summary *)
+  if tool_calls <> [] then (
+    let tool_names = List.map (fun (_, name, _) -> name) tool_calls in
+    let count = List.length tool_names in
+    if count = 1 then
+      print_status ("Calling tool: " ^ List.hd tool_names)
+    else
+      let shown = List.take (min 3 count) tool_names in
+      print_status (Printf.sprintf "Calling %d tools: %s" count 
+        (String.concat ", " shown ^ 
+         (if count > 3 then "..." else "")))
+  );
+  
   let tool_results =
     if List.length tool_calls <= 1 then
       (* Sequential execution for single tool call *)
@@ -214,7 +244,10 @@ let process state ~chat_id prompt =
           | Ok () ->
               let system_prompt = build_system_prompt state ~chat_id in
               let tool_defs = Tools.definitions state.Runtime.tools in
+              thinking_indicator := 0;
+              print_status "Thinking -";
               let rec loop messages rounds_remaining =
+                spin ();
                 match
                   state.Runtime.llm_call
                     state.Runtime.provider_config
@@ -222,7 +255,9 @@ let process state ~chat_id prompt =
                     messages
                     ~tools:tool_defs
                 with
-                | Error err -> Error err
+                | Error err -> 
+                    clear_status ();
+                    Error err
                 | Ok response ->
                     let has_tool_use =
                       List.exists
@@ -232,9 +267,10 @@ let process state ~chat_id prompt =
                         response.Llm.content
                     in
                     if has_tool_use then
-                      if rounds_remaining = 0 then
+                      if rounds_remaining = 0 then (
+                        clear_status ();
                         Error "Tool-call recursion limit exceeded"
-                      else
+                      ) else
                         let assistant_message =
                           {
                             Llm.role = "assistant";
@@ -248,7 +284,9 @@ let process state ~chat_id prompt =
                         in
                         begin
                           match save_session state ~chat_id next_messages with
-                          | Error err -> Error err
+                          | Error err -> 
+                              clear_status ();
+                              Error err
                           | Ok () -> loop next_messages (rounds_remaining - 1)
                         end
                     else
@@ -260,13 +298,19 @@ let process state ~chat_id prompt =
                         messages @ [ { Llm.role = "assistant"; content = Llm.Text_content final_text } ]
                       in
                       match save_session state ~chat_id next_messages with
-                      | Error err -> Error err
-                      | Ok () ->
-                          begin
-                            match Db.store_message state.Runtime.db ~chat_id ~role:"assistant" ~content:final_text with
-                            | Error err -> Error err
-                            | Ok () -> Ok final_text
-                          end
+                        | Error err -> 
+                            clear_status ();
+                            Error err
+                        | Ok () ->
+                            begin
+                              match Db.store_message state.Runtime.db ~chat_id ~role:"assistant" ~content:final_text with
+                              | Error err -> 
+                                  clear_status ();
+                                  Error err
+                              | Ok () -> 
+                                  clear_status ();
+                                  Ok final_text
+                            end
               in
               loop (base_messages @ [ user_message ]) state.Runtime.config.max_tool_iterations
         end

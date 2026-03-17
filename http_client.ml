@@ -239,53 +239,96 @@ let make_request req =
       cleanup_curl_handle handle;
       HttpResponse.create ~status:0 ~headers:[] ~body:"" ~error:(Printexc.to_string exn) ()
 
-(* Multi request handling using curl.multi *)
+(* Multi request handling using curl.multi with proper event loop *)
 let perform_multi_requests requests =
-  let multi_handle = Curl.Multi.create () in
-  let easy_handles = List.map (fun req ->
-    let handle = init_curl_handle () in
-    set_request_options handle req;
-    Curl.Multi.add multi_handle handle;
-    (handle, req)
-  ) requests in
-  
-  let results = ref [] in
-  
-  try
-    (* Main loop for multi requests *)
-    let still_running = ref true in
-    while !still_running do
-      let running_handles = Curl.Multi.perform multi_handle in
-      if running_handles = 0 then
-        still_running := false
-      else
-        (* Simple wait - sleep for a short time *)
-        Unix.sleepf 0.1
-    done;
+  if requests = [] then []
+  else
+    let multi_handle = Curl.Multi.create () in
+    let results_map = Hashtbl.create (List.length requests) in
     
-    (* Collect results *)
-    List.iter (fun (handle, req) ->
-      try
-        let response = perform_request handle in
-        results := response :: !results
-      with exn ->
-        results := HttpResponse.create ~status:0 ~headers:[] ~body:"" ~error:(Printexc.to_string exn) () :: !results
-    ) easy_handles;
+    (* Create easy handles and add to multi *)
+    let easy_handles = List.mapi (fun i req ->
+      let handle = init_curl_handle () in
+      set_request_options handle req;
+      
+      (* Setup response buffer for this handle *)
+      let response_body = Buffer.create 1024 in
+      let response_headers = ref [] in
+      
+      Curl.set_writefunction handle (fun data ->
+        Buffer.add_string response_body data;
+        String.length data
+      );
+      
+      Curl.set_headerfunction handle (fun header ->
+        if String.length header > 0 && header.[0] <> '\r' && header.[0] <> '\n' then (
+          try
+            let colon_pos = String.index header ':' in
+            let name = String.trim (String.sub header 0 colon_pos) in
+            let value = String.trim (String.sub header (colon_pos + 1) (String.length header - colon_pos - 1)) in
+            response_headers := (name, value) :: !response_headers
+          with Not_found -> ()
+        );
+        String.length header
+      );
+      
+      (* Store metadata for later retrieval *)
+      Hashtbl.add results_map handle (i, req, response_body, response_headers);
+      Curl.Multi.add multi_handle handle;
+      (handle, i)
+    ) requests in
     
-    (* Cleanup *)
-    List.iter (fun (handle, _) ->
-      Curl.Multi.remove multi_handle handle;
-      cleanup_curl_handle handle
-    ) easy_handles;
-    
-    List.rev !results
-    
-  with exn ->
-    (* Cleanup on error *)
-    List.iter (fun (handle, _) ->
-      cleanup_curl_handle handle
-    ) easy_handles;
-    raise exn
+    try
+      (* Main event loop using curl's wait *)
+      let rec event_loop () =
+        let running_handles = Curl.Multi.perform multi_handle in
+        if running_handles > 0 then (
+          (* Wait for activity using curl's built-in wait *)
+          let _ = Curl.Multi.wait ~timeout_ms:1000 multi_handle in
+          event_loop ()
+        )
+      in
+      event_loop ();
+      
+      (* Collect results in original order *)
+      let results = Array.make (List.length requests) None in
+      
+      List.iter (fun (handle, idx) ->
+        try
+          let (orig_idx, _, response_body, response_headers) = Hashtbl.find results_map handle in
+          
+          let status_code = 
+            let code = Curl.get_responsecode handle in
+            if code = 0 then 200 else code
+          in
+          
+          let response = HttpResponse.create 
+              ~status:status_code 
+              ~headers:(List.rev !response_headers) 
+              ~body:(Buffer.contents response_body) 
+              ()
+          in
+          results.(orig_idx) <- Some response
+        with _ ->
+          results.(idx) <- Some (HttpResponse.create ~status:0 ~headers:[] ~body:"" ~error:"Request failed" ())
+      ) easy_handles;
+      
+      (* Cleanup *)
+      List.iter (fun (handle, _) ->
+        try Curl.Multi.remove multi_handle handle with _ -> ();
+        cleanup_curl_handle handle
+      ) easy_handles;
+      
+      (* Convert to list, filtering out None values *)
+      Array.to_list results |> List.filter_map Fun.id
+      
+    with exn ->
+      (* Cleanup on error *)
+      List.iter (fun (handle, _) ->
+        try Curl.Multi.remove multi_handle handle with _ -> ();
+        cleanup_curl_handle handle
+      ) easy_handles;
+      raise exn
 
 (* Simple GET request *)
 let get url headers timeout =
