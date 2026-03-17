@@ -105,25 +105,19 @@ let run_repl state chat_id =
   let history_file = Filename.concat (Filename.concat state.Runtime.config.data_dir "runtime") "linenoise_history" in
   (match LNoise.history_set ~max_length:1000 with Error e -> Log.warn (fun m -> m "Failed to set history length: %s" e) | Ok () -> ());
   (match LNoise.history_load ~filename:history_file with Error e -> Log.debug (fun m -> m "No history file yet: %s" e) | Ok () -> ());
+  LNoise.set_multiline true;
   
   print_endline "OClaw REPL";
   print_endline "Type /exit or /quit to quit.";
-  print_endline "Use Ctrl+D to submit, Ctrl+C to cancel current input.";
   print_endline "";
   
   let rec loop () =
-    match LNoise.linenoise "> " with
-    | exception Sys.Break ->
-        (* Ctrl+C - cancel current input and prompt again *)
-        print_endline "";
-        loop ()
-    | exception End_of_file ->
-        (* Ctrl+D on empty line - exit gracefully *)
+    (* Simple prompt - linenoise handles display correctly *)
+    let prompt = "┃ " in
+    match LNoise.linenoise prompt with
+    | None ->
         print_endline "\nGoodbye!";
         0
-    | None ->
-        (* Ctrl+D on empty line - just continue *)
-        loop ()
     | Some input ->
         let trimmed = String.trim input in
         if trimmed = "" then

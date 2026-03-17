@@ -3,6 +3,25 @@ open Yojson.Safe
 module Llm = Llm_types
 module Log = (val Logs.src_log (Logs.Src.create "agent_engine") : Logs.LOG)
 
+(* ANSI color codes *)
+let ansi_reset = "\027[0m"
+let ansi_bold = "\027[1m"
+let ansi_orange = "\027[38;5;208m"  (* Bright orange *)
+let ansi_dim = "\027[2m"
+
+(* Unicode Braille patterns for spinner - clockwise rotation with 3 dots *)
+(* Braille dot positions: 1=TL, 2=BL, 3=TR, 4=BR, 5=TM, 6=BM, 7=TR2, 8=BR2 *)
+let braille_spinner = [|
+  "⠋";  (* 3 dots: left column + top-right *)
+  "⠙";  (* 3 dots: left-top + right column *)
+  "⠹";  (* 3 dots: top row + right-bottom *)
+  "⠸";  (* 3 dots: right column + bottom-left *)
+  "⠼";  (* 3 dots: right-bottom + left column *)
+  "⠴";  (* 3 dots: bottom row + left-top *)
+  "⠦";  (* 3 dots: left column + bottom-right *)
+  "⠇";  (* 3 dots: left-bottom + right-top *)
+|]
+
 (* Status indicators for user feedback *)
 let print_status msg =
   print_string "\r\027[K";  (* Clear line and return to beginning *)
@@ -14,10 +33,36 @@ let clear_status () =
   flush stdout
 
 let thinking_indicator = ref 0
-let spin () =
-  let spinner = [|"-"; "\\"; "|"; "/"|] in
-  thinking_indicator := (!thinking_indicator + 1) mod 4;
-  print_status ("Thinking " ^ spinner.(!thinking_indicator))
+let spinner_running = ref false
+let spinner_thread = ref None
+
+(* Start background spinner updates *)
+let start_spinner () =
+  if not !spinner_running then (
+    spinner_running := true;
+    thinking_indicator := 0;
+    (* Use a simple domain-based background updater *)
+    let domain_id = Domain.spawn (fun () ->
+      while !spinner_running do
+        Unix.sleepf 0.15;  (* ~7 FPS - smooth animation *)
+        if !spinner_running then (
+          thinking_indicator := (!thinking_indicator + 1) mod 8;
+          let braille = braille_spinner.(!thinking_indicator) in
+          print_status (ansi_orange ^ ansi_bold ^ braille ^ ansi_reset ^ ansi_dim ^ " Thinking..." ^ ansi_reset)
+        )
+      done
+    ) in
+    spinner_thread := Some domain_id
+  )
+
+(* Stop background spinner *)
+let stop_spinner () =
+  spinner_running := false;
+  match !spinner_thread with
+  | Some domain_id -> 
+      (try Domain.join domain_id with _ -> ());
+      spinner_thread := None
+  | None -> ()
 
 let read_optional_file path =
   try Some (Stdlib.In_channel.with_open_bin path Stdlib.In_channel.input_all)
@@ -166,12 +211,12 @@ let tool_results_of_response state ~chat_id response =
     let tool_names = List.map (fun (_, name, _) -> name) tool_calls in
     let count = List.length tool_names in
     if count = 1 then
-      print_status ("Calling tool: " ^ List.hd tool_names)
+      print_status (ansi_orange ^ "⚡ " ^ ansi_reset ^ "Calling: " ^ List.hd tool_names)
     else
       let shown = List.take (min 3 count) tool_names in
-      print_status (Printf.sprintf "Calling %d tools: %s" count 
+      print_status (ansi_orange ^ "⚡ " ^ ansi_reset ^ Printf.sprintf "Calling %d tools: %s" count 
         (String.concat ", " shown ^ 
-         (if count > 3 then "..." else "")))
+         (if count > 3 then ansi_dim ^ "..." ^ ansi_reset else "")))
   );
   
   let tool_results =
@@ -245,9 +290,8 @@ let process state ~chat_id prompt =
               let system_prompt = build_system_prompt state ~chat_id in
               let tool_defs = Tools.definitions state.Runtime.tools in
               thinking_indicator := 0;
-              print_status "Thinking -";
+              start_spinner ();
               let rec loop messages rounds_remaining =
-                spin ();
                 match
                   state.Runtime.llm_call
                     state.Runtime.provider_config
@@ -256,6 +300,7 @@ let process state ~chat_id prompt =
                     ~tools:tool_defs
                 with
                 | Error err -> 
+                    stop_spinner ();
                     clear_status ();
                     Error err
                 | Ok response ->
@@ -268,6 +313,7 @@ let process state ~chat_id prompt =
                     in
                     if has_tool_use then
                       if rounds_remaining = 0 then (
+                        stop_spinner ();
                         clear_status ();
                         Error "Tool-call recursion limit exceeded"
                       ) else
@@ -285,9 +331,12 @@ let process state ~chat_id prompt =
                         begin
                           match save_session state ~chat_id next_messages with
                           | Error err -> 
+                              stop_spinner ();
                               clear_status ();
                               Error err
-                          | Ok () -> loop next_messages (rounds_remaining - 1)
+                          | Ok () -> 
+                              start_spinner ();  (* Restart spinner for next iteration *)
+                              loop next_messages (rounds_remaining - 1)
                         end
                     else
                       let text = String.trim (response_text response) in
@@ -299,18 +348,13 @@ let process state ~chat_id prompt =
                       in
                       match save_session state ~chat_id next_messages with
                         | Error err -> 
+                            stop_spinner ();
                             clear_status ();
                             Error err
-                        | Ok () ->
-                            begin
-                              match Db.store_message state.Runtime.db ~chat_id ~role:"assistant" ~content:final_text with
-                              | Error err -> 
-                                  clear_status ();
-                                  Error err
-                              | Ok () -> 
-                                  clear_status ();
-                                  Ok final_text
-                            end
+                        | Ok () -> 
+                            stop_spinner ();
+                            clear_status ();
+                            Ok final_text
               in
               loop (base_messages @ [ user_message ]) state.Runtime.config.max_tool_iterations
         end
