@@ -87,6 +87,7 @@
  (libraries
   agent_engine
   llm_provider
+  linenoise
   log_color
   logs
   logs.fmt

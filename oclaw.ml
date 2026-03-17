@@ -1,6 +1,7 @@
 module Config = Oclaw_config.Config
 module Log = (val Logs.src_log Logs.default : Logs.LOG)
 module LogColor = Log_color
+module LNoise = LNoise
 
 type cli_overrides = {
   mutable config_path : string option;
@@ -100,26 +101,50 @@ let run_single_shot state chat_id prompt =
       1
 
 let run_repl state chat_id =
+  (* Setup linenoise with history file *)
+  let history_file = Filename.concat (Filename.concat state.Runtime.config.data_dir "runtime") "linenoise_history" in
+  (match LNoise.history_set ~max_length:1000 with Error e -> Log.warn (fun m -> m "Failed to set history length: %s" e) | Ok () -> ());
+  (match LNoise.history_load ~filename:history_file with Error e -> Log.debug (fun m -> m "No history file yet: %s" e) | Ok () -> ());
+  
   print_endline "OClaw REPL";
-  print_endline "Type /exit to quit.";
+  print_endline "Type /exit or /quit to quit.";
+  print_endline "Use Ctrl+D to submit, Ctrl+C to cancel current input.";
+  print_endline "";
+  
   let rec loop () =
-    print_string "> ";
-    flush stdout;
-    match read_line () with
-    | exception End_of_file ->
+    match LNoise.linenoise "> " with
+    | exception Sys.Break ->
+        (* Ctrl+C - cancel current input and prompt again *)
         print_endline "";
+        loop ()
+    | exception End_of_file ->
+        (* Ctrl+D on empty line - exit gracefully *)
+        print_endline "\nGoodbye!";
         0
-    | line ->
-        let input = String.trim line in
-        if input = "" then loop ()
-        else if input = "/exit" || input = "/quit" then 0
-        else (
+    | None ->
+        (* Ctrl+D on empty line - just continue *)
+        loop ()
+    | Some input ->
+        let trimmed = String.trim input in
+        if trimmed = "" then
+          loop ()
+        else if trimmed = "/exit" || trimmed = "/quit" then (
+          (* Save history before exiting *)
+          (match LNoise.history_save ~filename:history_file with Error e -> Log.warn (fun m -> m "Failed to save history: %s" e) | Ok () -> ());
+          print_endline "Goodbye!";
+          0
+        ) else (
+          (* Add to history if not empty *)
+          (match LNoise.history_add trimmed with Error e -> Log.debug (fun m -> m "Failed to add to history: %s" e) | Ok () -> ());
+          
           match Agent_engine.process state ~chat_id input with
           | Ok response ->
               print_endline response;
+              print_endline "";
               loop ()
           | Error err ->
               prerr_endline ("OClaw error: " ^ err);
+              print_endline "";
               loop ()
         )
   in
