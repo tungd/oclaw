@@ -817,7 +817,7 @@ let export_chat_tool sandbox db =
 let create_default_registry ?(sandbox_config=default_sandbox_config) ~data_dir ~skills_dir ~db () =
   Random.self_init ();
   let runtime_dir = Filename.concat data_dir "runtime" in
-  let memory = Memory.create ~data_dir ~runtime_dir in
+  let memory = Memory.create ~data_dir ~runtime_dir () in
   let skills = Skills.create ~skills_dir in
   let tools =
     [

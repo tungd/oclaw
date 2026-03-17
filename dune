@@ -27,13 +27,19 @@
 (library
  (name db)
  (modules db)
- (libraries sqlite3 unix)
+ (libraries sqlite3 unix vector_search logs)
+ (flags :standard -w -A))
+
+(library
+ (name vector_search)
+ (modules vector_search)
+ (libraries sqlite3 unix yojson logs)
  (flags :standard -w -A))
 
 (library
  (name memory)
  (modules memory)
- (libraries unix)
+ (libraries unix vector_search)
  (flags :standard -w -A))
 
 (library

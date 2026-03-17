@@ -1,5 +1,7 @@
 open Sqlite3
 
+module Log = (val Logs.src_log (Logs.Src.create "db") : Logs.LOG)
+
 type t = {
   db : Sqlite3.db;
 }
@@ -107,7 +109,14 @@ let create path =
     in
     begin
       match result with
-      | Ok () -> Ok { db }
+      | Ok () -> 
+          (* Register vector search UDFs *)
+          (match Vector_search.register_udfs db with
+           | Ok () -> ()
+           | Error msg -> Log.warn (fun m -> m "Vector UDF registration failed: %s" msg));
+          (* Initialize vector schema *)
+          Vector_search.init_schema db;
+          Ok { db }
       | Error err ->
           Sqlite3.db_close db |> ignore;
           Error err
