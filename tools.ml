@@ -1,4 +1,4 @@
-(** Primitive filesystem and shell tools for the CLI assistant. *)
+(** Registry-driven CLI tools. *)
 
 open Yojson.Safe
 open Yojson.Safe.Util
@@ -14,6 +14,30 @@ type sandbox_config = {
   exec_custom_allow_patterns : string list;
 }
 
+type tool_result = {
+  content : string;
+  is_error : bool;
+  status_code : int option;
+  bytes : int;
+  duration_ms : int option;
+  error_type : string option;
+}
+
+type tool = {
+  definition : Llm_types.tool_definition;
+  execute : chat_id:int -> Yojson.Safe.t -> tool_result;
+}
+
+type t = {
+  sandbox : sandbox_config;
+  data_dir : string;
+  skills_dir : string;
+  db : Db.t;
+  memory : Memory.t;
+  skills : Skills.t;
+  tools : tool list;
+}
+
 let default_sandbox_config = {
   workspace_root = ".";
   restrict_to_workspace = true;
@@ -25,17 +49,25 @@ let default_sandbox_config = {
   exec_custom_allow_patterns = [];
 }
 
-let active_sandbox_config = ref default_sandbox_config
+let success ?status_code ?duration_ms ?error_type content =
+  {
+    content;
+    is_error = false;
+    status_code;
+    bytes = String.length content;
+    duration_ms;
+    error_type;
+  }
 
-let set_sandbox_config cfg =
-  active_sandbox_config := cfg
-
-type tool_definition = {
-  name : string;
-  description : string;
-  parameters : (string * Yojson.Safe.t) list;
-  execute : Yojson.Safe.t -> string;
-}
+let failure ?status_code ?duration_ms ?(error_type="tool_error") content =
+  {
+    content;
+    is_error = true;
+    status_code;
+    bytes = String.length content;
+    duration_ms;
+    error_type = Some error_type;
+  }
 
 let trim = String.trim
 
@@ -45,31 +77,33 @@ let string_contains ~haystack ~needle =
   if n_len = 0 then true
   else if n_len > h_len then false
   else
-    let rec loop i =
-      if i > h_len - n_len then false
-      else if String.sub haystack i n_len = needle then true
-      else loop (i + 1)
+    let rec loop index =
+      if index > h_len - n_len then false
+      else if String.sub haystack index n_len = needle then true
+      else loop (index + 1)
     in
     loop 0
 
-let ensure_trailing_slash p =
-  if p = "/" then "/"
-  else if String.ends_with ~suffix:"/" p then p
-  else p ^ "/"
+let ensure_trailing_slash path =
+  if path = "/" then "/"
+  else if String.ends_with ~suffix:"/" path then path
+  else path ^ "/"
 
 let normalize_lexical path =
   let is_abs = String.length path > 0 && path.[0] = '/' in
   let parts = String.split_on_char '/' path in
   let stack = ref [] in
-  List.iter (function
-    | "" | "." -> ()
-    | ".." ->
-        begin
-          match !stack with
-          | _ :: tl -> stack := tl
-          | [] -> ()
-        end
-    | part -> stack := part :: !stack) parts;
+  List.iter
+    (function
+      | "" | "." -> ()
+      | ".." ->
+          begin
+            match !stack with
+            | _ :: rest -> stack := rest
+            | [] -> ()
+          end
+      | part -> stack := part :: !stack)
+    parts;
   let body = String.concat "/" (List.rev !stack) in
   if is_abs then if body = "" then "/" else "/" ^ body
   else if body = "" then "." else body
@@ -81,11 +115,25 @@ let absolute_path_from base path =
 let is_within ~root ~path =
   path = root || String.starts_with ~prefix:(ensure_trailing_slash root) path
 
+let workspace_root sandbox =
+  let cwd = Sys.getcwd () in
+  let abs = absolute_path_from cwd sandbox.workspace_root in
+  try Unix.realpath abs with _ -> abs
+
+let path_matches_allowlist sandbox path allowlist =
+  let root = workspace_root sandbox in
+  List.exists
+    (fun allowed ->
+      let allowed_abs = absolute_path_from root allowed in
+      is_within ~root:allowed_abs ~path)
+    allowlist
+
 let path_exists path =
   try
     ignore (Unix.lstat path);
     true
-  with _ -> false
+  with _ ->
+    false
 
 let rec find_existing_ancestor path =
   if path_exists path then path
@@ -93,568 +141,760 @@ let rec find_existing_ancestor path =
     let parent = Filename.dirname path in
     if parent = path then path else find_existing_ancestor parent
 
-let workspace_root () =
-  let cfg = !active_sandbox_config in
-  let cwd = Sys.getcwd () in
-  let abs = absolute_path_from cwd cfg.workspace_root in
-  try Unix.realpath abs with _ -> abs
-
-let path_matches_allowlist path allowlist =
-  let root = workspace_root () in
-  List.exists
-    (fun allowed ->
-      let abs_allowed = absolute_path_from root allowed in
-      is_within ~root:abs_allowed ~path)
-    allowlist
-
-let validate_path ~for_write ~allowlist path =
-  let cfg = !active_sandbox_config in
-  let root = workspace_root () in
-  let root_real = try Unix.realpath root with _ -> root in
+let validate_path sandbox ~for_write ~allowlist path =
   if trim path = "" then Error "path is required"
   else
+    let root = workspace_root sandbox in
     let candidate = absolute_path_from root path in
-    if path_matches_allowlist candidate allowlist then Ok candidate
-    else if not cfg.restrict_to_workspace then Ok candidate
+    if path_matches_allowlist sandbox candidate allowlist then Ok candidate
+    else if not sandbox.restrict_to_workspace then Ok candidate
     else if not (is_within ~root ~path:candidate) then Error "path is outside workspace"
     else
       let anchor =
         if for_write then find_existing_ancestor (Filename.dirname candidate)
         else find_existing_ancestor candidate
       in
+      let root_real = try Unix.realpath root with _ -> root in
       let anchor_real = try Unix.realpath anchor with _ -> anchor in
-      if not (is_within ~root:root_real ~path:anchor_real) then
-        Error "path resolves outside workspace"
-      else
-        Ok candidate
+      if is_within ~root:root_real ~path:anchor_real then Ok candidate
+      else Error "path resolves outside workspace"
 
-let rec mkdir_p dir =
-  if dir = "" || dir = "." || dir = "/" then ()
-  else if Sys.file_exists dir then ()
-  else (
-    mkdir_p (Filename.dirname dir);
-    try Unix.mkdir dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
-  )
+let ensure_parent_dir path =
+  let rec mkdir_p dir =
+    if dir = "" || dir = "." || dir = "/" then ()
+    else if Sys.file_exists dir then ()
+    else (
+      mkdir_p (Filename.dirname dir);
+      Unix.mkdir dir 0o755
+    )
+  in
+  mkdir_p (Filename.dirname path)
 
 let read_file_full path =
-  try
-    let ch = open_in_bin path in
-    try
-      let len = in_channel_length ch in
-      let content = really_input_string ch len in
-      close_in ch;
-      Ok content
-    with exn ->
-      close_in_noerr ch;
-      Error (Printexc.to_string exn)
-  with exn ->
-    Error (Printexc.to_string exn)
+  try Ok (Stdlib.In_channel.with_open_bin path Stdlib.In_channel.input_all)
+  with exn -> Error (Printexc.to_string exn)
 
 let write_file_atomic path content =
-  let dir = Filename.dirname path in
-  mkdir_p dir;
-  let tmp =
-    Filename.concat dir
-      (Printf.sprintf ".tmp-oclaw-%d-%06d" (int_of_float (Unix.gettimeofday ())) (Random.int 1000000))
-  in
-  let ch = open_out_bin tmp in
   try
-    output_string ch content;
-    close_out ch;
+    ensure_parent_dir path;
+    let dir = Filename.dirname path in
+    let tmp =
+      Filename.concat dir
+        (Printf.sprintf ".tmp-oclaw-%d-%06d"
+           (int_of_float (Unix.gettimeofday ()))
+           (Random.int 1_000_000))
+    in
+    Stdlib.Out_channel.with_open_bin tmp (fun channel -> output_string channel content);
     Unix.rename tmp path;
     Ok ()
   with exn ->
-    close_out_noerr ch;
-    (try Sys.remove tmp with _ -> ());
     Error (Printexc.to_string exn)
+
+let json_assoc_or_empty = function
+  | `Assoc _ as json -> json
+  | `Null -> `Assoc []
+  | other -> other
+
+let string_arg json name =
+  match member name json with
+  | `String value -> Some value
+  | `Int value -> Some (string_of_int value)
+  | `Intlit value -> Some value
+  | `Float value -> Some (string_of_float value)
+  | `Bool value -> Some (string_of_bool value)
+  | _ -> None
+
+let required_string_arg json name =
+  match string_arg json name with
+  | Some value when trim value <> "" -> Ok value
+  | _ -> Error (name ^ " is required")
+
+let int_arg json name =
+  match member name json with
+  | `Int value -> Some value
+  | `Intlit value -> int_of_string_opt value
+  | `String value -> int_of_string_opt (trim value)
+  | _ -> None
+
+let list_arg json name =
+  match member name json with
+  | `List values -> values
+  | _ -> []
+
+let default_exec_deny_patterns = [
+  "rm -rf";
+  "rm -fr";
+  "mkfs";
+  "shutdown";
+  "reboot";
+  "poweroff";
+  "sudo ";
+  "curl ";
+  "wget ";
+  "| sh";
+  "| bash";
+  "chown ";
+  "kill -9";
+  "git push";
+]
+
+let normalize_exec_token token =
+  let token = trim token in
+  let len = String.length token in
+  if len >= 2
+     && ((token.[0] = '\'' && token.[len - 1] = '\'')
+         || (token.[0] = '"' && token.[len - 1] = '"'))
+  then
+    String.sub token 1 (len - 2)
+  else
+    token
 
 let split_command command =
   let len = String.length command in
-  let buf = Buffer.create len in
+  let buffer = Buffer.create len in
   let tokens = ref [] in
   let mode = ref `Normal in
   let flush () =
-    if Buffer.length buf > 0 then (
-      tokens := Buffer.contents buf :: !tokens;
-      Buffer.clear buf
+    if Buffer.length buffer > 0 then (
+      tokens := Buffer.contents buffer :: !tokens;
+      Buffer.clear buffer
     )
   in
-  let rec loop i =
-    if i >= len then (
-      (match !mode with `Normal -> () | _ -> raise (Invalid_argument "Unclosed quote in command"));
+  let rec loop index =
+    if index >= len then (
+      begin
+        match !mode with
+        | `Normal -> ()
+        | _ -> raise (Invalid_argument "Unclosed quote in command")
+      end;
       flush ();
       List.rev !tokens
     ) else
-      let c = command.[i] in
+      let char = command.[index] in
       match !mode with
       | `Normal ->
-          if c = ' ' || c = '\t' || c = '\n' then (
+          if List.mem char [ ' '; '\t'; '\n' ] then (
             flush ();
-            loop (i + 1)
-          ) else if c = '\'' then (
+            loop (index + 1)
+          ) else if char = '\'' then (
             mode := `Single;
-            loop (i + 1)
-          ) else if c = '"' then (
+            loop (index + 1)
+          ) else if char = '"' then (
             mode := `Double;
-            loop (i + 1)
+            loop (index + 1)
           ) else (
-            Buffer.add_char buf c;
-            loop (i + 1)
+            Buffer.add_char buffer char;
+            loop (index + 1)
           )
       | `Single ->
-          if c = '\'' then (
+          if char = '\'' then (
             mode := `Normal;
-            loop (i + 1)
+            loop (index + 1)
           ) else (
-            Buffer.add_char buf c;
-            loop (i + 1)
+            Buffer.add_char buffer char;
+            loop (index + 1)
           )
       | `Double ->
-          if c = '"' then (
+          if char = '"' then (
             mode := `Normal;
-            loop (i + 1)
+            loop (index + 1)
           ) else (
-            Buffer.add_char buf c;
-            loop (i + 1)
+            Buffer.add_char buffer char;
+            loop (index + 1)
           )
   in
   loop 0
 
-let truncate_output ?(limit=10000) output =
+let guard_command sandbox command =
+  let lower = String.lowercase_ascii command in
+  let explicitly_allowed =
+    sandbox.exec_custom_allow_patterns <> []
+    && List.exists
+         (fun pattern ->
+           string_contains ~haystack:lower ~needle:(String.lowercase_ascii pattern))
+         sandbox.exec_custom_allow_patterns
+  in
+  if sandbox.exec_enable_deny_patterns && not explicitly_allowed then (
+    let deny = default_exec_deny_patterns @ sandbox.exec_custom_deny_patterns in
+    if List.exists (fun pattern ->
+           string_contains ~haystack:lower ~needle:(String.lowercase_ascii pattern))
+         deny
+    then
+      Error "Command blocked by safety guard"
+    else
+      match split_command command with
+      | exception Invalid_argument err -> Error err
+      | tokens ->
+          let root = workspace_root sandbox in
+          let rec check = function
+            | [] -> Ok ()
+            | token :: rest ->
+                let token = normalize_exec_token token in
+                if token = "" then check rest
+                else if String.length token > 0 && token.[0] = '/' then
+                  let path = absolute_path_from root token in
+                  if sandbox.restrict_to_workspace && not (is_within ~root ~path) then
+                    Error "Command blocked by path restriction"
+                  else
+                    check rest
+                else
+                  check rest
+          in
+          check tokens
+  ) else
+    Ok ()
+
+let truncate_output ?(limit=10_000) output =
   if String.length output <= limit then output
   else
     let remaining = String.length output - limit in
     String.sub output 0 limit ^ Printf.sprintf "\n... (truncated, %d more chars)" remaining
 
-let default_exec_deny_patterns = [
-  "rm -rf";
-  "rm -fr";
-  " mkfs";
-  " format ";
-  "dd if=";
-  "shutdown";
-  "reboot";
-  "poweroff";
-  " sudo ";
-  "curl ";
-  "wget ";
-  "| sh";
-  "| bash";
-  " chmod 777";
-  " chown ";
-  " kill -9";
-  " killall ";
-  " git push";
-]
-
-let safe_device_paths = [
-  "/dev/null";
-  "/dev/zero";
-  "/dev/random";
-  "/dev/urandom";
-  "/dev/stdin";
-  "/dev/stdout";
-  "/dev/stderr";
-]
-
-let normalize_exec_token token =
-  let t = trim token in
-  let len = String.length t in
-  if len >= 2 && ((t.[0] = '\'' && t.[len - 1] = '\'') || (t.[0] = '"' && t.[len - 1] = '"')) then
-    String.sub t 1 (len - 2)
-  else
-    t
-
-let guard_command command =
-  let cfg = !active_sandbox_config in
-  let lower = String.lowercase_ascii command in
-  let explicitly_allowed =
-    cfg.exec_custom_allow_patterns <> []
-    && List.exists (fun p -> string_contains ~haystack:lower ~needle:(String.lowercase_ascii p)) cfg.exec_custom_allow_patterns
-  in
-  if cfg.exec_enable_deny_patterns && not explicitly_allowed then (
-    let deny = default_exec_deny_patterns @ cfg.exec_custom_deny_patterns in
-    if List.exists (fun p -> string_contains ~haystack:lower ~needle:(String.lowercase_ascii p)) deny then
-      Error "Command blocked by safety guard (dangerous pattern detected)"
-    else if cfg.restrict_to_workspace && (string_contains ~haystack:command ~needle:"../" || string_contains ~haystack:command ~needle:"..\\") then
-      Error "Command blocked by safety guard (path traversal detected)"
-    else
-      let root = workspace_root () in
-      let rec check_tokens = function
-        | [] -> Ok ()
-        | token :: rest ->
-            let t = normalize_exec_token token in
-            if t = "" then check_tokens rest
-            else if List.mem t safe_device_paths then check_tokens rest
-            else if String.length t > 0 && t.[0] = '/' then
-              let p = absolute_path_from root t in
-              if cfg.restrict_to_workspace && not (is_within ~root ~path:p) then
-                Error "Command blocked by safety guard (path outside workspace)"
-              else
-                check_tokens rest
-            else
-              check_tokens rest
-      in
-      match split_command command with
-      | tokens -> check_tokens tokens
-      | exception Invalid_argument msg -> Error msg
-  ) else
-    Ok ()
-
-let json_assoc_or_empty = function
-  | `Assoc _ as json -> json
-  | `Null -> `Assoc []
-  | `String s ->
-      begin
-        try
-          match Yojson.Safe.from_string s with
-          | `Assoc _ as json -> json
-          | other -> `Assoc [ ("value", other) ]
-        with _ -> `Assoc [ ("value", `String s) ]
-      end
-  | _ -> `Assoc []
-
-let string_arg ?(default=None) json name =
-  match member name json with
-  | `String s -> Some s
-  | `Int i -> Some (string_of_int i)
-  | `Intlit s -> Some s
-  | `Float f -> Some (string_of_float f)
-  | `Bool b -> Some (string_of_bool b)
-  | `Null -> default
-  | _ -> default
-
-let required_string_arg json name =
-  match string_arg json name with
-  | Some value when trim value <> "" -> Ok value
-  | _ -> Error (Printf.sprintf "%s is required" name)
-
-let file_read_tool = {
-  name = "read_file";
-  description = "Read and return the complete contents of a file from the filesystem";
-  parameters = [ "path", `String "string: The absolute or relative path to the file to read" ];
-  execute = (fun args ->
-    let args = json_assoc_or_empty args in
-    match required_string_arg args "path" with
-    | Error err -> err
-    | Ok path ->
-        begin
-          match validate_path ~for_write:false ~allowlist:(!active_sandbox_config).allow_read_paths path with
-          | Error err -> Printf.sprintf "Error reading file %s: %s" path err
-          | Ok safe_path ->
-              begin
-                match read_file_full safe_path with
-                | Ok content -> content
-                | Error err -> Printf.sprintf "Error reading file %s: %s" path err
-              end
-        end);
-}
-
-let write_file_tool = {
-  name = "write_file";
-  description = "Write content to a file";
-  parameters = [
-    "path", `String "string: The file path to write";
-    "content", `String "string: The content to write";
-  ];
-  execute = (fun args ->
-    let args = json_assoc_or_empty args in
-    match required_string_arg args "path", required_string_arg args "content" with
-    | Error err, _ | _, Error err -> err
-    | Ok path, Ok content ->
-        begin
-          match validate_path ~for_write:true ~allowlist:(!active_sandbox_config).allow_write_paths path with
-          | Error err -> Printf.sprintf "Error writing file %s: %s" path err
-          | Ok safe_path ->
-              begin
-                match write_file_atomic safe_path content with
-                | Ok () -> Printf.sprintf "File written: %s" path
-                | Error err -> Printf.sprintf "Error writing file %s: %s" path err
-              end
-        end);
-}
-
-let edit_file_tool = {
-  name = "edit_file";
-  description = "Edit a file by replacing old_text with new_text. old_text must exist exactly once.";
-  parameters = [
-    "path", `String "string: The file path to edit";
-    "old_text", `String "string: Exact text to replace";
-    "new_text", `String "string: Replacement text";
-  ];
-  execute = (fun args ->
-    let args = json_assoc_or_empty args in
-    match required_string_arg args "path", required_string_arg args "old_text", required_string_arg args "new_text" with
-    | Error err, _, _ | _, Error err, _ | _, _, Error err -> err
-    | Ok path, Ok old_text, Ok new_text ->
-        begin
-          match validate_path ~for_write:true ~allowlist:(!active_sandbox_config).allow_write_paths path with
-          | Error err -> Printf.sprintf "Error editing file %s: %s" path err
-          | Ok safe_path ->
-              begin
-                match read_file_full safe_path with
-                | Error err -> Printf.sprintf "Error editing file %s: %s" path err
-                | Ok content ->
-                    let count =
-                      let rec count_from idx acc =
-                        if idx >= String.length content then acc
-                        else if idx + String.length old_text <= String.length content
-                                && String.sub content idx (String.length old_text) = old_text then
-                          count_from (idx + 1) (acc + 1)
-                        else
-                          count_from (idx + 1) acc
-                      in
-                      if old_text = "" then 0 else count_from 0 0
-                    in
-                    if count = 0 then "Error editing file: old_text not found"
-                    else if count > 1 then Printf.sprintf "Error editing file: old_text appears %d times" count
-                    else
-                      let idx =
-                        let rec find_from i =
-                          if i + String.length old_text > String.length content then -1
-                          else if String.sub content i (String.length old_text) = old_text then i
-                          else find_from (i + 1)
-                        in
-                        find_from 0
-                      in
-                      let replaced =
-                        String.sub content 0 idx
-                        ^ new_text
-                        ^ String.sub content (idx + String.length old_text)
-                            (String.length content - idx - String.length old_text)
-                      in
-                      begin
-                        match write_file_atomic safe_path replaced with
-                        | Ok () -> Printf.sprintf "File edited: %s" path
-                        | Error err -> Printf.sprintf "Error editing file %s: %s" path err
-                      end
-              end
-        end);
-}
-
-let append_file_tool = {
-  name = "append_file";
-  description = "Append content to the end of a file";
-  parameters = [
-    "path", `String "string: The file path to append";
-    "content", `String "string: The content to append";
-  ];
-  execute = (fun args ->
-    let args = json_assoc_or_empty args in
-    match required_string_arg args "path", required_string_arg args "content" with
-    | Error err, _ | _, Error err -> err
-    | Ok path, Ok content_to_append ->
-        begin
-          match validate_path ~for_write:true ~allowlist:(!active_sandbox_config).allow_write_paths path with
-          | Error err -> Printf.sprintf "Error appending file %s: %s" path err
-          | Ok safe_path ->
-              let existing = match read_file_full safe_path with Ok value -> value | Error _ -> "" in
-              begin
-                match write_file_atomic safe_path (existing ^ content_to_append) with
-                | Ok () -> Printf.sprintf "Appended to file: %s" path
-                | Error err -> Printf.sprintf "Error appending file %s: %s" path err
-              end
-        end);
-}
-
-let list_directory_core path =
-  match validate_path ~for_write:false ~allowlist:(!active_sandbox_config).allow_read_paths path with
-  | Error err -> Printf.sprintf "Error listing directory %s: %s" path err
-  | Ok safe_path ->
-      begin
-        try
-          if not (Sys.file_exists safe_path) then
-            Printf.sprintf "Error listing directory %s: path does not exist" path
-          else if not (Sys.is_directory safe_path) then
-            Printf.sprintf "Error listing directory %s: path is not a directory" path
-          else
-            let entries = Sys.readdir safe_path |> Array.to_list |> List.sort String.compare in
-            let lines =
-              List.map
-                (fun name ->
-                  let full = Filename.concat safe_path name in
-                  let kind = try if Sys.is_directory full then "DIR" else "FILE" with _ -> "FILE" in
-                  Printf.sprintf "%s: %s" kind name)
-                entries
-            in
-            Printf.sprintf "Directory listing for %s:\n%s"
-              (if path = "" || path = "." then "current directory" else path)
-              (String.concat "\n" lines)
-        with exn ->
-          Printf.sprintf "Error listing directory %s: %s" path (Printexc.to_string exn)
-      end
-
-let list_directory_tool = {
-  name = "list_directory";
-  description = "List files and directories in the current or specified path";
-  parameters = [ "path", `String "string: The directory path to list (default: current directory)" ];
-  execute = (fun args ->
-    let args = json_assoc_or_empty args in
-    list_directory_core (Option.value ~default:"." (string_arg args "path")));
-}
-
-let list_dir_tool =
-  { list_directory_tool with
-    name = "list_dir";
-    description = "List files and directories in a path";
-  }
-
 let has_timeout_binary =
   lazy (Sys.command "command -v timeout >/dev/null 2>&1" = 0)
 
 let run_command ~timeout_seconds command =
-  let command = trim command in
-  if command = "" then Error "command is required"
-  else
-    let shell_command = command ^ " 2>&1" in
-    let launcher, argv =
-      if timeout_seconds > 0 && Lazy.force has_timeout_binary then
-        ("timeout", [| "timeout"; string_of_int timeout_seconds; "sh"; "-lc"; shell_command |])
-      else
-        ("sh", [| "sh"; "-lc"; shell_command |])
+  let shell_command = command ^ " 2>&1" in
+  let launcher, argv =
+    if timeout_seconds > 0 && Lazy.force has_timeout_binary then
+      ("timeout", [| "timeout"; string_of_int timeout_seconds; "sh"; "-lc"; shell_command |])
+    else
+      ("sh", [| "sh"; "-lc"; shell_command |])
+  in
+  try
+    let started = Unix.gettimeofday () in
+    let channel = Unix.open_process_args_in launcher argv in
+    let buffer = Buffer.create 1024 in
+    (try
+       while true do
+         let line = input_line channel in
+         Buffer.add_string buffer line;
+         Buffer.add_char buffer '\n'
+       done
+     with End_of_file -> ());
+    let status = Unix.close_process_in channel in
+    let exit_code =
+      match status with
+      | Unix.WEXITED code -> code
+      | Unix.WSIGNALED signal -> -signal
+      | Unix.WSTOPPED signal -> -signal
     in
-    try
-      let ch = Unix.open_process_args_in launcher argv in
-      let output = Buffer.create 1024 in
-      (try
-         while true do
-           let line = input_line ch in
-           Buffer.add_string output line;
-           Buffer.add_char output '\n'
-         done
-       with End_of_file -> ());
-      let status = Unix.close_process_in ch in
-      let exit_code =
-        match status with
-        | Unix.WEXITED code -> code
-        | Unix.WSIGNALED signal -> -signal
-        | Unix.WSTOPPED signal -> -signal
-      in
-      Ok (Buffer.contents output, exit_code)
-    with exn ->
-      Error (Printexc.to_string exn)
+    Ok (Buffer.contents buffer, exit_code, int_of_float ((Unix.gettimeofday () -. started) *. 1000.0))
+  with exn ->
+    Error (Printexc.to_string exn)
 
-let shell_tool = {
-  name = "execute_command";
-  description = "Execute a command and return the output";
-  parameters = [ "command", `String "string: The command to execute" ];
-  execute = (fun args ->
-    let cfg = !active_sandbox_config in
-    let args = json_assoc_or_empty args in
-    match required_string_arg args "command" with
-    | Error err -> err
-    | Ok command ->
-        begin
-          match guard_command command with
-          | Error err -> err
-          | Ok () ->
-              begin
-                match run_command ~timeout_seconds:cfg.exec_timeout_seconds command with
-                | Error err -> Printf.sprintf "Error executing command: %s" err
-                | Ok (output, exit_code) ->
-                    let output = truncate_output output in
-                    Printf.sprintf "Command output:\n%s\nExit status: %d" output exit_code
-              end
-        end);
-}
+let run_process_args program argv =
+  try
+    let started = Unix.gettimeofday () in
+    let channel = Unix.open_process_args_in program argv in
+    let buffer = Buffer.create 1024 in
+    (try
+       while true do
+         let line = input_line channel in
+         Buffer.add_string buffer line;
+         Buffer.add_char buffer '\n'
+       done
+     with End_of_file -> ());
+    let status = Unix.close_process_in channel in
+    let exit_code =
+      match status with
+      | Unix.WEXITED code -> code
+      | Unix.WSIGNALED signal -> -signal
+      | Unix.WSTOPPED signal -> -signal
+    in
+    Ok (Buffer.contents buffer, exit_code, int_of_float ((Unix.gettimeofday () -. started) *. 1000.0))
+  with exn ->
+    Error (Printexc.to_string exn)
 
-let exec_tool =
-  { shell_tool with
-    name = "exec";
-    description = "Execute a shell command and return its output. Use with caution.";
+let relative_path ~root path =
+  let root = ensure_trailing_slash root in
+  if String.starts_with ~prefix:root path then
+    String.sub path (String.length root) (String.length path - String.length root)
+  else
+    path
+
+let glob_regex pattern =
+  let buffer = Buffer.create (String.length pattern * 2) in
+  Buffer.add_char buffer '^';
+  let rec loop index =
+    if index >= String.length pattern then Buffer.add_char buffer '$'
+    else
+      match pattern.[index] with
+      | '*' ->
+          if index + 1 < String.length pattern && pattern.[index + 1] = '*' then (
+            Buffer.add_string buffer ".*";
+            loop (index + 2)
+          ) else (
+            Buffer.add_string buffer "[^/]*";
+            loop (index + 1)
+          )
+      | '?' ->
+          Buffer.add_char buffer '.';
+          loop (index + 1)
+      | '.' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$' | '\\' as char ->
+          Buffer.add_char buffer '\\';
+          Buffer.add_char buffer char;
+          loop (index + 1)
+      | char ->
+          Buffer.add_char buffer char;
+          loop (index + 1)
+  in
+  loop 0;
+  Str.regexp (Buffer.contents buffer)
+
+let rec walk_files acc path =
+  if Sys.file_exists path then
+    if Sys.is_directory path then
+      Sys.readdir path
+      |> Array.to_list
+      |> List.fold_left (fun current name -> walk_files current (Filename.concat path name)) acc
+    else
+      path :: acc
+  else
+    acc
+
+let markdown_of_messages messages =
+  messages
+  |> List.map (fun (message : Db.stored_message) ->
+         let title =
+           match message.Db.role with
+           | "assistant" -> "Assistant"
+           | "user" -> "User"
+           | role -> String.capitalize_ascii role
+         in
+         "## " ^ title ^ "\n\n" ^ message.Db.content)
+  |> String.concat "\n\n"
+
+let schema properties required =
+  `Assoc [
+    ("type", `String "object");
+    ("properties", `Assoc properties);
+    ("required", `List (List.map (fun name -> `String name) required));
+  ]
+
+let make_tool name description input_schema execute =
+  {
+    definition = { Llm_types.name; description; input_schema };
+    execute;
   }
 
-let tool_registry = ref []
+let read_file_tool sandbox =
+  make_tool
+    "read_file"
+    "Read and return the contents of a file."
+    (schema [ ("path", `Assoc [ ("type", `String "string") ]) ] [ "path" ])
+    (fun ~chat_id:_ args ->
+      let args = json_assoc_or_empty args in
+      match required_string_arg args "path" with
+      | Error err -> failure err
+      | Ok path ->
+          begin
+            match validate_path sandbox ~for_write:false ~allowlist:sandbox.allow_read_paths path with
+            | Error err -> failure ("Error reading file: " ^ err)
+            | Ok safe_path ->
+                begin
+                  match read_file_full safe_path with
+                  | Ok content -> success content
+                  | Error err -> failure ("Error reading file: " ^ err)
+                end
+          end)
 
-let register_tool tool =
-  tool_registry := tool :: !tool_registry
+let write_file_tool sandbox =
+  make_tool
+    "write_file"
+    "Write content to a file."
+    (schema
+       [
+         ("path", `Assoc [ ("type", `String "string") ]);
+         ("content", `Assoc [ ("type", `String "string") ]);
+       ]
+       [ "path"; "content" ])
+    (fun ~chat_id:_ args ->
+      let args = json_assoc_or_empty args in
+      match required_string_arg args "path", required_string_arg args "content" with
+      | Error err, _ | _, Error err -> failure err
+      | Ok path, Ok content ->
+          begin
+            match validate_path sandbox ~for_write:true ~allowlist:sandbox.allow_write_paths path with
+            | Error err -> failure ("Error writing file: " ^ err)
+            | Ok safe_path ->
+                begin
+                  match write_file_atomic safe_path content with
+                  | Ok () -> success ("File written: " ^ path)
+                  | Error err -> failure ("Error writing file: " ^ err)
+                end
+          end)
 
-let get_tool name =
-  List.find_opt (fun tool -> tool.name = name) !tool_registry
+let edit_file_tool sandbox =
+  make_tool
+    "edit_file"
+    "Edit a file by replacing one exact text block with another."
+    (schema
+       [
+         ("path", `Assoc [ ("type", `String "string") ]);
+         ("old_text", `Assoc [ ("type", `String "string") ]);
+         ("new_text", `Assoc [ ("type", `String "string") ]);
+       ]
+       [ "path"; "old_text"; "new_text" ])
+    (fun ~chat_id:_ args ->
+      let args = json_assoc_or_empty args in
+      match required_string_arg args "path", required_string_arg args "old_text", required_string_arg args "new_text" with
+      | Error err, _, _ | _, Error err, _ | _, _, Error err -> failure err
+      | Ok path, Ok old_text, Ok new_text ->
+          begin
+            match validate_path sandbox ~for_write:true ~allowlist:sandbox.allow_write_paths path with
+            | Error err -> failure ("Error editing file: " ^ err)
+            | Ok safe_path ->
+                begin
+                  match read_file_full safe_path with
+                  | Error err -> failure ("Error editing file: " ^ err)
+                  | Ok content ->
+                      let count = ref 0 in
+                      let index = ref None in
+                      let start = ref 0 in
+                      while !start <= String.length content - String.length old_text && old_text <> "" do
+                        if String.sub content !start (String.length old_text) = old_text then (
+                          incr count;
+                          if !index = None then index := Some !start
+                        );
+                        incr start
+                      done;
+                      if !count = 0 then failure "Error editing file: old_text not found"
+                      else if !count > 1 then failure (Printf.sprintf "Error editing file: old_text appears %d times" !count)
+                      else
+                        let idx = Option.value ~default:0 !index in
+                        let replaced =
+                          String.sub content 0 idx
+                          ^ new_text
+                          ^ String.sub content (idx + String.length old_text)
+                              (String.length content - idx - String.length old_text)
+                        in
+                        begin
+                          match write_file_atomic safe_path replaced with
+                          | Ok () -> success ("File edited: " ^ path)
+                          | Error err -> failure ("Error editing file: " ^ err)
+                        end
+                end
+          end)
+
+let bash_tool sandbox =
+  make_tool
+    "bash"
+    "Execute a shell command inside the configured workspace."
+    (schema [ ("command", `Assoc [ ("type", `String "string") ]) ] [ "command" ])
+    (fun ~chat_id:_ args ->
+      let args = json_assoc_or_empty args in
+      match required_string_arg args "command" with
+      | Error err -> failure err
+      | Ok command ->
+          begin
+            match guard_command sandbox command with
+            | Error err -> failure err
+            | Ok () ->
+                begin
+                  match run_command ~timeout_seconds:sandbox.exec_timeout_seconds command with
+                  | Error err -> failure ("Error executing command: " ^ err)
+                  | Ok (output, exit_code, duration_ms) ->
+                      let content =
+                        Printf.sprintf "Command output:\n%s\nExit status: %d" (truncate_output output) exit_code
+                      in
+                      if exit_code = 0 then success ~status_code:exit_code ~duration_ms content
+                      else failure ~status_code:exit_code ~duration_ms ~error_type:"command_failed" content
+                end
+          end)
+
+let glob_tool sandbox =
+  make_tool
+    "glob"
+    "Find files matching a glob pattern inside the workspace."
+    (schema
+       [
+         ("pattern", `Assoc [ ("type", `String "string") ]);
+         ("path", `Assoc [ ("type", `String "string") ]);
+       ]
+       [ "pattern" ])
+    (fun ~chat_id:_ args ->
+      let args = json_assoc_or_empty args in
+      match required_string_arg args "pattern" with
+      | Error err -> failure err
+      | Ok pattern ->
+          let base = Option.value ~default:"." (string_arg args "path") in
+          begin
+            match validate_path sandbox ~for_write:false ~allowlist:sandbox.allow_read_paths base with
+            | Error err -> failure ("Error running glob: " ^ err)
+            | Ok safe_base ->
+                let files = walk_files [] safe_base in
+                let regex = glob_regex pattern in
+                let root = workspace_root sandbox in
+                let matches =
+                  files
+                  |> List.map (relative_path ~root)
+                  |> List.filter (fun path -> Str.string_match regex path 0)
+                  |> List.sort String.compare
+                in
+                success
+                  (if matches = [] then "No files matched."
+                   else String.concat "\n" matches)
+          end)
+
+let grep_tool sandbox =
+  make_tool
+    "grep"
+    "Search file contents with ripgrep."
+    (schema
+       [
+         ("pattern", `Assoc [ ("type", `String "string") ]);
+         ("path", `Assoc [ ("type", `String "string") ]);
+       ]
+       [ "pattern" ])
+    (fun ~chat_id:_ args ->
+      let args = json_assoc_or_empty args in
+      match required_string_arg args "pattern" with
+      | Error err -> failure err
+      | Ok pattern ->
+          let path = Option.value ~default:"." (string_arg args "path") in
+          begin
+            match validate_path sandbox ~for_write:false ~allowlist:sandbox.allow_read_paths path with
+            | Error err -> failure ("Error running grep: " ^ err)
+            | Ok safe_path ->
+                begin
+                  match run_process_args "rg" [| "rg"; "-n"; "--no-heading"; "--color"; "never"; pattern; safe_path |] with
+                  | Ok (output, 0, duration_ms) ->
+                      success ~status_code:0 ~duration_ms (truncate_output output)
+                  | Ok (output, 1, duration_ms) ->
+                      success ~status_code:1 ~duration_ms "No matches found."
+                  | Ok (output, exit_code, duration_ms) ->
+                      failure ~status_code:exit_code ~duration_ms (truncate_output output)
+                  | Error err ->
+                      failure ("Error running grep: " ^ err)
+                end
+          end)
+
+let read_memory_tool memory =
+  make_tool
+    "read_memory"
+    "Read global or chat memory from AGENTS.md files."
+    (schema
+       [
+         ("scope", `Assoc [ ("type", `String "string"); ("enum", `List [ `String "global"; `String "chat" ]) ]);
+       ]
+       [ "scope" ])
+    (fun ~chat_id args ->
+      let args = json_assoc_or_empty args in
+      match required_string_arg args "scope" with
+      | Error err -> failure err
+      | Ok "global" ->
+          begin
+            match Memory.read_global_memory memory with
+            | Some content when String.trim content <> "" -> success content
+            | _ -> success "No global memory file found."
+          end
+      | Ok "chat" ->
+          begin
+            match Memory.read_chat_memory memory chat_id with
+            | Some content when String.trim content <> "" -> success content
+            | _ -> success "No chat memory file found."
+          end
+      | Ok _ -> failure "scope must be 'global' or 'chat'")
+
+let write_memory_tool db memory =
+  make_tool
+    "write_memory"
+    "Write global or chat memory to AGENTS.md files."
+    (schema
+       [
+         ("scope", `Assoc [ ("type", `String "string"); ("enum", `List [ `String "global"; `String "chat" ]) ]);
+         ("content", `Assoc [ ("type", `String "string") ]);
+       ]
+       [ "scope"; "content" ])
+    (fun ~chat_id args ->
+      let args = json_assoc_or_empty args in
+      match required_string_arg args "scope", required_string_arg args "content" with
+      | Error err, _ | _, Error err -> failure err
+      | Ok scope, Ok content ->
+          let write_result =
+            match scope with
+            | "global" -> Memory.write_global_memory memory content
+            | "chat" -> Memory.write_chat_memory memory chat_id content
+            | _ -> Error "scope must be 'global' or 'chat'"
+          in
+          begin
+            match write_result with
+            | Error err -> failure ("Failed to write memory: " ^ err)
+            | Ok () ->
+                ignore (Db.insert_memory db ~chat_id:(if scope = "chat" then Some chat_id else None) ~scope ~content ~source:"write_memory");
+                success ("Memory saved to " ^ scope ^ " scope.")
+          end)
+
+let todo_read_tool db =
+  make_tool
+    "todo_read"
+    "Read the current per-chat todo list."
+    (schema [] [])
+    (fun ~chat_id _args ->
+      match Db.load_todo db ~chat_id with
+      | Ok (Some json) -> success json
+      | Ok None -> success "[]"
+      | Error err -> failure ("Failed to read todo list: " ^ err))
+
+let todo_write_tool db =
+  make_tool
+    "todo_write"
+    "Replace the current per-chat todo list."
+    (schema [ ("items", `Assoc [ ("type", `String "array") ]) ] [ "items" ])
+    (fun ~chat_id args ->
+      let items = list_arg args "items" in
+      let todo_json = `List items |> Yojson.Safe.to_string in
+      match Db.save_todo db ~chat_id ~todo_json with
+      | Ok () -> success "Todo list updated."
+      | Error err -> failure ("Failed to write todo list: " ^ err))
+
+let activate_skill_tool skills =
+  make_tool
+    "activate_skill"
+    "Load a skill's full instructions from workspace/skills."
+    (schema [ ("name", `Assoc [ ("type", `String "string") ]) ] [ "name" ])
+    (fun ~chat_id:_ args ->
+      let args = json_assoc_or_empty args in
+      match required_string_arg args "name" with
+      | Error err -> failure err
+      | Ok name ->
+          begin
+            match Skills.activate_skill skills name with
+            | Ok content -> success content
+            | Error err -> failure err
+          end)
+
+let sync_skills_tool skills =
+  make_tool
+    "sync_skills"
+    "Download a skill from a GitHub skills repository into the local skills directory."
+    (schema
+       [
+         ("name", `Assoc [ ("type", `String "string") ]);
+         ("repo", `Assoc [ ("type", `String "string") ]);
+       ]
+       [ "name" ])
+    (fun ~chat_id:_ args ->
+      let args = json_assoc_or_empty args in
+      match required_string_arg args "name" with
+      | Error err -> failure err
+      | Ok name ->
+          let repo = Option.value ~default:"vercel-labs/skills" (string_arg args "repo") in
+          begin
+            match Skills.sync_skill skills ~repo name with
+            | Ok message -> success message
+            | Error err -> failure err
+          end)
+
+let export_chat_tool sandbox db =
+  make_tool
+    "export_chat"
+    "Export the current chat history to a markdown file."
+    (schema [ ("path", `Assoc [ ("type", `String "string") ]) ] [])
+    (fun ~chat_id args ->
+      let args = json_assoc_or_empty args in
+      let default_path =
+        Filename.concat
+          (Filename.concat (Filename.concat (workspace_root sandbox) "workspace") "runtime")
+          (Printf.sprintf "chat-%d.md" chat_id)
+      in
+      let target = Option.value ~default:default_path (string_arg args "path") in
+      match Db.get_all_messages db ~chat_id with
+      | Error err -> failure ("Failed to export chat: " ^ err)
+      | Ok messages ->
+          begin
+            match validate_path sandbox ~for_write:true ~allowlist:sandbox.allow_write_paths target with
+            | Error err -> failure ("Failed to export chat: " ^ err)
+            | Ok safe_path ->
+                begin
+                  match write_file_atomic safe_path (markdown_of_messages messages) with
+                  | Ok () -> success ("Chat exported to " ^ safe_path)
+                  | Error err -> failure ("Failed to export chat: " ^ err)
+                end
+          end)
+
+let create_default_registry ?(sandbox_config=default_sandbox_config) ~data_dir ~skills_dir ~db () =
+  Random.self_init ();
+  let runtime_dir = Filename.concat data_dir "runtime" in
+  let memory = Memory.create ~data_dir ~runtime_dir in
+  let skills = Skills.create ~skills_dir in
+  let tools =
+    [
+      bash_tool sandbox_config;
+      read_file_tool sandbox_config;
+      write_file_tool sandbox_config;
+      edit_file_tool sandbox_config;
+      glob_tool sandbox_config;
+      grep_tool sandbox_config;
+      read_memory_tool memory;
+      write_memory_tool db memory;
+      todo_read_tool db;
+      todo_write_tool db;
+      activate_skill_tool skills;
+      sync_skills_tool skills;
+      export_chat_tool sandbox_config db;
+    ]
+  in
+  {
+    sandbox = sandbox_config;
+    data_dir;
+    skills_dir;
+    db;
+    memory;
+    skills;
+    tools;
+  }
+
+let definitions registry =
+  List.map (fun tool -> tool.definition) registry.tools
+
+let find_tool registry name =
+  List.find_opt (fun tool -> String.equal tool.definition.name name) registry.tools
+
+let execute registry ~chat_id name input =
+  match find_tool registry name with
+  | Some tool ->
+      begin
+        try tool.execute ~chat_id (json_assoc_or_empty input)
+        with exn -> failure (Printf.sprintf "Error executing tool %s: %s" name (Printexc.to_string exn))
+      end
+  | None ->
+      failure ("Tool not found: " ^ name)
+
+let active_registry = ref None
+
+let fallback_db data_dir =
+  let path = Filename.concat (Filename.concat data_dir "runtime") "default-tools.db" in
+  match Db.create path with
+  | Ok db -> db
+  | Error err -> failwith err
+
+let init_default_tools ?sandbox_config ?(data_dir="workspace") ?skills_dir ?db () =
+  let skills_dir = Option.value ~default:(Filename.concat data_dir "skills") skills_dir in
+  let db = Option.value ~default:(fallback_db data_dir) db in
+  let registry = create_default_registry ?sandbox_config ~data_dir ~skills_dir ~db () in
+  active_registry := Some registry
+
+let with_active_registry f =
+  match !active_registry with
+  | Some registry -> f registry
+  | None ->
+      init_default_tools ();
+      match !active_registry with
+      | Some registry -> f registry
+      | None -> failwith "tool registry initialization failed"
 
 let get_all_tools () =
-  !tool_registry |> List.rev |> List.map (fun tool -> (tool.name, tool.description))
+  with_active_registry (fun registry ->
+      registry.tools
+      |> List.map (fun tool -> (tool.definition.name, tool.definition.description)))
 
-let execute_tool tool_name arguments =
-  match get_tool tool_name with
-  | Some tool ->
-      let normalized = json_assoc_or_empty arguments in
-      begin
-        try tool.execute normalized
-        with exn -> Printf.sprintf "Error executing tool %s: %s" tool_name (Printexc.to_string exn)
-      end
-  | None -> Printf.sprintf "Tool %s not found" tool_name
-
-let parse_parameter_schema = function
-  | `String desc ->
-      begin
-        match String.split_on_char ':' desc with
-        | ty :: rest when rest <> [] ->
-            let param_type = trim ty in
-            let param_desc = trim (String.concat ":" rest) in
-            (if param_type = "" then "string" else param_type), param_desc
-        | _ -> "string", trim desc
-      end
-  | _ -> "string", ""
-
-let init_default_tools ?sandbox_config () =
-  Random.self_init ();
-  Option.iter set_sandbox_config sandbox_config;
-  tool_registry := [];
-  List.iter register_tool
-    [
-      file_read_tool;
-      write_file_tool;
-      edit_file_tool;
-      append_file_tool;
-      shell_tool;
-      exec_tool;
-      list_directory_tool;
-      list_dir_tool;
-    ]
+let execute_tool ?(chat_id=1) name input =
+  with_active_registry (fun registry ->
+      let result = execute registry ~chat_id name input in
+      result.content)
 
 let tools_to_json () =
-  let tool_list =
-    !tool_registry
-    |> List.rev
-    |> List.map (fun tool ->
-         let properties =
-           tool.parameters
-           |> List.map (fun (name, schema) ->
-                let param_type, param_desc = parse_parameter_schema schema in
-                (name, `Assoc [ ("type", `String param_type); ("description", `String param_desc) ]))
-         in
-         let required = tool.parameters |> List.map (fun (name, _) -> `String name) in
-         `Assoc [
-           ("type", `String "function");
-           ("function", `Assoc [
-             ("name", `String tool.name);
-             ("description", `String tool.description);
-             ("parameters", `Assoc [
-               ("type", `String "object");
-               ("properties", `Assoc properties);
-               ("required", `List required);
-             ]);
-           ]);
-         ])
-  in
-  `List tool_list
-
-let parse_tool_calls json =
-  try
-    match member "choices" json |> to_list with
-    | first_choice :: _ ->
-        begin
-          try
-            let message = member "message" first_choice in
-            Some (member "tool_calls" message |> to_list)
-          with _ -> None
-        end
-    | [] -> None
-  with _ -> None
-
-let extract_tool_arguments tool_call =
-  try
-    let function_ = member "function" tool_call in
-    Some (to_string (member "arguments" function_))
-  with _ -> None
+  with_active_registry (fun registry ->
+      `List (List.map Llm_types.tool_definition_to_yojson (definitions registry)))

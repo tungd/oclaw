@@ -5,12 +5,15 @@ module LogColor = Log_color
 type cli_overrides = {
   mutable config_path : string option;
   mutable single_shot : bool;
+  mutable chat_id : int;
   mutable model : string option;
   mutable api_key : string option;
   mutable api_base : string option;
   mutable temperature : float option;
   mutable max_tokens : int option;
   mutable timeout : int option;
+  mutable data_dir : string option;
+  mutable skills_dir : string option;
   mutable workspace : string option;
   mutable allow_read_paths : string list;
   mutable allow_write_paths : string list;
@@ -23,12 +26,15 @@ let default_overrides () =
   {
     config_path = None;
     single_shot = false;
+    chat_id = 1;
     model = None;
     api_key = None;
     api_base = None;
     temperature = None;
     max_tokens = None;
     timeout = None;
+    data_dir = None;
+    skills_dir = None;
     workspace = None;
     allow_read_paths = [];
     allow_write_paths = [];
@@ -56,6 +62,8 @@ let apply_cli_overrides (config : Config.config) (overrides : cli_overrides) =
     llm_temperature = Option.value ~default:config.llm_temperature overrides.temperature;
     llm_max_tokens = Option.value ~default:config.llm_max_tokens overrides.max_tokens;
     llm_timeout = Option.value ~default:config.llm_timeout overrides.timeout;
+    data_dir = Option.value ~default:config.data_dir overrides.data_dir;
+    skills_dir = Option.value ~default:config.skills_dir overrides.skills_dir;
     tools_workspace = Option.value ~default:config.tools_workspace overrides.workspace;
     tools_allow_read_paths =
       if overrides.allow_read_paths = [] then config.tools_allow_read_paths
@@ -82,8 +90,8 @@ let sandbox_config_of_config (config : Config.config) =
     exec_custom_allow_patterns = config.tools_exec_custom_allow_patterns;
   }
 
-let run_single_shot assistant prompt =
-  match Assistant_runtime.query assistant prompt with
+let run_single_shot state chat_id prompt =
+  match Agent_engine.process state ~chat_id prompt with
   | Ok response ->
       print_endline response;
       0
@@ -91,7 +99,7 @@ let run_single_shot assistant prompt =
       prerr_endline ("OClaw error: " ^ err);
       1
 
-let run_repl assistant =
+let run_repl state chat_id =
   print_endline "OClaw REPL";
   print_endline "Type /exit to quit.";
   let rec loop () =
@@ -106,7 +114,7 @@ let run_repl assistant =
         if input = "" then loop ()
         else if input = "/exit" || input = "/quit" then 0
         else (
-          match Assistant_runtime.query assistant input with
+          match Agent_engine.process state ~chat_id input with
           | Ok response ->
               print_endline response;
               loop ()
@@ -122,6 +130,7 @@ let () =
   let prompt_parts = ref [] in
   let spec = [
     ("--single-shot", Arg.Unit (fun () -> overrides.single_shot <- true), "Run one prompt and exit");
+    ("--chat-id", Arg.Int (fun value -> overrides.chat_id <- value), "Use this persistent chat/session id (default: 1)");
     ("--config", Arg.String (fun path -> overrides.config_path <- Some path), "Load configuration from this YAML file");
     ("--model", Arg.String (fun value -> overrides.model <- Some value), "Override the model name");
     ("--api-key", Arg.String (fun value -> overrides.api_key <- Some value), "Override the API key");
@@ -129,6 +138,8 @@ let () =
     ("--temperature", Arg.Float (fun value -> overrides.temperature <- Some value), "Override sampling temperature");
     ("--max-tokens", Arg.Int (fun value -> overrides.max_tokens <- Some value), "Override max completion tokens");
     ("--timeout", Arg.Int (fun value -> overrides.timeout <- Some value), "Override HTTP timeout in seconds");
+    ("--data-dir", Arg.String (fun value -> overrides.data_dir <- Some value), "Set the runtime data root (default: workspace)");
+    ("--skills-dir", Arg.String (fun value -> overrides.skills_dir <- Some value), "Override the skills directory");
     ("--workspace", Arg.String (fun value -> overrides.workspace <- Some value), "Set the tools workspace root");
     ("--allow-read-path", Arg.String (fun value -> overrides.allow_read_paths <- overrides.allow_read_paths @ [value]), "Allow reads outside the workspace for this path");
     ("--allow-write-path", Arg.String (fun value -> overrides.allow_write_paths <- overrides.allow_write_paths @ [value]), "Allow writes outside the workspace for this path");
@@ -154,19 +165,23 @@ let () =
       List.iter (fun err -> prerr_endline ("Configuration error: " ^ err)) errors;
       exit 2
   | Ok config ->
-      Tools.init_default_tools ~sandbox_config:(sandbox_config_of_config config) ();
-      let provider = Config.to_llm_provider_config config in
-      let assistant = Assistant_runtime.create ~provider_config:provider () in
-      let positional_prompt = String.concat " " !prompt_parts in
-      let exit_code =
-        if overrides.single_shot || positional_prompt <> "" then
-          let prompt =
-            if positional_prompt <> "" then positional_prompt
-            else read_stdin ()
-          in
-          if String.trim prompt = "" then 0 else run_single_shot assistant prompt
-        else
-          run_repl assistant
-      in
-      Log.info (fun m -> m "OClaw exiting with code %d" exit_code);
-      exit exit_code
+      begin
+        match Runtime.create_app_state config with
+        | Error err ->
+            prerr_endline ("OClaw error: " ^ err);
+            exit 1
+        | Ok state ->
+            let positional_prompt = String.concat " " !prompt_parts in
+            let exit_code =
+              if overrides.single_shot || positional_prompt <> "" then
+                let prompt =
+                  if positional_prompt <> "" then positional_prompt
+                  else read_stdin ()
+                in
+                if String.trim prompt = "" then 0 else run_single_shot state overrides.chat_id prompt
+              else
+                run_repl state overrides.chat_id
+            in
+            Log.info (fun m -> m "OClaw exiting with code %d" exit_code);
+            exit exit_code
+      end

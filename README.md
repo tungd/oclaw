@@ -1,13 +1,13 @@
 # OClaw
 
-OClaw is a CLI-first OCaml assistant. The product surface is intentionally small:
+OClaw is a CLI-first OCaml assistant with a rayclaw-style internal runtime:
 
 - one binary: `oclaw`
 - two runtime modes: REPL and single-shot
-- one capability layer: primitive filesystem and shell tools
-- one memory model: in-process session history for the current REPL only
+- one agent loop: structured messages, tool calls, persistent sessions, and file-backed memory
+- one default deployment shape: local CLI, with adapter-ready runtime seams for future channels
 
-ACP, Telegram, task orchestration, and server-side protocol adapters are no longer part of the project.
+External channels, schedulers, ACP/MCP, and embeddings are not shipped in this repo, but the runtime is structured so they can be added without another architectural rewrite.
 
 ## Usage
 
@@ -29,6 +29,12 @@ Run a single prompt from stdin:
 printf 'Explain the last command output' | dune exec ./oclaw.exe -- --single-shot
 ```
 
+Use a persistent conversation id:
+
+```bash
+dune exec ./oclaw.exe -- --chat-id 42
+```
+
 ## Configuration
 
 OClaw is flags-first. Runtime settings can come from:
@@ -38,10 +44,11 @@ OClaw is flags-first. Runtime settings can come from:
 3. `config.yaml` if present
 4. built-in defaults
 
-The remaining configuration surface is limited to:
+The remaining configuration surface includes:
 
 - model/provider settings
-- API base and key
+- runtime data directories
+- session/history limits
 - tool sandbox settings
 - debug logging
 
@@ -53,6 +60,10 @@ Useful environment variables:
 - `OCLAW_TEMPERATURE`
 - `OCLAW_MAX_TOKENS`
 - `OCLAW_TIMEOUT`
+- `OCLAW_DATA_DIR`
+- `OCLAW_SKILLS_DIR`
+- `OCLAW_MAX_HISTORY_MESSAGES`
+- `OCLAW_MAX_TOOL_ITERATIONS`
 - `OCLAW_WORKSPACE`
 - `OCLAW_ALLOW_READ_PATHS`
 - `OCLAW_ALLOW_WRITE_PATHS`
@@ -62,6 +73,7 @@ Useful environment variables:
 Useful CLI flags:
 
 - `--single-shot`
+- `--chat-id`
 - `--config`
 - `--model`
 - `--api-key`
@@ -69,6 +81,8 @@ Useful CLI flags:
 - `--temperature`
 - `--max-tokens`
 - `--timeout`
+- `--data-dir`
+- `--skills-dir`
 - `--workspace`
 - `--allow-read-path`
 - `--allow-write-path`
@@ -76,35 +90,51 @@ Useful CLI flags:
 - `--exec-timeout`
 - `--debug`
 
-## Prompt Context
+## Prompt and Memory Layout
 
-If present, OClaw loads these workspace files into the system prompt:
+OClaw builds its system prompt from:
 
-- `workspace/IDENTITY.md`
-- `workspace/AGENTS.md`
 - `workspace/SOUL.md`
+- `workspace/IDENTITY.md`
 - `workspace/USER.md`
 
-This prompt context is read at startup. No skill system or persistent memory layer remains in the core product.
+Persistent memory is file-backed:
+
+- global memory: `workspace/AGENTS.md`
+- chat memory: `workspace/runtime/groups/<chat_id>/AGENTS.md`
+
+Runtime state lives under `workspace/runtime/` by default:
+
+- SQLite DB: `workspace/runtime/oclaw.db`
+- resumable sessions: stored in SQLite by `chat_id`
+- todo lists: stored in SQLite by `chat_id`
+
+Local skills live under `workspace/skills/`.
 
 ## Built-In Tools
 
-The default tool registry is intentionally primitive:
+The default registry is rayclaw-style and CLI-focused:
 
+- `bash`
 - `read_file`
 - `write_file`
 - `edit_file`
-- `append_file`
-- `list_directory`
-- `list_dir`
-- `execute_command`
-- `exec`
+- `glob`
+- `grep`
+- `read_memory`
+- `write_memory`
+- `todo_read`
+- `todo_write`
+- `activate_skill`
+- `sync_skills`
+- `export_chat`
 
 ## Build and Test
 
 ```bash
 dune build
-dune exec ./test_tools_registry.exe
+_build/default/test_tools_registry.exe
 dune exec ./test_assistant_runtime.exe
-dune exec ./test_config.exe
+_build/default/test_llm_provider.exe
+_build/default/test_config.exe
 ```

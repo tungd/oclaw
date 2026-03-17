@@ -23,144 +23,197 @@ let make_provider () =
     timeout = 1;
   }
 
-let assistant_reply content =
-  Llm_provider.Success {
-    id = "resp";
-    object_ = "chat.completion";
-    created = 0;
-    model = "test-model";
-    choices = [
-      {
-        Llm_provider.index = 0;
-        message = {
-          role = Llm_provider.Assistant;
-          content;
-          tool_call_id = None;
-          tool_calls = [];
-        };
-        finish_reason = "stop";
-        tool_calls = [];
-      }
-    ];
-    usage_prompt_tokens = 0;
-    usage_completion_tokens = 0;
-    usage_total_tokens = 0;
-    system_fingerprint = None;
-  }
+let temp_dir () =
+  let path = Filename.temp_file "oclaw-runtime-" "" in
+  Sys.remove path;
+  Unix.mkdir path 0o755;
+  path
 
-let assistant_tool_call ?(content="") name args =
-  let call = {
-    Llm_provider.id = "call-1";
-    type_ = "function";
-    function_name = name;
-    function_args = Yojson.Safe.to_string (`Assoc args);
-  } in
-  Llm_provider.Success {
-    id = "resp-tool";
-    object_ = "chat.completion";
-    created = 0;
-    model = "test-model";
-    choices = [
-      {
-        Llm_provider.index = 0;
-        message = {
-          role = Llm_provider.Assistant;
-          content;
-          tool_call_id = None;
-          tool_calls = [ call ];
-        };
-        finish_reason = "tool_calls";
-        tool_calls = [ call ];
-      }
-    ];
-    usage_prompt_tokens = 0;
-    usage_completion_tokens = 0;
-    usage_total_tokens = 0;
-    system_fingerprint = None;
-  }
-
-let test_session_memory () =
-  let seen_messages = ref [] in
-  let llm_call _provider messages ~tools:_ =
-    seen_messages := !seen_messages @ [ messages ];
-    if List.length !seen_messages = 1 then assistant_reply "first answer"
-    else assistant_reply "second answer"
-  in
-  let runtime =
-    Assistant_runtime.create
-      ~provider_config:(make_provider ())
-      ~llm_call
-      ~system_prompt:"system"
-      ()
-  in
-  ignore (Assistant_runtime.query runtime "first prompt");
-  ignore (Assistant_runtime.query runtime "second prompt");
-  match List.rev !seen_messages with
-  | latest :: _ ->
-      let contents = List.map (fun msg -> msg.Llm_provider.content) latest in
-      expect (List.mem "first prompt" contents) "previous user message missing from follow-up context";
-      expect (List.mem "first answer" contents) "previous assistant reply missing from follow-up context"
-  | [] ->
-      fail "expected LLM calls to be recorded"
-
-let test_restart_loses_context () =
-  let seen_first = ref [] in
-  let llm1 _provider messages ~tools:_ =
-    seen_first := messages;
-    assistant_reply "run one"
-  in
-  let llm2 _provider messages ~tools:_ =
-    let contents = List.map (fun msg -> msg.Llm_provider.content) messages in
-    expect (not (List.mem "prompt one" contents)) "fresh runtime should not carry prior context";
-    assistant_reply "run two"
-  in
-  let runtime1 =
-    Assistant_runtime.create ~provider_config:(make_provider ()) ~llm_call:llm1 ~system_prompt:"system" ()
-  in
-  let runtime2 =
-    Assistant_runtime.create ~provider_config:(make_provider ()) ~llm_call:llm2 ~system_prompt:"system" ()
-  in
-  ignore (Assistant_runtime.query runtime1 "prompt one");
-  ignore (Assistant_runtime.query runtime2 "prompt two");
-  expect (!seen_first <> []) "first runtime should have issued an LLM request"
-
-let test_tool_execution () =
-  let workspace = Filename.concat (Filename.get_temp_dir_name ()) "oclaw-test-tools" in
-  (try Unix.mkdir workspace 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
-  let file_path = Filename.concat workspace "note.txt" in
-  let out = open_out file_path in
-  output_string out "tool output";
-  close_out out;
-  Tools.init_default_tools ~sandbox_config:{
-    Tools.workspace_root = workspace;
-    restrict_to_workspace = true;
-    allow_read_paths = [];
-    allow_write_paths = [];
-    exec_timeout_seconds = 1;
-    exec_enable_deny_patterns = true;
-    exec_custom_deny_patterns = [];
-    exec_custom_allow_patterns = [];
-  } ();
-  let call_count = ref 0 in
-  let llm_call _provider messages ~tools:_ =
-    incr call_count;
-    if !call_count = 1 then
-      assistant_tool_call "read_file" [ ("path", `String "note.txt") ]
+let write_file path content =
+  let rec mkdir_p dir =
+    if dir = "" || dir = "." || dir = "/" then ()
+    else if Sys.file_exists dir then ()
     else (
-      let contents = List.map (fun msg -> msg.Llm_provider.content) messages in
-      expect (List.mem "tool output" contents) "tool result should be fed back into the follow-up LLM call";
-      assistant_reply "done"
+      mkdir_p (Filename.dirname dir);
+      Unix.mkdir dir 0o755
     )
   in
-  let runtime =
-    Assistant_runtime.create ~provider_config:(make_provider ()) ~llm_call ~system_prompt:"system" ()
+  mkdir_p (Filename.dirname path);
+  Stdlib.Out_channel.with_open_bin path (fun channel -> output_string channel content)
+
+let contains_substring haystack needle =
+  let h_len = String.length haystack in
+  let n_len = String.length needle in
+  let rec loop index =
+    if n_len = 0 then true
+    else if index > h_len - n_len then false
+    else if String.sub haystack index n_len = needle then true
+    else loop (index + 1)
   in
-  match Assistant_runtime.query runtime "read the note" with
-  | Ok response -> expect (String.equal response "done") "unexpected final response after tool call"
-  | Error err -> fail ("tool execution query failed: " ^ err)
+  loop 0
+
+let text_response content =
+  Ok {
+    Llm_types.content = [ Llm_types.Response_text { text = content } ];
+    stop_reason = Some "end_turn";
+    usage = None;
+  }
+
+let tool_response name args =
+  Ok {
+    Llm_types.content = [
+      Llm_types.Response_tool_use {
+        id = "call-1";
+        name;
+        input = `Assoc args;
+      }
+    ];
+    stop_reason = Some "tool_use";
+    usage = None;
+  }
+
+let make_config data_dir =
+  {
+    Oclaw_config.Config.default_config with
+    llm_api_key = "test-key";
+    llm_api_base = "http://example.invalid";
+    llm_model = "test-model";
+    data_dir;
+    tools_workspace = data_dir;
+    tools_restrict_to_workspace = true;
+    max_history_messages = 24;
+    max_tool_iterations = 8;
+  }
+
+let create_state ?llm_call data_dir =
+  match Runtime.create_app_state ?llm_call (make_config data_dir) with
+  | Ok state -> state
+  | Error err -> fail err
+
+let text_messages messages =
+  messages
+  |> List.filter_map (fun (msg : Llm_types.message) ->
+         match msg.content with
+         | Llm_types.Text_content text -> Some text
+         | Llm_types.Blocks blocks ->
+             blocks
+             |> List.filter_map (function
+                    | Llm_types.Text { text } -> Some text
+                    | Llm_types.Tool_result { content; _ } -> Some content
+                    | _ -> None)
+             |> function
+             | [] -> None
+             | lines -> Some (String.concat "\n" lines))
+
+let test_persistent_session () =
+  let data_dir = temp_dir () in
+  let first_llm _provider ~system_prompt:_ messages ~tools:_ =
+    let contents = text_messages messages in
+    expect (List.mem "first prompt" contents) "current prompt missing from first turn";
+    text_response "first answer"
+  in
+  let state1 = create_state ~llm_call:first_llm data_dir in
+  begin
+    match Agent_engine.process state1 ~chat_id:7 "first prompt" with
+    | Ok "first answer" -> ()
+    | Ok other -> fail ("unexpected first reply: " ^ other)
+    | Error err -> fail err
+  end;
+  let second_llm _provider ~system_prompt:_ messages ~tools:_ =
+    let contents = text_messages messages in
+    expect (List.mem "first prompt" contents) "prior user message missing after restart";
+    expect (List.mem "first answer" contents) "prior assistant message missing after restart";
+    expect (List.mem "second prompt" contents) "new prompt missing";
+    text_response "second answer"
+  in
+  let state2 = create_state ~llm_call:second_llm data_dir in
+  begin
+    match Agent_engine.process state2 ~chat_id:7 "second prompt" with
+    | Ok "second answer" -> ()
+    | Ok other -> fail ("unexpected second reply: " ^ other)
+    | Error err -> fail err
+  end
+
+let test_session_isolation () =
+  let data_dir = temp_dir () in
+  let first_llm _provider ~system_prompt:_ _messages ~tools:_ =
+    text_response "chat one answer"
+  in
+  let state1 = create_state ~llm_call:first_llm data_dir in
+  ignore (Agent_engine.process state1 ~chat_id:1 "chat one prompt");
+  let second_llm _provider ~system_prompt:_ messages ~tools:_ =
+    let contents = text_messages messages in
+    expect (not (List.mem "chat one prompt" contents)) "chat history leaked across chat ids";
+    text_response "chat two answer"
+  in
+  let state2 = create_state ~llm_call:second_llm data_dir in
+  ignore (Agent_engine.process state2 ~chat_id:2 "chat two prompt")
+
+let test_memory_injection () =
+  let data_dir = temp_dir () in
+  write_file (Filename.concat data_dir "AGENTS.md") "global fact";
+  write_file
+    (Filename.concat (Filename.concat (Filename.concat data_dir "runtime") "groups/42") "AGENTS.md")
+    "chat fact";
+  let llm _provider ~system_prompt _messages ~tools:_ =
+    expect (contains_substring system_prompt "global fact") "global memory missing from system prompt";
+    expect (contains_substring system_prompt "chat fact") "chat memory missing from system prompt";
+    text_response "done"
+  in
+  let state = create_state ~llm_call:llm data_dir in
+  ignore (Agent_engine.process state ~chat_id:42 "hello")
+
+let test_tool_loop_and_resume () =
+  let data_dir = temp_dir () in
+  write_file (Filename.concat data_dir "note.txt") "tool output";
+  let calls = ref 0 in
+  let llm _provider ~system_prompt:_ messages ~tools:_ =
+    incr calls;
+    if !calls = 1 then
+      tool_response "read_file" [ ("path", `String "note.txt") ]
+    else (
+      let contents = text_messages messages in
+      expect (List.mem "tool output" contents) "tool result missing from follow-up call";
+      text_response "done"
+    )
+  in
+  let state = create_state ~llm_call:llm data_dir in
+  begin
+    match Agent_engine.process state ~chat_id:3 "read the note" with
+    | Ok "done" -> ()
+    | Ok other -> fail ("unexpected tool loop reply: " ^ other)
+    | Error err -> fail err
+  end;
+  let resumed _provider ~system_prompt:_ messages ~tools:_ =
+    let contents = text_messages messages in
+    expect (List.mem "read the note" contents) "tool turn prompt missing after resume";
+    expect (List.mem "done" contents) "final assistant reply missing after resume";
+    text_response "second turn"
+  in
+  let state2 = create_state ~llm_call:resumed data_dir in
+  begin
+    match Agent_engine.process state2 ~chat_id:3 "follow up" with
+    | Ok "second turn" -> ()
+    | Ok other -> fail ("unexpected resumed reply: " ^ other)
+    | Error err -> fail err
+  end
+
+let test_skill_activation () =
+  let data_dir = temp_dir () in
+  write_file
+    (Filename.concat (Filename.concat data_dir "skills/pdf") "SKILL.md")
+    "# PDF\n\nConvert things to PDF.";
+  let state = create_state data_dir in
+  let activate =
+    Tools.execute state.tools ~chat_id:1 "activate_skill" (`Assoc [ ("name", `String "pdf") ])
+  in
+  expect (not activate.Tools.is_error) "activate_skill should succeed";
+  expect (contains_substring activate.Tools.content "Convert things to PDF") "activate_skill returned wrong content"
 
 let () =
-  test_session_memory ();
-  test_restart_loses_context ();
-  test_tool_execution ();
+  test_persistent_session ();
+  test_session_isolation ();
+  test_memory_injection ();
+  test_tool_loop_and_resume ();
+  test_skill_activation ();
   Printf.printf "[PASS] assistant runtime tests\n"

@@ -1,4 +1,4 @@
-(** Primitive filesystem and shell tools. *)
+(** Registry-driven CLI tool layer inspired by rayclaw. *)
 
 type sandbox_config = {
   workspace_root : string;
@@ -11,23 +11,38 @@ type sandbox_config = {
   exec_custom_allow_patterns : string list;
 }
 
-val default_sandbox_config : sandbox_config
-val set_sandbox_config : sandbox_config -> unit
-
-type tool_definition = {
-  name : string;
-  description : string;
-  parameters : (string * Yojson.Safe.t) list;
-  execute : Yojson.Safe.t -> string;
+type tool_result = {
+  content : string;
+  is_error : bool;
+  status_code : int option;
+  bytes : int;
+  duration_ms : int option;
+  error_type : string option;
 }
 
-val file_read_tool : tool_definition
-val shell_tool : tool_definition
-val register_tool : tool_definition -> unit
-val get_tool : string -> tool_definition option
+type t
+
+val default_sandbox_config : sandbox_config
+
+val create_default_registry :
+  ?sandbox_config:sandbox_config ->
+  data_dir:string ->
+  skills_dir:string ->
+  db:Db.t ->
+  unit ->
+  t
+
+val definitions : t -> Llm_types.tool_definition list
+val execute : t -> chat_id:int -> string -> Yojson.Safe.t -> tool_result
+
+val init_default_tools :
+  ?sandbox_config:sandbox_config ->
+  ?data_dir:string ->
+  ?skills_dir:string ->
+  ?db:Db.t ->
+  unit ->
+  unit
+
 val get_all_tools : unit -> (string * string) list
-val execute_tool : string -> Yojson.Safe.t -> string
-val init_default_tools : ?sandbox_config:sandbox_config -> unit -> unit
+val execute_tool : ?chat_id:int -> string -> Yojson.Safe.t -> string
 val tools_to_json : unit -> Yojson.Safe.t
-val parse_tool_calls : Yojson.Safe.t -> Yojson.Safe.t list option
-val extract_tool_arguments : Yojson.Safe.t -> string option

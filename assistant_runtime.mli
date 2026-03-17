@@ -1,23 +1,19 @@
-(** Minimal in-process assistant runtime for the CLI. *)
-
-type llm_call =
-  Llm_provider.provider_config ->
-  Llm_provider.message list ->
-  tools:Yojson.Safe.t ->
-  Llm_provider.llm_result
+(** Compatibility wrapper over the new persistent runtime. *)
 
 type t
 
-val default_system_prompt : string
-val default_llm_call : llm_call
+type llm_call =
+  Runtime.llm_call
 
 val create :
   ?llm_call:llm_call ->
   ?system_prompt:string ->
   ?history_limit:int ->
+  ?chat_id:int ->
+  ?data_dir:string ->
   provider_config:Llm_provider.provider_config ->
   unit ->
   t
 
 val query : t -> string -> (string, string) result
-val history : t -> Llm_provider.message list
+val history : t -> Llm_types.message list

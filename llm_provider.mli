@@ -1,6 +1,5 @@
-(** LLM Provider module for OpenAI-compatible APIs *)
+(** LLM provider for structured rayclaw-style messages on top of OpenAI-compatible APIs. *)
 
-(** LLM Model configuration *)
 type llm_model = {
   id : string;
   name : string;
@@ -11,26 +10,6 @@ type llm_model = {
   max_tokens : int;
 }
 
-(** Message role types *)
-type message_role = System | User | Assistant | Tool
-
-(** Tool call structure *)
-type llm_tool_call = {
-  id : string;
-  type_ : string;
-  function_name : string;
-  function_args : string;
-}
-
-(** Message type for LLM conversation *)
-type message = {
-  role : message_role;
-  content : string;
-  tool_call_id : string option;
-  tool_calls : llm_tool_call list;
-}
-
-(** LLM Provider configuration *)
 type provider_config = {
   api_base : string;
   api_key : string;
@@ -40,53 +19,20 @@ type provider_config = {
   timeout : int;
 }
 
-(** Tool definition for function calling *)
-type tool_definition = {
-  name : string;
-  description : string;
-  parameters_json : string;
-}
-
-
-(** LLM Response result *)
-type llm_result = 
-  | Success of llm_response
-  | Error of string
-
-and llm_response = {
-  id : string;
-  object_ : string;
-  created : int;
-  model : string;
-  choices : llm_choice list;
-  usage_prompt_tokens : int;
-  usage_completion_tokens : int;
-  usage_total_tokens : int;
-  system_fingerprint : string option;
-}
-
-and llm_choice = {
-  index : int;
-  message : message;
-  finish_reason : string;
-  tool_calls : llm_tool_call list;
-}
-
-(** Convert between message role and string *)
-val role_to_string : message_role -> string
-val string_to_role : string -> message_role
-
-(** Default Qwen3.5+ model configuration *)
 val qwen35_plus_model : llm_model
-
-(** Create DashScope provider configuration *)
 val create_dashscope_provider : ?temperature:float -> ?max_tokens:int -> unit -> provider_config
 
-(** Make LLM API call *)
-val call_llm : provider_config -> message list -> ?tools:Yojson.Safe.t option -> unit -> llm_result
+val build_request_json :
+  provider_config ->
+  system_prompt:string ->
+  Llm_types.message list ->
+  tools:Llm_types.tool_definition list ->
+  stream:bool ->
+  Yojson.Safe.t
 
-(** Extract assistant message from response *)
-val get_assistant_message : llm_result -> message option
-
-(** Check if response contains tool calls *)
-val has_tool_calls : llm_result -> bool
+val send_message :
+  provider_config ->
+  system_prompt:string ->
+  Llm_types.message list ->
+  tools:Llm_types.tool_definition list ->
+  (Llm_types.messages_response, string) result

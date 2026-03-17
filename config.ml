@@ -11,6 +11,10 @@ type config = {
   llm_api_key : string [@default ""];
   llm_api_base : string [@default "https://coding-intl.dashscope.aliyuncs.com/v1"];
   llm_timeout : int [@default 60];
+  data_dir : string [@default "workspace"];
+  skills_dir : string [@default ""];
+  max_history_messages : int [@default 24];
+  max_tool_iterations : int [@default 16];
   tools_workspace : string [@default "."];
   tools_restrict_to_workspace : bool [@default true];
   tools_allow_read_paths : string list [@default []];
@@ -103,6 +107,10 @@ let apply_env_overrides config =
     llm_api_key = env_string "OCLAW_API_KEY" config.llm_api_key;
     llm_api_base = env_string "OCLAW_API_BASE" config.llm_api_base;
     llm_timeout = env_int "OCLAW_TIMEOUT" config.llm_timeout;
+    data_dir = env_string "OCLAW_DATA_DIR" config.data_dir;
+    skills_dir = env_string "OCLAW_SKILLS_DIR" config.skills_dir;
+    max_history_messages = env_int "OCLAW_MAX_HISTORY_MESSAGES" config.max_history_messages;
+    max_tool_iterations = env_int "OCLAW_MAX_TOOL_ITERATIONS" config.max_tool_iterations;
     tools_workspace = env_string "OCLAW_WORKSPACE" config.tools_workspace;
     tools_restrict_to_workspace = env_bool "OCLAW_RESTRICT_TO_WORKSPACE" config.tools_restrict_to_workspace;
     tools_allow_read_paths = env_paths "OCLAW_ALLOW_READ_PATHS" config.tools_allow_read_paths;
@@ -144,6 +152,17 @@ let validate_config config =
     errors := "LLM timeout must be positive" :: !errors;
   if config.llm_max_tokens <= 0 then
     errors := "LLM max_tokens must be positive" :: !errors;
+  if config.max_history_messages <= 0 then
+    errors := "max_history_messages must be positive" :: !errors;
+  if config.max_tool_iterations <= 0 then
+    errors := "max_tool_iterations must be positive" :: !errors;
   if config.tools_exec_timeout_seconds <= 0 then
     errors := "Tools exec_timeout_seconds must be positive" :: !errors;
   if !errors = [] then Ok config else Error !errors
+
+let runtime_data_dir config =
+  Filename.concat config.data_dir "runtime"
+
+let skills_data_dir config =
+  if String.trim config.skills_dir <> "" then config.skills_dir
+  else Filename.concat config.data_dir "skills"
