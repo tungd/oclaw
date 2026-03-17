@@ -245,9 +245,10 @@ let perform_multi_requests requests =
   else
     let multi_handle = Curl.Multi.create () in
     let results_map = Hashtbl.create (List.length requests) in
+    let easy_handles = ref [] in
     
     (* Create easy handles and add to multi *)
-    let easy_handles = List.mapi (fun i req ->
+    List.iteri (fun i req ->
       let handle = init_curl_handle () in
       set_request_options handle req;
       
@@ -275,60 +276,59 @@ let perform_multi_requests requests =
       (* Store metadata for later retrieval *)
       Hashtbl.add results_map handle (i, req, response_body, response_headers);
       Curl.Multi.add multi_handle handle;
-      (handle, i)
-    ) requests in
+      easy_handles := (handle, i) :: !easy_handles
+    ) requests;
     
-    try
-      (* Main event loop using curl's wait *)
-      let rec event_loop () =
-        let running_handles = Curl.Multi.perform multi_handle in
-        if running_handles > 0 then (
-          (* Wait for activity using curl's built-in wait *)
-          let _ = Curl.Multi.wait ~timeout_ms:1000 multi_handle in
-          event_loop ()
-        )
-      in
-      event_loop ();
-      
-      (* Collect results in original order *)
-      let results = Array.make (List.length requests) None in
-      
-      List.iter (fun (handle, idx) ->
-        try
-          let (orig_idx, _, response_body, response_headers) = Hashtbl.find results_map handle in
-          
-          let status_code = 
-            let code = Curl.get_responsecode handle in
-            if code = 0 then 200 else code
-          in
-          
-          let response = HttpResponse.create 
-              ~status:status_code 
-              ~headers:(List.rev !response_headers) 
-              ~body:(Buffer.contents response_body) 
-              ()
-          in
-          results.(orig_idx) <- Some response
-        with _ ->
-          results.(idx) <- Some (HttpResponse.create ~status:0 ~headers:[] ~body:"" ~error:"Request failed" ())
-      ) easy_handles;
-      
-      (* Cleanup *)
-      List.iter (fun (handle, _) ->
-        try Curl.Multi.remove multi_handle handle with _ -> ();
-        cleanup_curl_handle handle
-      ) easy_handles;
-      
-      (* Convert to list, filtering out None values *)
-      Array.to_list results |> List.filter_map Fun.id
-      
-    with exn ->
-      (* Cleanup on error *)
-      List.iter (fun (handle, _) ->
-        try Curl.Multi.remove multi_handle handle with _ -> ();
-        cleanup_curl_handle handle
-      ) easy_handles;
-      raise exn
+    let results =
+      try
+        (* Main event loop using curl's wait *)
+        let rec event_loop () =
+          let running_handles = Curl.Multi.perform multi_handle in
+          if running_handles > 0 then (
+            (* Wait for activity using curl's built-in wait *)
+            let _ = Curl.Multi.wait ~timeout_ms:1000 multi_handle in
+            event_loop ()
+          )
+        in
+        event_loop ();
+        
+        (* Collect results in original order *)
+        let results = Array.make (List.length requests) None in
+        
+        List.iter (fun (handle, idx) ->
+          try
+            let (orig_idx, _, response_body, response_headers) = Hashtbl.find results_map handle in
+            
+            let status_code = 
+              let code = Curl.get_responsecode handle in
+              if code = 0 then 200 else code
+            in
+            
+            let response = HttpResponse.create 
+                ~status:status_code 
+                ~headers:(List.rev !response_headers) 
+                ~body:(Buffer.contents response_body) 
+                ()
+            in
+            results.(orig_idx) <- Some response
+          with _ ->
+            results.(idx) <- Some (HttpResponse.create ~status:0 ~headers:[] ~body:"" ~error:"Request failed" ())
+        ) !easy_handles;
+        
+        (* Convert to list, filtering out None values *)
+        Array.to_list results |> List.filter_map Fun.id
+      with _ ->
+        (* Return empty results on error *)
+        []
+    in
+    
+    (* Always cleanup all handles *)
+    List.iter (fun (handle, _) ->
+      try Curl.Multi.remove multi_handle handle with _ -> ();
+      cleanup_curl_handle handle
+    ) !easy_handles;
+    
+    results
 
 (* Simple GET request *)
 let get url headers timeout =

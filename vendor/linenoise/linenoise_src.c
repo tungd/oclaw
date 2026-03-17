@@ -122,7 +122,7 @@ static char *unsupported_term[] = {"dumb","cons25","emacs",NULL};
 static linenoiseCompletionCallback *completionCallback = NULL;
 static linenoiseHintsCallback *hintsCallback = NULL;
 static linenoiseFreeHintsCallback *freeHintsCallback = NULL;
-static const char *promptInputColor = "\x1b[38;5;208m";
+static const char *promptInputColor = "\x1b[37m";
 static const char *colorReset = "\x1b[0m";
 
 static int is_ansi_final_byte(unsigned char c) {

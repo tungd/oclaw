@@ -107,14 +107,18 @@ let run_repl state chat_id =
   (match LNoise.history_load ~filename:history_file with Error e -> Log.debug (fun m -> m "No history file yet: %s" e) | Ok () -> ());
   LNoise.set_multiline true;
   
+  (* ANSI color codes *)
+  let ansi_reset = "\027[0m" in
+  let ansi_bold = "\027[1m" in
+  let ansi_orange = "\027[38;5;208m" in
+  let repl_prompt = ansi_bold ^ ansi_orange ^ "┃" ^ ansi_reset ^ " " in
+  
   print_endline "OClaw REPL";
   print_endline "Type /exit or /quit to quit.";
   print_endline "";
   
   let rec loop () =
-    (* Simple prompt - linenoise handles display correctly *)
-    let prompt = "┃ " in
-    match LNoise.linenoise prompt with
+    match LNoise.linenoise repl_prompt with
     | None ->
         print_endline "\nGoodbye!";
         0
