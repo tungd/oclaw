@@ -227,8 +227,6 @@ let make_request req =
   
   try
     let response = perform_request handle in
-    Log.debug (fun m -> m "HTTP Response: Status %d, Body length: %d"
-                     response.HttpResponse.status (String.length response.HttpResponse.body));
     cleanup_curl_handle handle;
     response
   with
