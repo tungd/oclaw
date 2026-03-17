@@ -107,7 +107,7 @@ let text_messages messages =
 
 let test_persistent_session () =
   let data_dir = temp_dir () in
-  let first_llm _provider ~system_prompt:_ messages ~tools:_ =
+  let first_llm _provider ?on_text_delta:_ ~system_prompt:_ messages ~tools:_ =
     let contents = text_messages messages in
     expect (List.mem "first prompt" contents) "current prompt missing from first turn";
     text_response "first answer"
@@ -119,7 +119,7 @@ let test_persistent_session () =
     | Ok other -> fail ("unexpected first reply: " ^ other)
     | Error err -> fail err
   end;
-  let second_llm _provider ~system_prompt:_ messages ~tools:_ =
+  let second_llm _provider ?on_text_delta:_ ~system_prompt:_ messages ~tools:_ =
     let contents = text_messages messages in
     expect (List.mem "first prompt" contents) "prior user message missing after restart";
     expect (List.mem "first answer" contents) "prior assistant message missing after restart";
@@ -136,12 +136,12 @@ let test_persistent_session () =
 
 let test_session_isolation () =
   let data_dir = temp_dir () in
-  let first_llm _provider ~system_prompt:_ _messages ~tools:_ =
+  let first_llm _provider ?on_text_delta:_ ~system_prompt:_ _messages ~tools:_ =
     text_response "chat one answer"
   in
   let state1 = create_state ~llm_call:first_llm data_dir in
   ignore (Agent_engine.process state1 ~chat_id:1 "chat one prompt");
-  let second_llm _provider ~system_prompt:_ messages ~tools:_ =
+  let second_llm _provider ?on_text_delta:_ ~system_prompt:_ messages ~tools:_ =
     let contents = text_messages messages in
     expect (not (List.mem "chat one prompt" contents)) "chat history leaked across chat ids";
     text_response "chat two answer"
@@ -155,7 +155,7 @@ let test_memory_injection () =
   write_file
     (Filename.concat (Filename.concat (Filename.concat data_dir "runtime") "groups/42") "AGENTS.md")
     "chat fact";
-  let llm _provider ~system_prompt _messages ~tools:_ =
+  let llm _provider ?on_text_delta:_ ~system_prompt _messages ~tools:_ =
     expect (contains_substring system_prompt "global fact") "global memory missing from system prompt";
     expect (contains_substring system_prompt "chat fact") "chat memory missing from system prompt";
     text_response "done"
@@ -167,7 +167,7 @@ let test_tool_loop_and_resume () =
   let data_dir = temp_dir () in
   write_file (Filename.concat data_dir "note.txt") "tool output";
   let calls = ref 0 in
-  let llm _provider ~system_prompt:_ messages ~tools:_ =
+  let llm _provider ?on_text_delta:_ ~system_prompt:_ messages ~tools:_ =
     incr calls;
     if !calls = 1 then
       tool_response "read_file" [ ("path", `String "note.txt") ]
@@ -184,7 +184,7 @@ let test_tool_loop_and_resume () =
     | Ok other -> fail ("unexpected tool loop reply: " ^ other)
     | Error err -> fail err
   end;
-  let resumed _provider ~system_prompt:_ messages ~tools:_ =
+  let resumed _provider ?on_text_delta:_ ~system_prompt:_ messages ~tools:_ =
     let contents = text_messages messages in
     expect (List.mem "read the note" contents) "tool turn prompt missing after resume";
     expect (List.mem "done" contents) "final assistant reply missing after resume";

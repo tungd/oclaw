@@ -92,11 +92,22 @@ let sandbox_config_of_config (config : Config.config) =
   }
 
 let run_single_shot state chat_id prompt =
-  match Agent_engine.process state ~chat_id prompt with
+  let streamed = ref false in
+  let on_text_delta delta =
+    if not !streamed then (
+      streamed := true;
+      print_string "\r\027[K"
+    );
+    print_string delta;
+    flush stdout
+  in
+  match Agent_engine.process ~on_text_delta state ~chat_id prompt with
   | Ok response ->
-      print_endline response;
+      if !streamed then print_newline ()
+      else print_endline response;
       0
   | Error err ->
+      if !streamed then print_newline ();
       prerr_endline ("OClaw error: " ^ err);
       1
 
@@ -134,13 +145,24 @@ let run_repl state chat_id =
         ) else (
           (* Add to history if not empty *)
           (match LNoise.history_add trimmed with Error e -> Log.debug (fun m -> m "Failed to add to history: %s" e) | Ok () -> ());
-          
-          match Agent_engine.process state ~chat_id input with
+
+          let streamed = ref false in
+          let on_text_delta delta =
+            if not !streamed then (
+              streamed := true;
+              print_string "\r\027[K"
+            );
+            print_string delta;
+            flush stdout
+          in
+          match Agent_engine.process ~on_text_delta state ~chat_id input with
           | Ok response ->
-              print_endline response;
+              if !streamed then print_newline ()
+              else print_endline response;
               print_endline "";
               loop ()
           | Error err ->
+              if !streamed then print_newline ();
               prerr_endline ("OClaw error: " ^ err);
               print_endline "";
               loop ()

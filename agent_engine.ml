@@ -103,6 +103,12 @@ let stop_spinner () =
       spinner_thread := None
   | None -> ()
 
+let stop_and_clear_spinner () =
+  if !spinner_running then (
+    stop_spinner ();
+    clear_status ()
+  )
+
 let read_optional_file path =
   try Some (Stdlib.In_channel.with_open_bin path Stdlib.In_channel.input_all)
   with _ -> None
@@ -314,7 +320,7 @@ let tool_results_of_response state ~chat_id response =
     }
   ) tool_results
 
-let process state ~chat_id prompt =
+let process ?on_text_delta state ~chat_id prompt =
   let prompt = String.trim prompt in
   if prompt = "" then Error "Prompt is empty"
   else
@@ -351,13 +357,13 @@ let process state ~chat_id prompt =
                 match
                   state.Runtime.llm_call
                     state.Runtime.provider_config
+                    ?on_text_delta
                     ~system_prompt
                     messages
                     ~tools:tool_defs
                 with
                 | Error err -> 
-                    stop_spinner ();
-                    clear_status ();
+                    stop_and_clear_spinner ();
                     Error err
                 | Ok response ->
                     (* Update token count with response usage if available *)
@@ -376,8 +382,7 @@ let process state ~chat_id prompt =
                     in
                     if has_tool_use then
                       if rounds_remaining = 0 then (
-                        stop_spinner ();
-                        clear_status ();
+                        stop_and_clear_spinner ();
                         Error "Tool-call recursion limit exceeded"
                       ) else
                         let assistant_message =
@@ -394,8 +399,7 @@ let process state ~chat_id prompt =
                         begin
                           match save_session state ~chat_id next_messages with
                           | Error err -> 
-                              stop_spinner ();
-                              clear_status ();
+                              stop_and_clear_spinner ();
                               Error err
                           | Ok () -> 
                               (* Restart spinner with updated token count *)
@@ -412,12 +416,10 @@ let process state ~chat_id prompt =
                       in
                       match save_session state ~chat_id next_messages with
                         | Error err -> 
-                            stop_spinner ();
-                            clear_status ();
+                            stop_and_clear_spinner ();
                             Error err
                         | Ok () -> 
-                            stop_spinner ();
-                            clear_status ();
+                            stop_and_clear_spinner ();
                             (* Log final token usage *)
                             Log.info (fun m -> m "Completed: %d tokens used (%.1f%% of context)" 
                               final_tokens ((float final_tokens *. 100.0) /. float context_window));

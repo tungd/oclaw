@@ -1,5 +1,6 @@
 type llm_call =
   Llm_provider.provider_config ->
+  ?on_text_delta:(string -> unit) ->
   system_prompt:string ->
   Llm_types.message list ->
   tools:Llm_types.tool_definition list ->
@@ -16,8 +17,8 @@ type app_state = {
   system_prompt_override : string option;
 }
 
-let default_llm_call provider_config ~system_prompt messages ~tools =
-  Llm_provider.send_message provider_config ~system_prompt messages ~tools
+let default_llm_call provider_config ?on_text_delta ~system_prompt messages ~tools =
+  Llm_provider.send_message provider_config ?on_text_delta ~system_prompt messages ~tools
 
 let ensure_dir path =
   let rec mkdir_p dir =
@@ -40,7 +41,7 @@ let create_app_state ?(llm_call=default_llm_call) ?system_prompt_override config
     match Db.create db_path with
     | Error err -> Error err
     | Ok db ->
-        let memory = Memory.create ~data_dir:config.data_dir ~runtime_dir in
+        let memory = Memory.create ~data_dir:config.data_dir ~runtime_dir () in
         let skills = Skills.create ~skills_dir in
         let tools =
           Tools.create_default_registry

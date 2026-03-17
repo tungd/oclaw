@@ -30,8 +30,14 @@ val build_request_json :
   stream:bool ->
   Yojson.Safe.t
 
+val parse_stream_chunks :
+  ?on_text_delta:(string -> unit) ->
+  string list ->
+  (Llm_types.messages_response, string) result
+
 val send_message :
   provider_config ->
+  ?on_text_delta:(string -> unit) ->
   system_prompt:string ->
   Llm_types.message list ->
   tools:Llm_types.tool_definition list ->

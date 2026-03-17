@@ -2,6 +2,7 @@
 
 type llm_call =
   Llm_provider.provider_config ->
+  ?on_text_delta:(string -> unit) ->
   system_prompt:string ->
   Llm_types.message list ->
   tools:Llm_types.tool_definition list ->

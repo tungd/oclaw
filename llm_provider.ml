@@ -221,45 +221,219 @@ let parse_response json =
   with exn ->
     Error (Printf.sprintf "Failed to parse LLM response: %s" (Printexc.to_string exn))
 
-let send_message provider ~system_prompt messages ~tools =
+type partial_tool_call = {
+  mutable id : string option;
+  name : Buffer.t;
+  arguments : Buffer.t;
+}
+
+let create_partial_tool_call () = {
+  id = None;
+  name = Buffer.create 32;
+  arguments = Buffer.create 128;
+}
+
+let strip_carriage_returns value =
+  value
+  |> String.to_seq
+  |> Seq.filter (fun ch -> ch <> '\r')
+  |> String.of_seq
+
+let process_stream_event ?on_text_delta text_buffer tool_calls stop_reason usage_ref raw_event =
+  let lines = String.split_on_char '\n' raw_event in
+  let data_lines =
+    lines
+    |> List.filter_map (fun line ->
+           if String.starts_with ~prefix:"data:" line then
+             Some (String.trim (String.sub line 5 (String.length line - 5)))
+           else
+             None)
+  in
+  let payload =
+    match String.concat "\n" data_lines with
+    | "" when String.trim raw_event <> "" -> String.trim raw_event
+    | value -> value
+  in
+  match payload with
+  | "" -> Ok ()
+  | "[DONE]" -> Ok ()
+  | payload ->
+      begin
+        try
+          let json = Yojson.Safe.from_string payload in
+          if data_lines = [] then
+            match parse_response json with
+            | Ok response ->
+                List.iter
+                  (function
+                    | Llm.Response_text { text } ->
+                        Buffer.add_string text_buffer text;
+                        Option.iter (fun f -> f text) on_text_delta
+                    | Llm.Response_tool_use { id; name; input } ->
+                        let tool_call = create_partial_tool_call () in
+                        tool_call.id <- Some id;
+                        Buffer.add_string tool_call.name name;
+                        Buffer.add_string tool_call.arguments (Yojson.Safe.to_string input);
+                        Hashtbl.replace tool_calls (Hashtbl.length tool_calls) tool_call)
+                  response.Llm.content;
+                stop_reason := response.Llm.stop_reason;
+                usage_ref := response.Llm.usage;
+                Ok ()
+            | Error err -> Error err
+          else (
+            begin
+              match parse_usage (json |> member "usage") with
+              | Some usage -> usage_ref := Some usage
+              | None -> ()
+            end;
+            let choices =
+              try json |> member "choices" |> to_list
+              with _ -> []
+            in
+            List.iter
+              (fun choice ->
+                begin
+                  match choice |> member "finish_reason" with
+                  | `String "tool_calls" -> stop_reason := Some "tool_use"
+                  | `String "length" -> stop_reason := Some "max_tokens"
+                  | `String _ -> stop_reason := Some "end_turn"
+                  | _ -> ()
+                end;
+                let delta = choice |> member "delta" in
+                begin
+                  match delta |> member "content" with
+                  | `String text when text <> "" ->
+                      Buffer.add_string text_buffer text;
+                      Option.iter (fun f -> f text) on_text_delta
+                  | _ -> ()
+                end;
+                let delta_tool_calls =
+                  try delta |> member "tool_calls" |> to_list
+                  with _ -> []
+                in
+                List.iter
+                  (fun tool_json ->
+                    let index = tool_json |> member "index" |> to_int in
+                    let tool_call =
+                      match Hashtbl.find_opt tool_calls index with
+                      | Some value -> value
+                      | None ->
+                          let value = create_partial_tool_call () in
+                          Hashtbl.replace tool_calls index value;
+                          value
+                    in
+                    begin
+                      match tool_json |> member "id" with
+                      | `String id when id <> "" -> tool_call.id <- Some id
+                      | _ -> ()
+                    end;
+                    begin
+                      match tool_json |> member "function" |> member "name" with
+                      | `String name when name <> "" -> Buffer.add_string tool_call.name name
+                      | _ -> ()
+                    end;
+                    begin
+                      match tool_json |> member "function" |> member "arguments" with
+                      | `String args when args <> "" -> Buffer.add_string tool_call.arguments args
+                      | _ -> ()
+                    end)
+                  delta_tool_calls)
+              choices;
+            Ok ())
+        with exn ->
+          Error (Printf.sprintf "Failed to parse streamed LLM chunk: %s" (Printexc.to_string exn))
+      end
+
+let parse_stream_chunks ?on_text_delta chunks =
+  let pending = Buffer.create 1024 in
+  let text_buffer = Buffer.create 1024 in
+  let tool_calls : (int, partial_tool_call) Hashtbl.t = Hashtbl.create 8 in
+  let stop_reason = ref None in
+  let usage = ref None in
+  let process_pending_events ~flush =
+    let rec loop () =
+      let content = Buffer.contents pending in
+      let len = String.length content in
+      let rec find_event_end index =
+        if index + 1 >= len then None
+        else if content.[index] = '\n' && content.[index + 1] = '\n' then Some (index, 2)
+        else find_event_end (index + 1)
+      in
+      match find_event_end 0 with
+      | Some (idx, sep_len) ->
+          let raw_event = String.sub content 0 idx in
+          let remaining =
+            String.sub content (idx + sep_len) (String.length content - idx - sep_len)
+          in
+          Buffer.clear pending;
+          Buffer.add_string pending remaining;
+          begin
+            match process_stream_event ?on_text_delta text_buffer tool_calls stop_reason usage raw_event with
+            | Ok () -> loop ()
+            | Error _ as err -> err
+          end
+      | None when flush && String.trim content <> "" ->
+          Buffer.clear pending;
+          process_stream_event ?on_text_delta text_buffer tool_calls stop_reason usage content
+      | None ->
+          Ok ()
+    in
+    loop ()
+  in
+  let rec consume = function
+    | [] -> process_pending_events ~flush:true
+    | chunk :: rest ->
+        Buffer.add_string pending (strip_carriage_returns chunk);
+        begin
+          match process_pending_events ~flush:false with
+          | Ok () -> consume rest
+          | Error _ as err -> err
+        end
+  in
+  match consume chunks with
+  | Error _ as err -> err
+  | Ok () ->
+      let response_content =
+        let text = Buffer.contents text_buffer in
+        let text_blocks =
+          if String.trim text = "" then [] else [ Llm.Response_text { text } ]
+        in
+        let tool_blocks =
+          Hashtbl.to_seq_keys tool_calls
+          |> List.of_seq
+          |> List.sort compare
+          |> List.filter_map (fun index ->
+                 match Hashtbl.find_opt tool_calls index with
+                 | None -> None
+                 | Some tool_call ->
+                     let id = Option.value ~default:(Printf.sprintf "call-%d" index) tool_call.id in
+                     let name = Buffer.contents tool_call.name in
+                     let arguments = Buffer.contents tool_call.arguments in
+                     let input =
+                       if String.trim arguments = "" then `Assoc []
+                       else Yojson.Safe.from_string arguments
+                     in
+                     Some (Llm.Response_tool_use { id; name; input }))
+        in
+        text_blocks @ tool_blocks
+      in
+      Ok {
+        Llm.content = response_content;
+        stop_reason = !stop_reason;
+        usage = !usage;
+      }
+
+let send_message provider ?on_text_delta ~system_prompt messages ~tools =
   let url = provider.api_base ^ "/chat/completions" in
   let headers = [
     ("Content-Type", "application/json");
     ("Authorization", "Bearer " ^ provider.api_key);
   ] in
   let body =
-    build_request_json provider ~system_prompt messages ~tools ~stream:false
+    build_request_json provider ~system_prompt messages ~tools ~stream:true
     |> Yojson.Safe.to_string
   in
-  
-  (* Use curl.multi for better concurrency *)
-  let request = Http.HttpRequest.create 
-      ~method_:Http.HttpMethod.POST 
-      ~url 
-      ~headers 
-      ~body 
-      ~timeout:provider.timeout 
-      () 
-  in
-  
-  (* For single request, use the multi interface anyway for consistency *)
-  let responses = Http.perform_multi_requests [request] in
-  
-  match List.hd responses with
-  | response when response.Http.HttpResponse.error <> None ->
-      Error (Option.get response.Http.HttpResponse.error)
-  | response when response.Http.HttpResponse.status < 200 || response.Http.HttpResponse.status >= 300 ->
-      Error
-        (Printf.sprintf
-           "LLM request failed: status %d, body: %s"
-           response.Http.HttpResponse.status
-           response.Http.HttpResponse.body)
-  | response ->
-      try
-        response.Http.HttpResponse.body
-        |> Yojson.Safe.from_string
-        |> parse_response
-      with exn ->
-        let err = Printexc.to_string exn in
-        Log.err (fun m -> m "Failed to parse provider response: %s" err);
-        Error err
+  let chunks = ref [] in
+  match Http.post_streaming url headers body provider.timeout (fun chunk -> chunks := chunk :: !chunks) with
+  | Error err -> Error err
+  | Ok () -> parse_stream_chunks ?on_text_delta (List.rev !chunks)
