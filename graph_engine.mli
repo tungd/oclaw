@@ -11,19 +11,27 @@
 type node_id = string
 type edge_id = string
 
-(** Node types defining execution behavior *)
-type node_type =
-  | LLMNode of Llm_provider.provider_config  (* LLM call with tool access *)
-  | ToolNode of string  (* Execute a specific tool by name *)
-  | MemoryReadNode of memory_query  (* Read from shared memory *)
-  | MemoryWriteNode of memory_write  (* Write to shared memory *)
-  | MemorySummarizeNode  (* Summarize and compress memory *)
-  | ConditionNode of (unit -> bool)  (* Conditional branching *)
-  | ParallelNode of node_id list  (* Execute multiple nodes in parallel *)
-  | EndNode  (* Terminal node *)
+(** Execution context passed between nodes - defined first for mutual recursion *)
+type memory_context = {
+  working_memory : (string * Yojson.Safe.t) list;  (* Short-term KV store *)
+  conversation_history : Llm_types.message list;
+  execution_trace : execution_step list;
+  variables : (string * Yojson.Safe.t) list;  (* Node-to-node data passing *)
+}
+
+(** Single step in execution trace *)
+and execution_step = {
+  step_id : int;
+  node_id : node_id;
+  timestamp : float;
+  input : Yojson.Safe.t option;
+  output : Yojson.Safe.t option;
+  error : string option;
+  duration_ms : int;
+}
 
 (** Memory query types for retrieval *)
-and memory_query = {
+type memory_query = {
   query_type : memory_query_type;
   keys : string list;
   limit : int option;
@@ -63,6 +71,17 @@ and memory_metadata = {
   summary : string option;  (* Pre-computed summary *)
 }
 
+(** Node types defining execution behavior *)
+type node_type =
+  | LLMNode of Llm_provider.provider_config  (* LLM call with tool access *)
+  | ToolNode of string  (* Execute a specific tool by name *)
+  | MemoryReadNode of memory_query  (* Read from shared memory *)
+  | MemoryWriteNode of memory_write  (* Write to shared memory *)
+  | MemorySummarizeNode  (* Summarize and compress memory *)
+  | ConditionNode of (unit -> bool)  (* Conditional branching *)
+  | ParallelNode of node_id list  (* Execute multiple nodes in parallel *)
+  | EndNode  (* Terminal node *)
+
 (** Edge defining transitions between nodes *)
 type edge = {
   edge_id : edge_id;
@@ -81,25 +100,6 @@ type node = {
   output_schema : Yojson.Safe.t option;
   retry_count : int;
   timeout_seconds : int option;
-}
-
-(** Execution context passed between nodes *)
-and memory_context = {
-  working_memory : (string * Yojson.Safe.t) list;  (* Short-term KV store *)
-  conversation_history : Llm_provider.message list;
-  execution_trace : execution_step list;
-  variables : (string * Yojson.Safe.t) list;  (* Node-to-node data passing *)
-}
-
-(** Single step in execution trace *)
-and execution_step = {
-  step_id : int;
-  node_id : node_id;
-  timestamp : float;
-  input : Yojson.Safe.t option;
-  output : Yojson.Safe.t option;
-  error : string option;
-  duration_ms : int;
 }
 
 (** The execution graph *)
@@ -146,10 +146,10 @@ end
 module type EXECUTION_ENGINE = sig
   type t
   
-  val create : execution_graph -> memory_store -> t
-  val execute : t -> node_id -> Yojson.Safe.t option -> memory_context -> execution_result
-  val execute_from_start : t -> Yojson.Safe.t option -> memory_context -> execution_result
-  val step : t -> node_id -> Yojson.Safe.t option -> memory_context -> (execution_result * t)
+  val create : execution_graph -> unit -> t
+  val execute : t -> node_id -> Yojson.Safe.t option -> memory_context -> tools:Tools.t -> chat_id:int -> execution_result * t
+  val execute_from_start : t -> Yojson.Safe.t option -> memory_context -> tools:Tools.t -> chat_id:int -> execution_result * t
+  val step : t -> node_id -> Yojson.Safe.t option -> memory_context -> tools:Tools.t -> chat_id:int -> execution_result * t
   val get_current_node : t -> node_id option
   val get_execution_trace : t -> execution_step list
 end

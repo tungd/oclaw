@@ -23,6 +23,8 @@ type tool_result = {
 type t
 
 val default_sandbox_config : sandbox_config
+val success : ?status_code:int -> ?duration_ms:int -> ?error_type:string -> string -> tool_result
+val failure : ?status_code:int -> ?duration_ms:int -> ?error_type:string -> string -> tool_result
 
 val create_default_registry :
   ?sandbox_config:sandbox_config ->

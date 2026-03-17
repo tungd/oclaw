@@ -65,7 +65,7 @@
 (library
  (name graph_engine)
  (modules graph_engine)
- (libraries db domainslib llm_types memory tools unix yojson logs)
+ (libraries db domainslib llm_provider llm_types memory tools unix yojson logs)
  (flags :standard -w -A))
 
 (library

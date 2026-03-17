@@ -1,6 +1,7 @@
 open Yojson.Safe
 
 module Llm = Llm_types
+module Log = (val Logs.src_log (Logs.Src.create "agent_engine") : Logs.LOG)
 
 let read_optional_file path =
   try Some (Stdlib.In_channel.with_open_bin path Stdlib.In_channel.input_all)
@@ -116,8 +117,24 @@ let assistant_blocks_of_response response =
          | Llm.Response_tool_use { id; name; input } ->
              Some (Llm.Tool_use { id; name; input }))
 
+let get_num_worker_domains () =
+  (* Get number of worker domains for parallel execution.
+     Domainslib needs worker domains in addition to the main domain.
+     We use Domain.recommended_domain_count() if available, otherwise default to 2.
+     Cap at 4 workers to avoid oversubscription. *)
+  try
+    let n = Domain.recommended_domain_count () in
+    if n > 1 then min (n - 1) 4 else 1
+  with _ -> 2
+
 let execute_tool_parallel state ~chat_id (id, name, input) =
-  let result = Tools.execute state.Runtime.tools ~chat_id name input in
+  let result =
+    try
+      Tools.execute state.Runtime.tools ~chat_id name input
+    with exn ->
+      Log.err (fun m -> m "Tool %s execution failed: %s" name (Printexc.to_string exn));
+      Tools.failure ~error_type:"exception" ("Tool execution exception: " ^ Printexc.to_string exn)
+  in
   (id, result)
 
 let tool_results_of_response state ~chat_id response =
@@ -131,31 +148,50 @@ let tool_results_of_response state ~chat_id response =
     if List.length tool_calls <= 1 then
       (* Sequential execution for single tool call *)
       List.map (fun (id, name, input) ->
-        let result = Tools.execute state.Runtime.tools ~chat_id name input in
+        let result =
+          try
+            Tools.execute state.Runtime.tools ~chat_id name input
+          with exn ->
+            Log.err (fun m -> m "Tool %s execution failed: %s" name (Printexc.to_string exn));
+            Tools.failure ~error_type:"exception" ("Tool execution exception: " ^ Printexc.to_string exn)
+        in
         (id, result)
       ) tool_calls
     else
       (* Parallel execution using Domainslib for multiple tool calls *)
-      let pool = Domainslib.Task.setup_pool ~num_domains:(min 4 (Sys.cpu_count ())) () in
+      let num_workers = get_num_worker_domains () in
+      Log.debug (fun m -> m "Executing %d tool calls in parallel with %d worker domains" (List.length tool_calls) num_workers);
+      let pool = Domainslib.Task.setup_pool ~num_domains:num_workers () in
       try
-        let futures = List.map (fun tool_call ->
+        let results =
           Domainslib.Task.run pool (fun _ ->
-            execute_tool_parallel state ~chat_id tool_call
-          )
-        ) tool_calls in
-        
-        let results = List.map (Domainslib.Task.await pool) futures in
+              let futures =
+                List.map
+                  (fun tool_call ->
+                    Domainslib.Task.async pool (fun _ ->
+                        execute_tool_parallel state ~chat_id tool_call))
+                  tool_calls
+              in
+              List.map (Domainslib.Task.await pool) futures)
+        in
         Domainslib.Task.teardown_pool pool;
         results
       with exn ->
+        Log.err (fun m -> m "Parallel tool execution infrastructure failed: %s" (Printexc.to_string exn));
         Domainslib.Task.teardown_pool pool;
-        Log.err (fun m -> m "Parallel tool execution failed: %s" (Printexc.to_string exn));
-        (* Fallback to sequential execution on error *)
+        (* Fallback to sequential execution on infrastructure error *)
         List.map (fun (id, name, input) ->
-          let result = Tools.execute state.Runtime.tools ~chat_id name input in
+          let result =
+            try
+              Tools.execute state.Runtime.tools ~chat_id name input
+            with exn ->
+              Log.err (fun m -> m "Tool %s execution failed: %s" name (Printexc.to_string exn));
+              Tools.failure ~error_type:"exception" ("Tool execution exception: " ^ Printexc.to_string exn)
+          in
           (id, result)
         ) tool_calls
   in
+  (* Convert to Llm.Tool_result format *)
   List.map (fun (id, result) ->
     Llm.Tool_result {
       tool_use_id = id;

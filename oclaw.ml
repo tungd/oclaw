@@ -148,7 +148,11 @@ let () =
     ("--debug", Arg.Unit (fun () -> overrides.debug <- true), "Enable debug logging");
   ] in
   Arg.parse spec (fun arg -> prompt_parts := !prompt_parts @ [arg]) "Usage: oclaw [--single-shot] [prompt]";
-  LogColor.setup_auto ~level:(Some Logs.Info) ~format_time:true ();
+  (* Setup logging - default to Info level, Debug if --debug flag is set *)
+  let log_level = if overrides.debug then Logs.Debug else Logs.Info in
+  LogColor.setup_auto ~level:(Some log_level) ~format_time:true ();
+  (* Set level for all known log sources to ensure consistency *)
+  Logs.set_level (Some log_level);
   let config_path = Option.value ~default:"config.yaml" overrides.config_path in
   let config =
     let base =
@@ -159,7 +163,10 @@ let () =
     |> Config.apply_env_overrides
     |> fun cfg -> apply_cli_overrides cfg overrides
   in
-  if config.debug then LogColor.setup_auto ~level:(Some Logs.Debug) ~format_time:true ();
+  if config.debug then (
+    LogColor.setup_auto ~level:(Some Logs.Debug) ~format_time:true ();
+    Logs.set_level (Some Logs.Debug)
+  );
   match Config.validate_config config with
   | Error errors ->
       List.iter (fun err -> prerr_endline ("Configuration error: " ^ err)) errors;

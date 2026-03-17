@@ -3,45 +3,63 @@
 open Yojson.Safe
 module Log = (val Logs.src_log (Logs.Src.create "graph_engine") : Logs.LOG)
 
+let parallel_worker_count () =
+  (* Domainslib expects extra worker domains, not the total domain count. *)
+  max 0 (min 4 (Domain.recommended_domain_count () - 1))
+
 type node_id = string
 type edge_id = string
 
-type node_type =
-  | LLMNode of Llm_provider.provider_config
-  | ToolNode of string
-  | MemoryReadNode of memory_query
-  | MemoryWriteNode of memory_write
-  | MemorySummarizeNode
-  | ConditionNode of (unit -> bool)
-  | ParallelNode of node_id list
-  | EndNode
+(** Execution context passed between nodes - defined first for mutual recursion *)
+type memory_context = {
+  working_memory : (string * Yojson.Safe.t) list;
+  conversation_history : Llm_types.message list;
+  execution_trace : execution_step list;
+  variables : (string * Yojson.Safe.t) list;
+}
 
-and memory_query = {
+(** Single step in execution trace *)
+and execution_step = {
+  step_id : int;
+  node_id : node_id;
+  timestamp : float;
+  input : Yojson.Safe.t option;
+  output : Yojson.Safe.t option;
+  error : string option;
+  duration_ms : int;
+}
+
+(** Memory query types for retrieval *)
+type memory_query = {
   query_type : memory_query_type;
   keys : string list;
   limit : int option;
   filters : (string * string) list;
 }
 
+(** Types of memory queries *)
 and memory_query_type =
   | ExactMatch
   | SemanticSearch
   | TemporalRange
   | TagBased
 
-and memory_write = {
+(** Memory write operations *)
+type memory_write = {
   write_type : memory_write_type;
   key : string;
   value : Yojson.Safe.t;
   metadata : memory_metadata;
 }
 
+(** Types of memory writes *)
 and memory_write_type =
   | Set
   | Append
   | Merge
   | Delete
 
+(** Memory metadata for organization and retrieval *)
 and memory_metadata = {
   created_at : float;
   updated_at : float;
@@ -52,6 +70,18 @@ and memory_metadata = {
   summary : string option;
 }
 
+(** Node types defining execution behavior *)
+type node_type =
+  | LLMNode of Llm_provider.provider_config
+  | ToolNode of string
+  | MemoryReadNode of memory_query
+  | MemoryWriteNode of memory_write
+  | MemorySummarizeNode
+  | ConditionNode of (unit -> bool)
+  | ParallelNode of node_id list
+  | EndNode
+
+(** Edge defining transitions between nodes *)
 type edge = {
   edge_id : edge_id;
   from_node : node_id;
@@ -60,6 +90,7 @@ type edge = {
   priority : int;
 }
 
+(** Node definition in the graph *)
 type node = {
   node_id : node_id;
   node_type : node_type;
@@ -68,23 +99,6 @@ type node = {
   output_schema : Yojson.Safe.t option;
   retry_count : int;
   timeout_seconds : int option;
-}
-
-and memory_context = {
-  working_memory : (string * Yojson.Safe.t) list;
-  conversation_history : Llm_types.message list;
-  execution_trace : execution_step list;
-  variables : (string * Yojson.Safe.t) list;
-}
-
-and execution_step = {
-  step_id : int;
-  node_id : node_id;
-  timestamp : float;
-  input : Yojson.Safe.t option;
-  output : Yojson.Safe.t option;
-  error : string option;
-  duration_ms : int;
 }
 
 type execution_graph = {
@@ -126,10 +140,10 @@ end
 module type EXECUTION_ENGINE = sig
   type t
   
-  val create : execution_graph -> memory_store -> t
-  val execute : t -> node_id -> Yojson.Safe.t option -> memory_context -> execution_result
-  val execute_from_start : t -> Yojson.Safe.t option -> memory_context -> execution_result
-  val step : t -> node_id -> Yojson.Safe.t option -> memory_context -> (execution_result * t)
+  val create : execution_graph -> unit -> t
+  val execute : t -> node_id -> Yojson.Safe.t option -> memory_context -> tools:Tools.t -> chat_id:int -> execution_result * t
+  val execute_from_start : t -> Yojson.Safe.t option -> memory_context -> tools:Tools.t -> chat_id:int -> execution_result * t
+  val step : t -> node_id -> Yojson.Safe.t option -> memory_context -> tools:Tools.t -> chat_id:int -> execution_result * t
   val get_current_node : t -> node_id option
   val get_execution_trace : t -> execution_step list
 end
@@ -156,7 +170,13 @@ module MemoryStore : MEMORY_STORE = struct
   let search store query =
     !(store.data)
     |> List.filter_map (fun (key, (value, meta)) ->
-         if List.mem_assoc key query.keys || meta.tags |> List.exists (fun t -> List.mem_assoc t query.filters) then
+         let key_matches = List.mem key query.keys in
+         let filter_matches = 
+           query.filters 
+           |> List.exists (fun (fkey, fval) -> 
+                List.mem fval meta.tags)
+         in
+         if key_matches || filter_matches then
            Some (key, value, meta)
          else
            None)
@@ -177,7 +197,7 @@ module MemoryStore : MEMORY_STORE = struct
   let import store json =
     match json with
     | `Assoc pairs ->
-        store.data := List.map (fun (k, v) -> (k, (v, {
+        let data = List.map (fun (k, v) -> (k, (v, {
           created_at = Unix.gettimeofday ();
           updated_at = Unix.gettimeofday ();
           importance = 0.5;
@@ -185,7 +205,8 @@ module MemoryStore : MEMORY_STORE = struct
           source = "import";
           ttl = None;
           summary = None;
-        }))) pairs |> ref
+        }))) pairs in
+        store.data := data
     | _ -> ()
   
   let clear store =
@@ -202,9 +223,9 @@ module ExecutionEngine : EXECUTION_ENGINE = struct
     mutable step_counter : int;
   }
   
-  let create graph memory = {
+  let create graph () = {
     graph;
-    memory;
+    memory = MemoryStore.create ();
     current_node = None;
     trace = [];
     step_counter = 0;
@@ -223,10 +244,10 @@ module ExecutionEngine : EXECUTION_ENGINE = struct
     t.step_counter <- t.step_counter + 1;
     t.trace <- t.trace @ [step]
   
-  let find_node graph node_id =
+  let find_node (graph : execution_graph) node_id =
     List.assoc_opt node_id graph.nodes
   
-  let find_next_nodes graph node_id context =
+  let find_next_nodes (graph : execution_graph) node_id context =
     List.filter_map (fun (_, edge) ->
       if edge.from_node = node_id then
         match edge.condition with
@@ -240,11 +261,17 @@ module ExecutionEngine : EXECUTION_ENGINE = struct
   
   let execute_tool tools ~chat_id name input =
     let started = Unix.gettimeofday () in
-    let result = Tools.execute tools ~chat_id name input in
+    let result =
+      try
+        Tools.execute tools ~chat_id name input
+      with exn ->
+        Log.err (fun m -> m "Tool %s execution failed: %s" name (Printexc.to_string exn));
+        Tools.failure ~error_type:"exception" ("Tool execution exception: " ^ Printexc.to_string exn)
+    in
     let duration_ms = int_of_float ((Unix.gettimeofday () -. started) *. 1000.0) in
     (result, duration_ms)
   
-  let execute_node t node_id input context tools ~chat_id =
+  let rec execute_node t node_id input context tools ~chat_id =
     match find_node t.graph node_id with
     | None -> 
         let error = Printf.sprintf "Node not found: %s" node_id in
@@ -252,7 +279,7 @@ module ExecutionEngine : EXECUTION_ENGINE = struct
     | Some node ->
         t.current_node <- Some node_id;
         let started = Unix.gettimeofday () in
-        let result =
+        let (result, t') =
           match node.node_type with
           | ToolNode tool_name ->
               let input_json = Option.value ~default:`Null input in
@@ -264,107 +291,128 @@ module ExecutionEngine : EXECUTION_ENGINE = struct
                   `String tool_result.Tools.content
               in
               add_step t node_id input (Some output) None duration_ms;
-              if tool_result.Tools.is_error then
-                Failure (tool_result.Tools.content, context)
-              else
-                Success (output, context)
+              let result = if tool_result.Tools.is_error then
+                  Failure (tool_result.Tools.content, context)
+                else
+                  Success (output, context)
+              in
+              (result, t)
           
           | ConditionNode cond ->
               let result = if cond () then `Bool true else `Bool false in
               add_step t node_id input (Some result) None 0;
-              Success (result, context)
+              (Success (result, context), t)
           
           | MemoryReadNode query ->
               let results = MemoryStore.search t.memory query in
               let output = `List (List.map (fun (_, v, _) -> v) results) in
               add_step t node_id input (Some output) None 0;
-              Success (output, context)
+              (Success (output, context), t)
           
           | MemoryWriteNode write ->
               MemoryStore.set t.memory write.key write.value write.metadata;
               let output = `Assoc [("status", `String "written"); ("key", `String write.key)] in
               add_step t node_id input (Some output) None 0;
-              Success (output, context)
+              (Success (output, context), t)
           
           | MemorySummarizeNode ->
               let keys = List.map fst context.working_memory in
               let summary = MemoryStore.summarize t.memory keys in
               add_step t node_id input (Some summary) None 0;
-              Success (summary, context)
+              (Success (summary, context), t)
           
           | ParallelNode node_ids ->
               (* Execute multiple nodes in parallel using Domainslib *)
               let started = Unix.gettimeofday () in
-              let pool = Domainslib.Task.setup_pool ~num_domains:(min 4 (Sys.cpu_count ())) () in
-              try
-                let futures = List.map (fun nid ->
-                  Domainslib.Task.run pool (fun _ ->
-                    execute_node t nid input context tools ~chat_id
-                  )
-                ) node_ids in
-                
-                let results = List.map (Domainslib.Task.await pool) futures in
-                
-                Domainslib.Task.teardown_pool pool;
-                
-                let outputs = List.filter_map (function
-                  | (Success (out, _), _) -> Some out
-                  | (Failure (err, _), _) -> Some (`String err)
-                  | (Partial (out, _, _), _) -> Some out
-                ) results in
-                
-                let errors = List.filter_map (function
-                  | (Failure (err, _), _) -> Some err
-                  | _ -> None
-                ) results in
-                
-                let duration_ms = int_of_float ((Unix.gettimeofday () -. started) *. 1000.0) in
-                let output = `Assoc [
-                  ("parallel_results", `List outputs);
-                  ("errors", `List (List.map (fun e -> `String e) errors));
-                  ("node_count", `Int (List.length node_ids));
-                ] in
-                add_step t node_id input (Some output) (if errors <> [] then Some (String.concat ", " errors) else None) duration_ms;
-                
-                if errors <> [] then
-                  Failure (String.concat ", " errors, context)
-                else
-                  Success (output, context)
-              with exn ->
-                Domainslib.Task.teardown_pool pool;
-                let error = Printexc.to_string exn in
-                add_step t node_id input None (Some error) 0;
-                (Failure (error, context), t)
+              let pool = Domainslib.Task.setup_pool ~num_domains:(parallel_worker_count ()) () in
+              let parallel_result =
+                try
+                  let results =
+                    Domainslib.Task.run pool (fun _ ->
+                        let futures =
+                          List.map
+                            (fun nid ->
+                              Domainslib.Task.async pool (fun _ ->
+                                  (* Wrap each node execution to catch per-node errors *)
+                                  try
+                                    execute_node t nid input context tools ~chat_id
+                                  with exn ->
+                                    Log.err (fun m -> m "Parallel node %s failed: %s" nid (Printexc.to_string exn));
+                                    (Failure (Printexc.to_string exn, context), t))
+                            )
+                            node_ids
+                        in
+                        List.map (Domainslib.Task.await pool) futures)
+                  in
+                  Domainslib.Task.teardown_pool pool;
+                  
+                  (* Separate successful results from errors - don't fail the whole batch *)
+                  let outputs = List.filter_map (function
+                    | (Success (out, _), _) -> Some out
+                    | (Failure (err, _), _) -> Some (`String ("Error: " ^ err))
+                    | (Partial (out, _, _), _) -> Some out
+                  ) results in
+                  
+                  let errors = List.filter_map (function
+                    | (Failure (err, _), _) -> Some err
+                    | _ -> None
+                  ) results in
+                  
+                  let duration_ms = int_of_float ((Unix.gettimeofday () -. started) *. 1000.0) in
+                  let output = `Assoc [
+                    ("parallel_results", `List outputs);
+                    ("errors", `List (List.map (fun e -> `String e) errors));
+                    ("node_count", `Int (List.length node_ids));
+                    ("success_count", `Int (List.length node_ids - List.length errors));
+                  ] in
+                  add_step t node_id input (Some output) 
+                    (if errors <> [] then Some (Printf.sprintf "%d/%d nodes failed" (List.length errors) (List.length node_ids)) 
+                     else None) 
+                    duration_ms;
+                  
+                  (* Only fail if ALL nodes failed, otherwise return partial success *)
+                  if List.length errors = List.length node_ids then
+                    Failure (String.concat ", " errors, context)
+                  else
+                    Success (output, context)
+                with exn ->
+                  Domainslib.Task.teardown_pool pool;
+                  let error = Printexc.to_string exn in
+                  Log.err (fun m -> m "Parallel node infrastructure failed: %s" error);
+                  add_step t node_id input None (Some error) 0;
+                  Failure (error, context)
+              in
+              (parallel_result, t)
           
           | LLMNode _ ->
               (* LLM execution would go here - for now just return success *)
               add_step t node_id input None None 0;
-              Success (`String "LLM execution not yet implemented", context)
+              (Success (`String "LLM execution not yet implemented", context), t)
           
           | EndNode ->
               add_step t node_id input None None 0;
-              Success (`String "end", context)
+              (Success (`String "end", context), t)
         in
-        (result, t)
+        (result, t')
   
-  let rec execute t node_id input context tools ~chat_id =
+  let rec execute t node_id input context ~tools ~chat_id =
     let (result, t') = execute_node t node_id input context tools ~chat_id in
     match result with
     | Success (_, ctx) ->
         let next_nodes = find_next_nodes t'.graph node_id ctx in
         begin match next_nodes with
           | [] -> (result, t')
-          | [next] -> execute t' next input ctx tools ~chat_id
+          | [next] -> execute t' next input ctx ~tools ~chat_id
           | _ -> 
               (* Multiple next nodes - pick highest priority or first *)
-              execute t' (List.hd next_nodes) input ctx tools ~chat_id
+              execute t' (List.hd next_nodes) input ctx ~tools ~chat_id
         end
     | Failure _ | Partial _ -> (result, t')
   
-  let execute_from_start t input context tools ~chat_id =
-    execute t t.graph.start_node input context tools ~chat_id
+  let execute_from_start t input context ~tools ~chat_id =
+    execute t t.graph.start_node input context ~tools ~chat_id
   
-  let step t node_id input context tools ~chat_id =
+  let step t node_id input context ~tools ~chat_id =
     execute_node t node_id input context tools ~chat_id
   
   let get_current_node t = t.current_node
