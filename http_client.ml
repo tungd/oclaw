@@ -221,6 +221,49 @@ let perform_request handle =
 let cleanup_curl_handle handle =
   Curl.cleanup handle
 
+type transfer_state = {
+  index : int;
+  response_body : Buffer.t;
+  response_headers : (string * string) list ref;
+}
+
+let response_status_of_handle handle =
+  let code = Curl.get_responsecode handle in
+  if code = 0 then 200 else code
+
+let response_of_transfer handle state =
+  HttpResponse.create
+    ~status:(response_status_of_handle handle)
+    ~headers:(List.rev !(state.response_headers))
+    ~body:(Buffer.contents state.response_body)
+    ()
+
+let error_response error =
+  HttpResponse.create ~status:0 ~headers:[] ~body:"" ~error ()
+
+let drain_finished multi_handle states active_handles results remaining =
+  let rec loop remaining =
+    match Curl.Multi.remove_finished multi_handle with
+    | None -> remaining
+    | Some (handle, result_code) ->
+        begin
+          match Hashtbl.find_opt states handle with
+          | Some state ->
+              let response =
+                match result_code with
+                | Curl.CURLE_OK -> response_of_transfer handle state
+                | code -> error_response (Curl.strerror code)
+              in
+              results.(state.index) <- Some response;
+              Hashtbl.remove states handle
+          | None -> ()
+        end;
+        Hashtbl.remove active_handles handle;
+        cleanup_curl_handle handle;
+        loop (remaining - 1)
+  in
+  loop remaining
+
 let make_request req =
   let handle = init_curl_handle () in
   set_request_options handle req;
@@ -244,91 +287,144 @@ let perform_multi_requests requests =
   if requests = [] then []
   else
     let multi_handle = Curl.Multi.create () in
-    let results_map = Hashtbl.create (List.length requests) in
-    let easy_handles = ref [] in
-    
-    (* Create easy handles and add to multi *)
-    List.iteri (fun i req ->
-      let handle = init_curl_handle () in
-      set_request_options handle req;
-      
-      (* Setup response buffer for this handle *)
-      let response_body = Buffer.create 1024 in
-      let response_headers = ref [] in
-      
-      Curl.set_writefunction handle (fun data ->
-        Buffer.add_string response_body data;
-        String.length data
-      );
-      
-      Curl.set_headerfunction handle (fun header ->
-        if String.length header > 0 && header.[0] <> '\r' && header.[0] <> '\n' then (
-          try
-            let colon_pos = String.index header ':' in
-            let name = String.trim (String.sub header 0 colon_pos) in
-            let value = String.trim (String.sub header (colon_pos + 1) (String.length header - colon_pos - 1)) in
-            response_headers := (name, value) :: !response_headers
-          with Not_found -> ()
-        );
-        String.length header
-      );
-      
-      (* Store metadata for later retrieval *)
-      Hashtbl.add results_map handle (i, req, response_body, response_headers);
-      Curl.Multi.add multi_handle handle;
-      easy_handles := (handle, i) :: !easy_handles
-    ) requests;
-    
-    let results =
-      try
-        (* Main event loop using curl's wait *)
-        let rec event_loop () =
-          let running_handles = Curl.Multi.perform multi_handle in
-          if running_handles > 0 then (
-            (* Wait for activity using curl's built-in wait *)
-            let _ = Curl.Multi.wait ~timeout_ms:1000 multi_handle in
-            event_loop ()
-          )
-        in
-        event_loop ();
-        
-        (* Collect results in original order *)
-        let results = Array.make (List.length requests) None in
-        
-        List.iter (fun (handle, idx) ->
-          try
-            let (orig_idx, _, response_body, response_headers) = Hashtbl.find results_map handle in
-            
-            let status_code = 
-              let code = Curl.get_responsecode handle in
-              if code = 0 then 200 else code
-            in
-            
-            let response = HttpResponse.create 
-                ~status:status_code 
-                ~headers:(List.rev !response_headers) 
-                ~body:(Buffer.contents response_body) 
-                ()
-            in
-            results.(orig_idx) <- Some response
-          with _ ->
-            results.(idx) <- Some (HttpResponse.create ~status:0 ~headers:[] ~body:"" ~error:"Request failed" ())
-        ) !easy_handles;
-        
-        (* Convert to list, filtering out None values *)
-        Array.to_list results |> List.filter_map Fun.id
-      with _ ->
-        (* Return empty results on error *)
-        []
+    let states = Hashtbl.create (List.length requests) in
+    let active_handles = Hashtbl.create (List.length requests) in
+    let socket_polls = Hashtbl.create 16 in
+    let next_timeout_ms = ref None in
+    let results = Array.make (List.length requests) None in
+    let register_socket fd poll =
+      match poll with
+      | Curl.Multi.POLL_REMOVE -> Hashtbl.remove socket_polls fd
+      | poll -> Hashtbl.replace socket_polls fd poll
     in
-    
-    (* Always cleanup all handles *)
-    List.iter (fun (handle, _) ->
-      try Curl.Multi.remove multi_handle handle with _ -> ();
-      cleanup_curl_handle handle
-    ) !easy_handles;
-    
-    results
+    let set_timeout ms =
+      if ms < 0 then next_timeout_ms := None
+      else next_timeout_ms := Some ms
+    in
+    Curl.Multi.set_socket_function multi_handle register_socket;
+    Curl.Multi.set_timer_function multi_handle set_timeout;
+    let perform_timeout () =
+      Curl.Multi.action_timeout multi_handle
+    in
+    let perform_socket_action fd flags =
+      let has_in =
+        Iomux.Poll.Flags.mem Iomux.Poll.Flags.pollin flags
+        || Iomux.Poll.Flags.mem Iomux.Poll.Flags.pollpri flags
+        || Iomux.Poll.Flags.mem Iomux.Poll.Flags.pollhup flags
+        || Iomux.Poll.Flags.mem Iomux.Poll.Flags.pollerr flags
+      in
+      let has_out =
+        Iomux.Poll.Flags.mem Iomux.Poll.Flags.pollout flags
+        || Iomux.Poll.Flags.mem Iomux.Poll.Flags.pollhup flags
+        || Iomux.Poll.Flags.mem Iomux.Poll.Flags.pollerr flags
+      in
+      let status =
+        match has_in, has_out with
+        | true, true -> Curl.Multi.EV_INOUT
+        | true, false -> Curl.Multi.EV_IN
+        | false, true -> Curl.Multi.EV_OUT
+        | false, false -> Curl.Multi.EV_AUTO
+      in
+      ignore (Curl.Multi.action multi_handle fd status)
+    in
+    let cleanup_remaining_handles () =
+      Hashtbl.iter
+        (fun handle _ ->
+          (try Curl.Multi.remove multi_handle handle with _ -> ());
+          cleanup_curl_handle handle)
+        active_handles;
+      Hashtbl.clear active_handles;
+      Hashtbl.clear states
+    in
+    try
+      List.iteri
+        (fun i req ->
+          let handle = init_curl_handle () in
+          set_request_options handle req;
+          let response_body = Buffer.create 1024 in
+          let response_headers = ref [] in
+          Curl.set_writefunction handle (fun data ->
+              Buffer.add_string response_body data;
+              String.length data);
+          Curl.set_headerfunction handle (fun header ->
+              if String.length header > 0 && header.[0] <> '\r' && header.[0] <> '\n' then (
+                try
+                  let colon_pos = String.index header ':' in
+                  let name = String.trim (String.sub header 0 colon_pos) in
+                  let value = String.trim (String.sub header (colon_pos + 1) (String.length header - colon_pos - 1)) in
+                  response_headers := (name, value) :: !response_headers
+                with Not_found -> ()
+              );
+              String.length header);
+          Hashtbl.add states handle { index = i; response_body; response_headers };
+          Hashtbl.add active_handles handle ();
+          Curl.Multi.add multi_handle handle)
+        requests;
+      let remaining = ref (List.length requests) in
+      perform_timeout ();
+      remaining := drain_finished multi_handle states active_handles results !remaining;
+      while !remaining > 0 do
+        begin
+          match !next_timeout_ms with
+          | Some 0 ->
+              next_timeout_ms := None;
+              perform_timeout ()
+          | _ ->
+              let socket_entries = Hashtbl.to_seq socket_polls |> List.of_seq in
+              if socket_entries = [] then (
+                let timeout_ms =
+                  match !next_timeout_ms with
+                  | Some ms -> max 0 ms
+                  | None ->
+                      let ms =
+                        try Curl.Multi.timeout multi_handle with _ -> 1000
+                      in
+                      if ms < 0 then 1000 else ms
+                in
+                ignore (Unix.select [] [] [] (float_of_int timeout_ms /. 1000.0));
+                next_timeout_ms := None;
+                perform_timeout ()
+              ) else (
+                let poller = Iomux.Poll.create ~maxfds:(List.length socket_entries) () in
+                List.iteri
+                  (fun idx (fd, poll) ->
+                    let events =
+                      match poll with
+                      | Curl.Multi.POLL_NONE -> Iomux.Poll.Flags.empty
+                      | Curl.Multi.POLL_IN ->
+                          Iomux.Poll.Flags.(pollin + pollpri)
+                      | Curl.Multi.POLL_OUT ->
+                          Iomux.Poll.Flags.pollout
+                      | Curl.Multi.POLL_INOUT ->
+                          Iomux.Poll.Flags.(pollin + pollpri + pollout)
+                      | Curl.Multi.POLL_REMOVE -> Iomux.Poll.Flags.empty
+                    in
+                    Iomux.Poll.set_index poller idx fd events)
+                  socket_entries;
+                let timeout : Iomux.Poll.poll_timeout =
+                  match !next_timeout_ms with
+                  | None -> Iomux.Poll.Infinite
+                  | Some ms -> Iomux.Poll.Milliseconds (max 0 ms)
+                in
+                let nready = Iomux.Poll.poll poller (List.length socket_entries) timeout in
+                next_timeout_ms := None;
+                if nready = 0 then
+                  perform_timeout ()
+                else
+                  Iomux.Poll.iter_ready poller nready (fun _ fd flags ->
+                      perform_socket_action fd flags)
+              )
+        end;
+        remaining := drain_finished multi_handle states active_handles results !remaining
+      done;
+      Hashtbl.clear active_handles;
+      Curl.Multi.cleanup multi_handle;
+      Array.to_list results |> List.map (function Some response -> response | None -> error_response "Request failed")
+    with exn ->
+      cleanup_remaining_handles ();
+      Curl.Multi.cleanup multi_handle;
+      Log.err (fun m -> m "Multi request exception: %s" (Printexc.to_string exn));
+      []
 
 (* Simple GET request *)
 let get url headers timeout =

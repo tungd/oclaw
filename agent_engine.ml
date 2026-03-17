@@ -3,11 +3,35 @@ open Yojson.Safe
 module Llm = Llm_types
 module Log = (val Logs.src_log (Logs.Src.create "agent_engine") : Logs.LOG)
 
+(* Token counting helper - rough estimate: 4 chars ≈ 1 token for English *)
+let estimate_tokens text =
+  let len = String.length text in
+  (len / 4) + 1  (* +1 to be conservative *)
+
+let count_message_tokens (msg : Llm.message) =
+  let count_block (block : Llm.content_block) =
+    match block with
+    | Llm.Text { text } -> estimate_tokens text
+    | Llm.Image _ -> 1000  (* Rough estimate for images *)
+    | Llm.Tool_use { input; _ } -> 
+        estimate_tokens (Yojson.Safe.to_string input)
+    | Llm.Tool_result { content; _ } -> estimate_tokens content
+  in
+  match msg.Llm.content with
+  | Llm.Text_content text -> estimate_tokens text
+  | Llm.Blocks blocks ->
+      List.fold_left (fun acc block -> acc + count_block block) 0 blocks
+
+let count_messages_tokens messages =
+  List.fold_left (fun acc msg -> acc + count_message_tokens msg) 0 messages
+
 (* ANSI color codes *)
 let ansi_reset = "\027[0m"
 let ansi_bold = "\027[1m"
 let ansi_orange = "\027[38;5;208m"  (* Bright orange *)
 let ansi_dim = "\027[2m"
+let ansi_yellow = "\027[38;5;220m"  (* Warning yellow *)
+let ansi_red = "\027[38;5;196m"     (* Error red *)
 
 (* Unicode Braille patterns for spinner - clockwise rotation with 3 dots *)
 (* Braille dot positions: 1=TL, 2=BL, 3=TR, 4=BR, 5=TM, 6=BM, 7=TR2, 8=BR2 *)
@@ -37,7 +61,7 @@ let spinner_running = ref false
 let spinner_thread = ref None
 
 (* Start background spinner updates *)
-let start_spinner () =
+let start_spinner ?(show_tokens=false) ?(token_count=0) ?(context_limit=0) () =
   if not !spinner_running then (
     spinner_running := true;
     thinking_indicator := 0;
@@ -48,7 +72,22 @@ let start_spinner () =
         if !spinner_running then (
           thinking_indicator := (!thinking_indicator + 1) mod 8;
           let braille = braille_spinner.(!thinking_indicator) in
-          print_status (ansi_orange ^ ansi_bold ^ braille ^ ansi_reset ^ ansi_dim ^ " Thinking..." ^ ansi_reset)
+          let status_text = 
+            if show_tokens && context_limit > 0 then (
+              let pct = (token_count * 100) / context_limit in
+              let color = 
+                if pct < 50 then ansi_dim
+                else if pct < 80 then ansi_yellow
+                else ansi_red
+              in
+              Printf.sprintf "%s%s%s %sThinking...%s %s(%dK/%dK tokens, %d%%)%s"
+                ansi_orange ansi_bold braille ansi_reset ansi_dim
+                color (token_count / 1000) (context_limit / 1000) pct ansi_reset
+            ) else
+              Printf.sprintf "%s%s%s %sThinking...%s"
+                ansi_orange ansi_bold braille ansi_reset ansi_dim
+          in
+          print_status status_text
         )
       done
     ) in
@@ -283,6 +322,19 @@ let process state ~chat_id prompt =
     | Error err -> Error err
     | Ok base_messages ->
         let user_message = { Llm.role = "user"; content = Llm.Text_content prompt } in
+        let all_messages = base_messages @ [user_message] in
+        
+        (* Calculate current token usage *)
+        let current_tokens = count_messages_tokens all_messages in
+        let context_limit = state.Runtime.config.llm_max_tokens + 10000 in  (* Rough estimate *)
+        let context_window = 1000000 in  (* Model's full context window *)
+        
+        (* Check if we're approaching limits *)
+        if current_tokens > context_window * 90 / 100 then (
+          Log.warn (fun m -> m "Context usage critical: %d/%d tokens (%d%%)" 
+            current_tokens context_window ((current_tokens * 100) / context_window));
+        );
+        
         begin
           match Db.store_message state.Runtime.db ~chat_id ~role:"user" ~content:prompt with
           | Error err -> Error err
@@ -290,8 +342,12 @@ let process state ~chat_id prompt =
               let system_prompt = build_system_prompt state ~chat_id in
               let tool_defs = Tools.definitions state.Runtime.tools in
               thinking_indicator := 0;
-              start_spinner ();
+              start_spinner ~show_tokens:true ~token_count:current_tokens ~context_limit:context_window ();
               let rec loop messages rounds_remaining =
+                (* Recalculate tokens for updated message list *)
+                let msg_tokens = count_messages_tokens messages in
+                let total_tokens = msg_tokens + estimate_tokens system_prompt in
+                
                 match
                   state.Runtime.llm_call
                     state.Runtime.provider_config
@@ -304,6 +360,13 @@ let process state ~chat_id prompt =
                     clear_status ();
                     Error err
                 | Ok response ->
+                    (* Update token count with response usage if available *)
+                    let final_tokens = 
+                      match response.Llm.usage with
+                      | Some usage -> usage.Llm.input_tokens + usage.Llm.output_tokens
+                      | None -> total_tokens
+                    in
+                    
                     let has_tool_use =
                       List.exists
                         (function
@@ -335,7 +398,8 @@ let process state ~chat_id prompt =
                               clear_status ();
                               Error err
                           | Ok () -> 
-                              start_spinner ();  (* Restart spinner for next iteration *)
+                              (* Restart spinner with updated token count *)
+                              start_spinner ~show_tokens:true ~token_count:final_tokens ~context_limit:context_window ();
                               loop next_messages (rounds_remaining - 1)
                         end
                     else
@@ -354,6 +418,9 @@ let process state ~chat_id prompt =
                         | Ok () -> 
                             stop_spinner ();
                             clear_status ();
+                            (* Log final token usage *)
+                            Log.info (fun m -> m "Completed: %d tokens used (%.1f%% of context)" 
+                              final_tokens ((float final_tokens *. 100.0) /. float context_window));
                             Ok final_text
               in
               loop (base_messages @ [ user_message ]) state.Runtime.config.max_tool_iterations
