@@ -56,17 +56,18 @@ let () =
   expect ((assistant |> Yojson.Safe.Util.member "tool_calls") <> `Null) "assistant tool calls missing";
   expect (Yojson.Safe.Util.to_string (tool |> Yojson.Safe.Util.member "tool_call_id") = "call-1")
     "tool_call_id missing from tool result message";
+  
+  (* Test streaming parser with text *)
   let streamed_text = ref [] in
+  let parser = Llm_provider.create_stream_parser ~on_text_delta:(fun delta -> streamed_text := delta :: !streamed_text) () in
+  let chunks = [
+    "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"},\"finish_reason\":null}]}\n\n";
+    "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"stop\"}]}\n\n";
+    "data: [DONE]\n\n";
+  ] in
+  List.iter (fun chunk -> ignore (Llm_provider.feed_parser parser chunk)) chunks;
   begin
-    match
-      Llm_provider.parse_stream_chunks
-        ~on_text_delta:(fun delta -> streamed_text := delta :: !streamed_text)
-        [
-          "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"},\"finish_reason\":null}]}\n\n";
-          "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"stop\"}]}\n\n";
-          "data: [DONE]\n\n";
-        ]
-    with
+    match Llm_provider.finalize_parser parser with
     | Ok response ->
         expect (String.concat "" (List.rev !streamed_text) = "Hello") "text deltas should be emitted in order";
         begin
@@ -77,15 +78,17 @@ let () =
         end
     | Error err -> fail err
   end;
+
+  (* Test streaming parser with tool calls *)
+  let parser = Llm_provider.create_stream_parser () in
+  let chunks = [
+    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\"}}]},\"finish_reason\":null}]}\n\n";
+    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"note.txt\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n";
+    "data: [DONE]\n\n";
+  ] in
+  List.iter (fun chunk -> ignore (Llm_provider.feed_parser parser chunk)) chunks;
   begin
-    match
-      Llm_provider.parse_stream_chunks
-        [
-          "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\"}}]},\"finish_reason\":null}]}\n\n";
-          "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"note.txt\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n";
-          "data: [DONE]\n\n";
-        ]
-    with
+    match Llm_provider.finalize_parser parser with
     | Ok response ->
         begin
           match response.Llm_types.content with

@@ -47,10 +47,11 @@ module HttpRequest = struct
     headers : (string * string) list;
     body : string option;
     timeout : int;
+    on_write : (string -> unit) option;
   }
   
-  let create ~method_ ~url ?(headers=[]) ?body ?(timeout=30) () = {
-    method_; url; headers; body; timeout
+  let create ~method_ ~url ?(headers=[]) ?body ?(timeout=30) ?on_write () = {
+    method_; url; headers; body; timeout; on_write
   }
   
   let to_curl_handle req =
@@ -108,54 +109,6 @@ let init_curl_handle () =
   Curl.set_followlocation handle true;
   Curl.set_maxredirs handle 5;
   handle
-
-(* Streaming HTTP request with callback *)
-let perform_streaming_request method_ url headers body_opt timeout callback =
-  let handle = init_curl_handle () in
-  
-  (* Set URL and method *)
-  Curl.set_url handle url;
-  begin
-    match method_ with
-    | HttpMethod.GET -> Curl.set_httpget handle true
-    | HttpMethod.POST -> Curl.set_post handle true
-    | HttpMethod.PUT -> Curl.set_customrequest handle "PUT"
-    | HttpMethod.PATCH -> Curl.set_customrequest handle "PATCH"
-    | HttpMethod.DELETE -> Curl.set_customrequest handle "DELETE"
-  end;
-  
-  (* Set headers *)
-  let headers = to_curl_headers headers in
-  Curl.set_httpheader handle headers;
-  
-  (* Set body *)
-  begin
-    match body_opt with
-    | Some body -> Curl.set_postfields handle body
-    | None -> ()
-  end;
-  
-  (* Set timeout *)
-  Curl.set_timeout handle timeout;
-  
-  (* Set streaming callback *)
-  Curl.set_writefunction handle (fun data ->
-    callback data;
-    String.length data
-  );
-  
-  (* Perform request *)
-  try
-    Curl.perform handle;
-    Curl.cleanup handle;
-    Ok ()
-  with
-  | Curl.CurlException (code, _, msg) ->
-      Curl.cleanup handle;
-      Error (msg ^ " (" ^ Curl.strerror code ^ ")")
-  | exn ->
-      Curl.cleanup handle;
-      Error (Printexc.to_string exn)
 
 let set_request_options handle req =
   Curl.set_url handle req.HttpRequest.url;
@@ -344,7 +297,9 @@ let perform_multi_requests requests =
           let response_body = Buffer.create 1024 in
           let response_headers = ref [] in
           Curl.set_writefunction handle (fun data ->
-              Buffer.add_string response_body data;
+              (match req.HttpRequest.on_write with
+               | Some cb -> cb data
+               | None -> Buffer.add_string response_body data);
               String.length data);
           Curl.set_headerfunction handle (fun header ->
               if String.length header > 0 && header.[0] <> '\r' && header.[0] <> '\n' then (
@@ -437,10 +392,18 @@ let post url headers body timeout =
   make_request req
 
 let post_streaming url headers body timeout callback =
-  perform_streaming_request HttpMethod.POST url headers (Some body) timeout callback
+  let req = HttpRequest.create ~method_:HttpMethod.POST ~url ~headers ~body ~timeout ~on_write:callback () in
+  match perform_multi_requests [req] with
+  | [resp] when resp.HttpResponse.error = None -> Ok ()
+  | [resp] -> Error (Option.value ~default:"Streaming request failed" resp.HttpResponse.error)
+  | _ -> Error "Streaming request failed"
 
 let get_streaming url headers timeout callback =
-  perform_streaming_request HttpMethod.GET url headers None timeout callback
+  let req = HttpRequest.create ~method_:HttpMethod.GET ~url ~headers ~timeout ~on_write:callback () in
+  match perform_multi_requests [req] with
+  | [resp] when resp.HttpResponse.error = None -> Ok ()
+  | [resp] -> Error (Option.value ~default:"Streaming request failed" resp.HttpResponse.error)
+  | _ -> Error "Streaming request failed"
 
 (* Simple PUT request *)
 let put url headers body timeout =

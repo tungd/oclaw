@@ -21,6 +21,7 @@ module HttpRequest : sig
     headers : (string * string) list;
     body : string option;
     timeout : int;
+    on_write : (string -> unit) option;
   }
   
   (** Create a new HTTP request *)
@@ -30,6 +31,7 @@ module HttpRequest : sig
     ?headers:(string * string) list -> 
     ?body:string -> 
     ?timeout:int -> 
+    ?on_write:(string -> unit) ->
     unit -> t
   
   (** Convert request to curl handle *)

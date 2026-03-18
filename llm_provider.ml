@@ -239,7 +239,25 @@ let strip_carriage_returns value =
   |> Seq.filter (fun ch -> ch <> '\r')
   |> String.of_seq
 
-let process_stream_event ?on_text_delta text_buffer tool_calls stop_reason usage_ref raw_event =
+type stream_parser = {
+  pending : Buffer.t;
+  text_buffer : Buffer.t;
+  tool_calls : (int, partial_tool_call) Hashtbl.t;
+  stop_reason : string option ref;
+  usage : Llm.usage option ref;
+  on_text_delta : (string -> unit) option;
+}
+
+let create_stream_parser ?on_text_delta () = {
+  pending = Buffer.create 1024;
+  text_buffer = Buffer.create 1024;
+  tool_calls = Hashtbl.create 8;
+  stop_reason = ref None;
+  usage = ref None;
+  on_text_delta;
+}
+
+let process_stream_event parser raw_event =
   let lines = String.split_on_char '\n' raw_event in
   let data_lines =
     lines
@@ -255,8 +273,7 @@ let process_stream_event ?on_text_delta text_buffer tool_calls stop_reason usage
     | value -> value
   in
   match payload with
-  | "" -> Ok ()
-  | "[DONE]" -> Ok ()
+  | "" | "[DONE]" -> Ok ()
   | payload ->
       begin
         try
@@ -267,23 +284,23 @@ let process_stream_event ?on_text_delta text_buffer tool_calls stop_reason usage
                 List.iter
                   (function
                     | Llm.Response_text { text } ->
-                        Buffer.add_string text_buffer text;
-                        Option.iter (fun f -> f text) on_text_delta
+                        Buffer.add_string parser.text_buffer text;
+                        Option.iter (fun f -> f text) parser.on_text_delta
                     | Llm.Response_tool_use { id; name; input } ->
                         let tool_call = create_partial_tool_call () in
                         tool_call.id <- Some id;
                         Buffer.add_string tool_call.name name;
                         Buffer.add_string tool_call.arguments (Yojson.Safe.to_string input);
-                        Hashtbl.replace tool_calls (Hashtbl.length tool_calls) tool_call)
+                        Hashtbl.replace parser.tool_calls (Hashtbl.length parser.tool_calls) tool_call)
                   response.Llm.content;
-                stop_reason := response.Llm.stop_reason;
-                usage_ref := response.Llm.usage;
+                parser.stop_reason := response.Llm.stop_reason;
+                parser.usage := response.Llm.usage;
                 Ok ()
             | Error err -> Error err
           else (
             begin
               match parse_usage (json |> member "usage") with
-              | Some usage -> usage_ref := Some usage
+              | Some usage -> parser.usage := Some usage
               | None -> ()
             end;
             let choices =
@@ -294,17 +311,17 @@ let process_stream_event ?on_text_delta text_buffer tool_calls stop_reason usage
               (fun choice ->
                 begin
                   match choice |> member "finish_reason" with
-                  | `String "tool_calls" -> stop_reason := Some "tool_use"
-                  | `String "length" -> stop_reason := Some "max_tokens"
-                  | `String _ -> stop_reason := Some "end_turn"
+                  | `String "tool_calls" -> parser.stop_reason := Some "tool_use"
+                  | `String "length" -> parser.stop_reason := Some "max_tokens"
+                  | `String _ -> parser.stop_reason := Some "end_turn"
                   | _ -> ()
                 end;
                 let delta = choice |> member "delta" in
                 begin
                   match delta |> member "content" with
                   | `String text when text <> "" ->
-                      Buffer.add_string text_buffer text;
-                      Option.iter (fun f -> f text) on_text_delta
+                      Buffer.add_string parser.text_buffer text;
+                      Option.iter (fun f -> f text) parser.on_text_delta
                   | _ -> ()
                 end;
                 let delta_tool_calls =
@@ -315,11 +332,11 @@ let process_stream_event ?on_text_delta text_buffer tool_calls stop_reason usage
                   (fun tool_json ->
                     let index = tool_json |> member "index" |> to_int in
                     let tool_call =
-                      match Hashtbl.find_opt tool_calls index with
+                      match Hashtbl.find_opt parser.tool_calls index with
                       | Some value -> value
                       | None ->
                           let value = create_partial_tool_call () in
-                          Hashtbl.replace tool_calls index value;
+                          Hashtbl.replace parser.tool_calls index value;
                           value
                     in
                     begin
@@ -344,66 +361,55 @@ let process_stream_event ?on_text_delta text_buffer tool_calls stop_reason usage
           Error (Printf.sprintf "Failed to parse streamed LLM chunk: %s" (Printexc.to_string exn))
       end
 
-let parse_stream_chunks ?on_text_delta chunks =
-  let pending = Buffer.create 1024 in
-  let text_buffer = Buffer.create 1024 in
-  let tool_calls : (int, partial_tool_call) Hashtbl.t = Hashtbl.create 8 in
-  let stop_reason = ref None in
-  let usage = ref None in
-  let process_pending_events ~flush =
-    let rec loop () =
-      let content = Buffer.contents pending in
-      let len = String.length content in
-      let rec find_event_end index =
-        if index + 1 >= len then None
-        else if content.[index] = '\n' && content.[index + 1] = '\n' then Some (index, 2)
-        else find_event_end (index + 1)
-      in
-      match find_event_end 0 with
-      | Some (idx, sep_len) ->
-          let raw_event = String.sub content 0 idx in
-          let remaining =
-            String.sub content (idx + sep_len) (String.length content - idx - sep_len)
-          in
-          Buffer.clear pending;
-          Buffer.add_string pending remaining;
-          begin
-            match process_stream_event ?on_text_delta text_buffer tool_calls stop_reason usage raw_event with
-            | Ok () -> loop ()
-            | Error _ as err -> err
-          end
-      | None when flush && String.trim content <> "" ->
-          Buffer.clear pending;
-          process_stream_event ?on_text_delta text_buffer tool_calls stop_reason usage content
-      | None ->
-          Ok ()
+let feed_parser parser chunk =
+  Buffer.add_string parser.pending (strip_carriage_returns chunk);
+  let rec loop () =
+    let content = Buffer.contents parser.pending in
+    let len = String.length content in
+    let rec find_event_end index =
+      if index + 1 >= len then None
+      else if content.[index] = '\n' && content.[index + 1] = '\n' then Some (index, 2)
+      else find_event_end (index + 1)
     in
-    loop ()
-  in
-  let rec consume = function
-    | [] -> process_pending_events ~flush:true
-    | chunk :: rest ->
-        Buffer.add_string pending (strip_carriage_returns chunk);
+    match find_event_end 0 with
+    | Some (idx, sep_len) ->
+        let raw_event = String.sub content 0 idx in
+        let remaining =
+          String.sub content (idx + sep_len) (String.length content - idx - sep_len)
+        in
+        Buffer.clear parser.pending;
+        Buffer.add_string parser.pending remaining;
         begin
-          match process_pending_events ~flush:false with
-          | Ok () -> consume rest
+          match process_stream_event parser raw_event with
+          | Ok () -> loop ()
           | Error _ as err -> err
         end
+    | None -> Ok ()
   in
-  match consume chunks with
+  loop ()
+
+let finalize_parser parser =
+  let content = Buffer.contents parser.pending in
+  let result =
+    if String.trim content <> "" then
+      process_stream_event parser content
+    else
+      Ok ()
+  in
+  match result with
   | Error _ as err -> err
   | Ok () ->
       let response_content =
-        let text = Buffer.contents text_buffer in
+        let text = Buffer.contents parser.text_buffer in
         let text_blocks =
           if String.trim text = "" then [] else [ Llm.Response_text { text } ]
         in
         let tool_blocks =
-          Hashtbl.to_seq_keys tool_calls
+          Hashtbl.to_seq_keys parser.tool_calls
           |> List.of_seq
           |> List.sort compare
           |> List.filter_map (fun index ->
-                 match Hashtbl.find_opt tool_calls index with
+                 match Hashtbl.find_opt parser.tool_calls index with
                  | None -> None
                  | Some tool_call ->
                      let id = Option.value ~default:(Printf.sprintf "call-%d" index) tool_call.id in
@@ -419,8 +425,8 @@ let parse_stream_chunks ?on_text_delta chunks =
       in
       Ok {
         Llm.content = response_content;
-        stop_reason = !stop_reason;
-        usage = !usage;
+        stop_reason = !(parser.stop_reason);
+        usage = !(parser.usage);
       }
 
 let send_message provider ?on_text_delta ~system_prompt messages ~tools =
@@ -433,7 +439,8 @@ let send_message provider ?on_text_delta ~system_prompt messages ~tools =
     build_request_json provider ~system_prompt messages ~tools ~stream:true
     |> Yojson.Safe.to_string
   in
-  let chunks = ref [] in
-  match Http.post_streaming url headers body provider.timeout (fun chunk -> chunks := chunk :: !chunks) with
+  let parser = create_stream_parser ?on_text_delta () in
+  match Http.post_streaming url headers body provider.timeout (fun chunk ->
+    ignore (feed_parser parser chunk)) with
   | Error err -> Error err
-  | Ok () -> parse_stream_chunks ?on_text_delta (List.rev !chunks)
+  | Ok () -> finalize_parser parser
