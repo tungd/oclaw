@@ -14,13 +14,12 @@ type provider_config = {
   api_base : string;
   api_key : string;
   model : llm_model;
-  temperature : float;
   max_tokens : int;
   timeout : int;
 }
 
 val qwen35_plus_model : llm_model
-val create_dashscope_provider : ?temperature:float -> ?max_tokens:int -> unit -> provider_config
+val create_dashscope_provider : ?max_tokens:int -> unit -> provider_config
 
 val build_request_json :
   provider_config ->

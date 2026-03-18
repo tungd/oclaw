@@ -21,7 +21,6 @@ type provider_config = {
   api_base : string;
   api_key : string;
   model : llm_model;
-  temperature : float;
   max_tokens : int;
   timeout : int;
 }
@@ -36,11 +35,10 @@ let qwen35_plus_model = {
   max_tokens = 65_536;
 }
 
-let create_dashscope_provider ?(temperature=0.7) ?(max_tokens=4096) () = {
+let create_dashscope_provider ?(max_tokens=4096) () = {
   api_base = "https://coding-intl.dashscope.aliyuncs.com/v1";
   api_key = "";
   model = qwen35_plus_model;
-  temperature;
   max_tokens;
   timeout = 60;
 }
@@ -152,7 +150,6 @@ let build_request_json provider ~system_prompt messages ~tools ~stream =
   `Assoc [
     ("model", `String provider.model.name);
     ("messages", `List request_messages);
-    ("temperature", `Float provider.temperature);
     ("max_tokens", `Int provider.max_tokens);
     ("tools", tool_definitions_to_json tools);
     ("tool_choice", `String "auto");

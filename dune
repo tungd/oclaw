@@ -93,7 +93,7 @@
 (library
  (name tui)
  (modules tui)
- (libraries agent_engine logs mosaic domainslib oclaw_acp runtime unix yojson)
+ (libraries agent_engine logs mosaic domainslib acp runtime unix yojson)
  (flags :standard -w -A))
 
 (executable
@@ -111,7 +111,7 @@
   tools
   tui
   mosaic
-  oclaw_acp
+  acp
   jsonrpc
   unix)
  (flags :standard -w -A))

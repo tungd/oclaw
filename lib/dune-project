@@ -1,4 +1,4 @@
 (lang dune 3.0)
 (package
- (name oclaw_acp)
- (synopsis "Agent Client Protocol (ACP) types and stdio frontend for OClaw"))
+ (name acp)
+ (synopsis "Agent Client Protocol (ACP) types and stdio frontend"))

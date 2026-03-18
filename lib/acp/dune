@@ -1,5 +1,5 @@
 (library
- (public_name oclaw_acp)
- (name oclaw_acp)
+ (public_name acp)
+ (name acp)
  (libraries jsonrpc yojson unix logs)
  (flags :standard -w -A))

@@ -150,7 +150,6 @@ let to_llm_provider_config config =
     api_base = config.llm_api_base;
     api_key = config.llm_api_key;
     model;
-    temperature = 0.7;  (* Use sensible default, not user-configurable *)
     max_tokens = 4096;
     timeout = config.llm_timeout;
   }

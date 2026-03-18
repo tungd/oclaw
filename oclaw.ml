@@ -177,27 +177,27 @@ let run_tui state chat_id persistent =
   0
 
 let run_acp state chat_id persistent =
-  let frontend = Oclaw_acp.Stdio_frontend.create () in
+  let frontend = Acp.Stdio_frontend.create () in
   let rec loop () =
-    match Oclaw_acp.Stdio_frontend.recv frontend with
+    match Acp.Stdio_frontend.recv frontend with
     | None -> loop ()
     | Some packet ->
-        (match Oclaw_acp.Message.of_jsonrpc_packet packet with
-         | Some (Oclaw_acp.Message.Initialize _) ->
+        (match Acp.Message.of_jsonrpc_packet packet with
+         | Some (Acp.Message.Initialize _) ->
              let id = match packet with Jsonrpc.Packet.Request r -> r.Jsonrpc.Request.id | _ -> `Int 0 in
-             Oclaw_acp.Stdio_frontend.send frontend (Oclaw_acp.Message.to_jsonrpc ~id Oclaw_acp.Message.Initialized);
+             Acp.Stdio_frontend.send frontend (Acp.Message.to_jsonrpc ~id Acp.Message.Initialized);
              loop ()
-         | Some (Oclaw_acp.Message.Agent_message { content; _ }) ->
+         | Some (Acp.Message.Agent_message { content; _ }) ->
              let id = match packet with Jsonrpc.Packet.Request r -> r.Jsonrpc.Request.id | _ -> `Int 0 in
              let on_text_delta delta =
-               Oclaw_acp.Stdio_frontend.send frontend (Oclaw_acp.Message.to_jsonrpc (Oclaw_acp.Message.Agent_delta { content = delta }))
+               Acp.Stdio_frontend.send frontend (Acp.Message.to_jsonrpc (Acp.Message.Agent_delta { content = delta }))
              in
              (match Agent_engine.process ~on_text_delta state ~chat_id ~persistent content with
               | Ok response ->
-                  Oclaw_acp.Stdio_frontend.send frontend (Oclaw_acp.Message.to_jsonrpc ~id (Oclaw_acp.Message.Agent_message { content = response; chat_id = Some chat_id }));
-                  Oclaw_acp.Stdio_frontend.send frontend (Oclaw_acp.Message.to_jsonrpc (Oclaw_acp.Message.Done));
+                  Acp.Stdio_frontend.send frontend (Acp.Message.to_jsonrpc ~id (Acp.Message.Agent_message { content = response; chat_id = Some chat_id }));
+                  Acp.Stdio_frontend.send frontend (Acp.Message.to_jsonrpc (Acp.Message.Done));
               | Error err ->
-                  Oclaw_acp.Stdio_frontend.send frontend (Oclaw_acp.Message.to_jsonrpc ~id (Oclaw_acp.Message.Error { message = err; code = 0 })))
+                  Acp.Stdio_frontend.send frontend (Acp.Message.to_jsonrpc ~id (Acp.Message.Error { message = err; code = 0 })))
              ; loop ()
          | _ -> loop ())
   in

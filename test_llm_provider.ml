@@ -18,7 +18,6 @@ let provider =
       context_window = 16384;
       max_tokens = 256;
     };
-    temperature = 0.0;
     max_tokens = 256;
     timeout = 1;
   }
