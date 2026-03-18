@@ -108,8 +108,9 @@ let run_single_shot state chat_id persistent prompt =
       1
 
 let run_repl state chat_id persistent =
-  let scheduler_handle = Scheduler.start state.Runtime.config in
+  let scheduler_handle = Scheduler.start state in
   (* Setup linenoise with history file *)
+
   let history_file = Filename.concat (Filename.concat state.Runtime.config.data_dir "runtime") "linenoise_history" in
   (match LNoise.history_set ~max_length:1000 with Error e -> Log.warn (fun m -> m "Failed to set history length: %s" e) | Ok () -> ());
   (match LNoise.history_load ~filename:history_file with Error e -> Log.debug (fun m -> m "No history file yet: %s" e) | Ok () -> ());

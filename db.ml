@@ -4,6 +4,7 @@ module Log = (val Logs.src_log (Logs.Src.create "db") : Logs.LOG)
 
 type t = {
   db : Sqlite3.db;
+  mutex : Mutex.t;
 }
 
 type stored_message = {
@@ -48,24 +49,36 @@ let ensure_parent_dir path =
   mkdir_p (Filename.dirname path)
 
 let exec db sql =
-  match Sqlite3.exec db sql with
-  | Rc.OK -> Ok ()
-  | rc -> Error (Printf.sprintf "sqlite exec failed (%s): %s" (Rc.to_string rc) (errmsg db))
+  try
+    match Sqlite3.exec db sql with
+    | Rc.OK -> Ok ()
+    | rc -> Error (Printf.sprintf "sqlite exec failed (%s): %s" (Rc.to_string rc) (errmsg db))
+  with Sqlite3.SqliteError msg ->
+    Error (Printf.sprintf "sqlite exec exception: %s" msg)
 
 let timestamp () = Unix.gettimeofday ()
 
 let prepare db sql =
-  Sqlite3.prepare db sql
+  try
+    Sqlite3.prepare db sql
+  with Sqlite3.SqliteError msg ->
+    failwith (Printf.sprintf "sqlite prepare exception: %s" msg)
 
 let finalize stmt =
-  match Sqlite3.finalize stmt with
-  | Rc.OK -> Ok ()
-  | rc -> Error (Printf.sprintf "sqlite finalize failed: %s" (Rc.to_string rc))
+  try
+    match Sqlite3.finalize stmt with
+    | Rc.OK -> Ok ()
+    | rc -> Error (Printf.sprintf "sqlite finalize failed: %s" (Rc.to_string rc))
+  with Sqlite3.SqliteError msg ->
+    Error (Printf.sprintf "sqlite finalize exception: %s" msg)
 
 let step_expect_done db stmt =
-  match Sqlite3.step stmt with
-  | Rc.DONE -> Ok ()
-  | rc -> Error (Printf.sprintf "sqlite step failed (%s): %s" (Rc.to_string rc) (errmsg db))
+  try
+    match Sqlite3.step stmt with
+    | Rc.DONE -> Ok ()
+    | rc -> Error (Printf.sprintf "sqlite step failed (%s): %s" (Rc.to_string rc) (errmsg db))
+  with Sqlite3.SqliteError msg ->
+    Error (Printf.sprintf "sqlite step exception: %s" msg)
 
 let bind_text stmt index value =
   Sqlite3.bind stmt index (Data.TEXT value)
@@ -91,9 +104,11 @@ let with_statement db sql f =
     (fun () -> f stmt)
 
 let create path =
+  let db = ref None in
   try
     ensure_parent_dir path;
-    let db = Sqlite3.db_open path in
+    let opened_db = Sqlite3.db_open path in
+    db := Some opened_db;
     let setup =
       [
         "PRAGMA journal_mode = WAL";
@@ -159,38 +174,56 @@ let create path =
         (fun (acc : (unit, string) result) sql ->
           match acc with
           | Error _ as err -> err
-          | Ok () -> exec db sql)
+          | Ok () -> exec opened_db sql)
         (Ok ()) setup
     in
     begin
       match result with
       | Ok () -> 
           (* Register vector search UDFs *)
-          (match Vector_search.register_udfs db with
+          (match Vector_search.register_udfs opened_db with
            | Ok () -> ()
            | Error msg -> Log.warn (fun m -> m "Vector UDF registration failed: %s" msg));
           (* Initialize vector schema *)
-          Vector_search.init_schema db;
-          Ok { db }
+          Vector_search.init_schema opened_db;
+          Ok { db = opened_db; mutex = Mutex.create () }
       | Error err ->
-          Sqlite3.db_close db |> ignore;
+          Sqlite3.db_close opened_db |> ignore;
           Error err
     end
-  with exn ->
-    Error (Printexc.to_string exn)
+  with
+  | Sqlite3.SqliteError msg ->
+      begin
+        match !db with
+        | Some db -> Sqlite3.db_close db |> ignore
+        | None -> ()
+      end;
+      Error (Printf.sprintf "sqlite create exception: %s" msg)
+  | exn ->
+      begin
+        match !db with
+        | Some db -> Sqlite3.db_close db |> ignore
+        | None -> ()
+      end;
+      Error (Printexc.to_string exn)
 
 let close t =
   ignore (Sqlite3.db_close t.db)
 
+let with_lock t f =
+  Mutex.lock t.mutex;
+  Fun.protect ~finally:(fun () -> Mutex.unlock t.mutex) f
+
 let store_message t ~chat_id ~role ~content =
-  with_statement t.db
-    "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4)"
-    (fun stmt ->
-      ignore (bind_int stmt 1 chat_id);
-      ignore (bind_text stmt 2 role);
-      ignore (bind_text stmt 3 content);
-      ignore (bind_float stmt 4 (timestamp ()));
-      step_expect_done t.db stmt)
+  with_lock t (fun () ->
+    with_statement t.db
+      "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4)"
+      (fun stmt ->
+        ignore (bind_int stmt 1 chat_id);
+        ignore (bind_text stmt 2 role);
+        ignore (bind_text stmt 3 content);
+        ignore (bind_float stmt 4 (timestamp ()));
+        step_expect_done t.db stmt))
 
 let read_message_row stmt =
   let chat_id =
@@ -218,110 +251,121 @@ let read_message_row stmt =
 
 let collect_messages stmt =
   let rec loop acc =
-    match Sqlite3.step stmt with
-    | Rc.ROW -> loop (read_message_row stmt :: acc)
-    | Rc.DONE -> Ok (List.rev acc)
-    | rc -> Error (Printf.sprintf "sqlite read failed: %s" (Rc.to_string rc))
+    try
+      match Sqlite3.step stmt with
+      | Rc.ROW -> loop (read_message_row stmt :: acc)
+      | Rc.DONE -> Ok (List.rev acc)
+      | rc -> Error (Printf.sprintf "sqlite read failed: %s" (Rc.to_string rc))
+    with Sqlite3.SqliteError msg ->
+      Error (Printf.sprintf "sqlite read exception: %s" msg)
   in
   loop []
 
 let get_recent_messages t ~chat_id ~limit =
-  with_statement t.db
-    "SELECT chat_id, role, content, created_at \
-     FROM messages WHERE chat_id = ?1 ORDER BY created_at DESC LIMIT ?2"
-    (fun stmt ->
-      ignore (bind_int stmt 1 chat_id);
-      ignore (bind_int stmt 2 limit);
-      match collect_messages stmt with
-      | Ok messages -> Ok (List.rev messages)
-      | Error err -> Error err)
+  with_lock t (fun () ->
+    with_statement t.db
+      "SELECT chat_id, role, content, created_at \
+       FROM messages WHERE chat_id = ?1 ORDER BY created_at DESC LIMIT ?2"
+      (fun stmt ->
+        ignore (bind_int stmt 1 chat_id);
+        ignore (bind_int stmt 2 limit);
+        match collect_messages stmt with
+        | Ok messages -> Ok (List.rev messages)
+        | Error err -> Error err))
 
 let get_all_messages t ~chat_id =
-  with_statement t.db
-    "SELECT chat_id, role, content, created_at \
-     FROM messages WHERE chat_id = ?1 ORDER BY created_at ASC"
-    (fun stmt ->
-      ignore (bind_int stmt 1 chat_id);
-      collect_messages stmt)
+  with_lock t (fun () ->
+    with_statement t.db
+      "SELECT chat_id, role, content, created_at \
+       FROM messages WHERE chat_id = ?1 ORDER BY created_at ASC"
+      (fun stmt ->
+        ignore (bind_int stmt 1 chat_id);
+        collect_messages stmt))
 
 let save_session t ~chat_id ~messages_json =
-  with_statement t.db
-    "INSERT INTO sessions (chat_id, messages_json, updated_at) VALUES (?1, ?2, ?3) \
-     ON CONFLICT(chat_id) DO UPDATE SET messages_json = excluded.messages_json, updated_at = excluded.updated_at"
-    (fun stmt ->
-      ignore (bind_int stmt 1 chat_id);
-      ignore (bind_text stmt 2 messages_json);
-      ignore (bind_float stmt 3 (timestamp ()));
-      step_expect_done t.db stmt)
+  with_lock t (fun () ->
+    with_statement t.db
+      "INSERT INTO sessions (chat_id, messages_json, updated_at) VALUES (?1, ?2, ?3) \
+       ON CONFLICT(chat_id) DO UPDATE SET messages_json = excluded.messages_json, updated_at = excluded.updated_at"
+      (fun stmt ->
+        ignore (bind_int stmt 1 chat_id);
+        ignore (bind_text stmt 2 messages_json);
+        ignore (bind_float stmt 3 (timestamp ()));
+        step_expect_done t.db stmt))
 
 let load_session t ~chat_id =
-  with_statement t.db
-    "SELECT messages_json, updated_at FROM sessions WHERE chat_id = ?1"
-    (fun stmt ->
-      ignore (bind_int stmt 1 chat_id);
-      match Sqlite3.step stmt with
-      | Rc.ROW ->
-          let json =
-            match Sqlite3.column stmt 0 with
-            | Data.TEXT text -> text
-            | _ -> "[]"
-          in
-          let updated_at =
-            match Sqlite3.column stmt 1 with
-            | Data.FLOAT value -> value
-            | Data.INT value -> Int64.to_float value
-            | _ -> 0.0
-          in
-          Ok (Some (json, updated_at))
-      | Rc.DONE -> Ok None
-      | rc -> Error (Printf.sprintf "sqlite load session failed: %s" (Rc.to_string rc)))
+  with_lock t (fun () ->
+    with_statement t.db
+      "SELECT messages_json, updated_at FROM sessions WHERE chat_id = ?1"
+      (fun stmt ->
+        ignore (bind_int stmt 1 chat_id);
+        match Sqlite3.step stmt with
+        | Rc.ROW ->
+            let json =
+              match Sqlite3.column stmt 0 with
+              | Data.TEXT text -> text
+              | _ -> "[]"
+            in
+            let updated_at =
+              match Sqlite3.column stmt 1 with
+              | Data.FLOAT value -> value
+              | Data.INT value -> Int64.to_float value
+              | _ -> 0.0
+            in
+            Ok (Some (json, updated_at))
+        | Rc.DONE -> Ok None
+        | rc -> Error (Printf.sprintf "sqlite load session failed: %s" (Rc.to_string rc))))
 
 let delete_session t ~chat_id =
-  with_statement t.db
-    "DELETE FROM sessions WHERE chat_id = ?1"
-    (fun stmt ->
-      ignore (bind_int stmt 1 chat_id);
-      match Sqlite3.step stmt with
-      | Rc.DONE ->
-          let changed = Sqlite3.changes t.db > 0 in
-          Ok changed
-      | rc -> Error (Printf.sprintf "sqlite delete session failed: %s" (Rc.to_string rc)))
+  with_lock t (fun () ->
+    with_statement t.db
+      "DELETE FROM sessions WHERE chat_id = ?1"
+      (fun stmt ->
+        ignore (bind_int stmt 1 chat_id);
+        match Sqlite3.step stmt with
+        | Rc.DONE ->
+            let changed = Sqlite3.changes t.db > 0 in
+            Ok changed
+        | rc -> Error (Printf.sprintf "sqlite delete session failed: %s" (Rc.to_string rc))))
 
 let save_todo t ~chat_id ~todo_json =
-  with_statement t.db
-    "INSERT INTO todos (chat_id, todo_json, updated_at) VALUES (?1, ?2, ?3) \
-     ON CONFLICT(chat_id) DO UPDATE SET todo_json = excluded.todo_json, updated_at = excluded.updated_at"
-    (fun stmt ->
-      ignore (bind_int stmt 1 chat_id);
-      ignore (bind_text stmt 2 todo_json);
-      ignore (bind_float stmt 3 (timestamp ()));
-      step_expect_done t.db stmt)
+  with_lock t (fun () ->
+    with_statement t.db
+      "INSERT INTO todos (chat_id, todo_json, updated_at) VALUES (?1, ?2, ?3) \
+       ON CONFLICT(chat_id) DO UPDATE SET todo_json = excluded.todo_json, updated_at = excluded.updated_at"
+      (fun stmt ->
+        ignore (bind_int stmt 1 chat_id);
+        ignore (bind_text stmt 2 todo_json);
+        ignore (bind_float stmt 3 (timestamp ()));
+        step_expect_done t.db stmt))
 
 let load_todo t ~chat_id =
-  with_statement t.db
-    "SELECT todo_json FROM todos WHERE chat_id = ?1"
-    (fun stmt ->
-      ignore (bind_int stmt 1 chat_id);
-      match Sqlite3.step stmt with
-      | Rc.ROW ->
-          begin
-            match Sqlite3.column stmt 0 with
-            | Data.TEXT text -> Ok (Some text)
-            | _ -> Ok None
-          end
-      | Rc.DONE -> Ok None
-      | rc -> Error (Printf.sprintf "sqlite load todo failed: %s" (Rc.to_string rc)))
+  with_lock t (fun () ->
+    with_statement t.db
+      "SELECT todo_json FROM todos WHERE chat_id = ?1"
+      (fun stmt ->
+        ignore (bind_int stmt 1 chat_id);
+        match Sqlite3.step stmt with
+        | Rc.ROW ->
+            begin
+              match Sqlite3.column stmt 0 with
+              | Data.TEXT text -> Ok (Some text)
+              | _ -> Ok None
+            end
+        | Rc.DONE -> Ok None
+        | rc -> Error (Printf.sprintf "sqlite load todo failed: %s" (Rc.to_string rc))))
 
 let insert_memory t ~chat_id ~scope ~content ~source =
-  with_statement t.db
-    "INSERT INTO memories (chat_id, scope, content, source, created_at) VALUES (?1, ?2, ?3, ?4, ?5)"
-    (fun stmt ->
-      ignore (bind_opt_int stmt 1 chat_id);
-      ignore (bind_text stmt 2 scope);
-      ignore (bind_text stmt 3 content);
-      ignore (bind_text stmt 4 source);
-      ignore (bind_float stmt 5 (timestamp ()));
-      step_expect_done t.db stmt)
+  with_lock t (fun () ->
+    with_statement t.db
+      "INSERT INTO memories (chat_id, scope, content, source, created_at) VALUES (?1, ?2, ?3, ?4, ?5)"
+      (fun stmt ->
+        ignore (bind_opt_int stmt 1 chat_id);
+        ignore (bind_text stmt 2 scope);
+        ignore (bind_text stmt 3 content);
+        ignore (bind_text stmt 4 source);
+        ignore (bind_float stmt 5 (timestamp ()));
+        step_expect_done t.db stmt))
 
 let float_column stmt index =
   match Sqlite3.column stmt index with
@@ -360,107 +404,117 @@ let read_scheduled_task_row stmt =
 
 let collect_scheduled_tasks stmt =
   let rec loop acc =
-    match Sqlite3.step stmt with
-    | Rc.ROW -> loop (read_scheduled_task_row stmt :: acc)
-    | Rc.DONE -> Ok (List.rev acc)
-    | rc -> Error (Printf.sprintf "sqlite read scheduled tasks failed: %s" (Rc.to_string rc))
+    try
+      match Sqlite3.step stmt with
+      | Rc.ROW -> loop (read_scheduled_task_row stmt :: acc)
+      | Rc.DONE -> Ok (List.rev acc)
+      | rc -> Error (Printf.sprintf "sqlite read scheduled tasks failed: %s" (Rc.to_string rc))
+    with Sqlite3.SqliteError msg ->
+      Error (Printf.sprintf "sqlite read scheduled tasks exception: %s" msg)
   in
   loop []
 
 let insert_scheduled_task t ~chat_id ~prompt ~schedule_type ~schedule_value ~next_run_at =
-  with_statement t.db
-    "INSERT INTO scheduled_tasks \
-     (chat_id, prompt, schedule_type, schedule_value, next_run_at, status, created_at, updated_at, last_run_at) \
-     VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, NULL)"
-    (fun stmt ->
-      let now = timestamp () in
-      ignore (bind_int stmt 1 chat_id);
-      ignore (bind_text stmt 2 prompt);
-      ignore (bind_text stmt 3 schedule_type);
-      ignore (bind_text stmt 4 schedule_value);
-      ignore (bind_float stmt 5 next_run_at);
-      ignore (bind_float stmt 6 now);
-      ignore (bind_float stmt 7 now);
-      match step_expect_done t.db stmt with
-      | Error _ as err -> err
-      | Ok () -> Ok (Int64.to_int (Sqlite3.last_insert_rowid t.db)))
+  with_lock t (fun () ->
+    with_statement t.db
+      "INSERT INTO scheduled_tasks \
+       (chat_id, prompt, schedule_type, schedule_value, next_run_at, status, created_at, updated_at, last_run_at) \
+       VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, NULL)"
+      (fun stmt ->
+        let now = timestamp () in
+        ignore (bind_int stmt 1 chat_id);
+        ignore (bind_text stmt 2 prompt);
+        ignore (bind_text stmt 3 schedule_type);
+        ignore (bind_text stmt 4 schedule_value);
+        ignore (bind_float stmt 5 next_run_at);
+        ignore (bind_float stmt 6 now);
+        ignore (bind_float stmt 7 now);
+        match step_expect_done t.db stmt with
+        | Error _ as err -> err
+        | Ok () -> Ok (Int64.to_int (Sqlite3.last_insert_rowid t.db))))
 
 let list_scheduled_tasks t ~chat_id ~include_inactive =
-  let sql =
-    if include_inactive then
-      "SELECT id, chat_id, prompt, schedule_type, schedule_value, next_run_at, status, created_at, updated_at, last_run_at \
-       FROM scheduled_tasks WHERE chat_id = ?1 ORDER BY updated_at DESC"
-    else
-      "SELECT id, chat_id, prompt, schedule_type, schedule_value, next_run_at, status, created_at, updated_at, last_run_at \
-       FROM scheduled_tasks WHERE chat_id = ?1 AND status IN ('active', 'paused') ORDER BY updated_at DESC"
-  in
-  with_statement t.db sql (fun stmt ->
-      ignore (bind_int stmt 1 chat_id);
-      collect_scheduled_tasks stmt)
+  with_lock t (fun () ->
+    let sql =
+      if include_inactive then
+        "SELECT id, chat_id, prompt, schedule_type, schedule_value, next_run_at, status, created_at, updated_at, last_run_at \
+         FROM scheduled_tasks WHERE chat_id = ?1 ORDER BY updated_at DESC"
+      else
+        "SELECT id, chat_id, prompt, schedule_type, schedule_value, next_run_at, status, created_at, updated_at, last_run_at \
+         FROM scheduled_tasks WHERE chat_id = ?1 AND status IN ('active', 'paused') ORDER BY updated_at DESC"
+    in
+    with_statement t.db sql (fun stmt ->
+        ignore (bind_int stmt 1 chat_id);
+        collect_scheduled_tasks stmt))
 
 let get_scheduled_task t ~chat_id ~task_id =
-  with_statement t.db
-    "SELECT id, chat_id, prompt, schedule_type, schedule_value, next_run_at, status, created_at, updated_at, last_run_at \
-     FROM scheduled_tasks WHERE chat_id = ?1 AND id = ?2"
-    (fun stmt ->
-      ignore (bind_int stmt 1 chat_id);
-      ignore (bind_int stmt 2 task_id);
-      match Sqlite3.step stmt with
-      | Rc.ROW -> Ok (Some (read_scheduled_task_row stmt))
-      | Rc.DONE -> Ok None
-      | rc -> Error (Printf.sprintf "sqlite get scheduled task failed: %s" (Rc.to_string rc)))
+  with_lock t (fun () ->
+    with_statement t.db
+      "SELECT id, chat_id, prompt, schedule_type, schedule_value, next_run_at, status, created_at, updated_at, last_run_at \
+       FROM scheduled_tasks WHERE chat_id = ?1 AND id = ?2"
+      (fun stmt ->
+        ignore (bind_int stmt 1 chat_id);
+        ignore (bind_int stmt 2 task_id);
+        match Sqlite3.step stmt with
+        | Rc.ROW -> Ok (Some (read_scheduled_task_row stmt))
+        | Rc.DONE -> Ok None
+        | rc -> Error (Printf.sprintf "sqlite get scheduled task failed: %s" (Rc.to_string rc))))
 
 let update_scheduled_task_status t ~chat_id ~task_id ~status ~next_run_at =
-  with_statement t.db
-    "UPDATE scheduled_tasks SET status = ?3, next_run_at = ?4, updated_at = ?5 \
-     WHERE chat_id = ?1 AND id = ?2"
-    (fun stmt ->
-      ignore (bind_int stmt 1 chat_id);
-      ignore (bind_int stmt 2 task_id);
-      ignore (bind_text stmt 3 status);
-      ignore (bind_opt_float stmt 4 next_run_at);
-      ignore (bind_float stmt 5 (timestamp ()));
-      match step_expect_done t.db stmt with
-      | Error _ as err -> err
-      | Ok () -> Ok (Sqlite3.changes t.db > 0))
+  with_lock t (fun () ->
+    with_statement t.db
+      "UPDATE scheduled_tasks SET status = ?3, next_run_at = ?4, updated_at = ?5 \
+       WHERE chat_id = ?1 AND id = ?2"
+      (fun stmt ->
+        ignore (bind_int stmt 1 chat_id);
+        ignore (bind_int stmt 2 task_id);
+        ignore (bind_text stmt 3 status);
+        ignore (bind_opt_float stmt 4 next_run_at);
+        ignore (bind_float stmt 5 (timestamp ()));
+        match step_expect_done t.db stmt with
+        | Error _ as err -> err
+        | Ok () -> Ok (Sqlite3.changes t.db > 0)))
 
 let get_due_scheduled_tasks t ~now ~limit =
-  with_statement t.db
-    "SELECT id, chat_id, prompt, schedule_type, schedule_value, next_run_at, status, created_at, updated_at, last_run_at \
-     FROM scheduled_tasks \
-     WHERE status = 'active' AND next_run_at IS NOT NULL AND next_run_at <= ?1 \
-     ORDER BY next_run_at ASC LIMIT ?2"
-    (fun stmt ->
-      ignore (bind_float stmt 1 now);
-      ignore (bind_int stmt 2 limit);
-      collect_scheduled_tasks stmt)
+  with_lock t (fun () ->
+    with_statement t.db
+      "SELECT id, chat_id, prompt, schedule_type, schedule_value, next_run_at, status, created_at, updated_at, last_run_at \
+       FROM scheduled_tasks \
+       WHERE status = 'active' AND next_run_at IS NOT NULL AND next_run_at <= ?1 \
+       ORDER BY next_run_at ASC LIMIT ?2"
+      (fun stmt ->
+        ignore (bind_float stmt 1 now);
+        ignore (bind_int stmt 2 limit);
+        collect_scheduled_tasks stmt))
 
 let insert_scheduled_task_run t ~task_id ~chat_id ~started_at ~finished_at ~success ~summary =
-  with_statement t.db
-    "INSERT INTO scheduled_task_runs \
-     (task_id, chat_id, started_at, finished_at, success, summary) \
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
-    (fun stmt ->
-      ignore (bind_int stmt 1 task_id);
-      ignore (bind_int stmt 2 chat_id);
-      ignore (bind_float stmt 3 started_at);
-      ignore (bind_float stmt 4 finished_at);
-      ignore (bind_int stmt 5 (if success then 1 else 0));
-      ignore (bind_text stmt 6 summary);
-      step_expect_done t.db stmt)
+  with_lock t (fun () ->
+    with_statement t.db
+      "INSERT INTO scheduled_task_runs \
+       (task_id, chat_id, started_at, finished_at, success, summary) \
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+      (fun stmt ->
+        ignore (bind_int stmt 1 task_id);
+        ignore (bind_int stmt 2 chat_id);
+        ignore (bind_float stmt 3 started_at);
+        ignore (bind_float stmt 4 finished_at);
+        ignore (bind_int stmt 5 (if success then 1 else 0));
+        ignore (bind_text stmt 6 summary);
+        step_expect_done t.db stmt))
 
 let update_scheduled_task_after_run t ~task_id ~next_run_at ~status ~last_run_at =
-  with_statement t.db
-    "UPDATE scheduled_tasks \
-     SET next_run_at = ?2, status = ?3, last_run_at = ?4, updated_at = ?5 \
-     WHERE id = ?1"
-    (fun stmt ->
-      ignore (bind_int stmt 1 task_id);
-      ignore (bind_opt_float stmt 2 next_run_at);
-      ignore (bind_text stmt 3 status);
-      ignore (bind_float stmt 4 last_run_at);
-      ignore (bind_float stmt 5 (timestamp ()));
-      step_expect_done t.db stmt)
+  with_lock t (fun () ->
+    with_statement t.db
+      "UPDATE scheduled_tasks \
+       SET next_run_at = ?2, status = ?3, last_run_at = ?4, updated_at = ?5 \
+       WHERE id = ?1"
+      (fun stmt ->
+        ignore (bind_int stmt 1 task_id);
+        ignore (bind_opt_float stmt 2 next_run_at);
+        ignore (bind_text stmt 3 status);
+        ignore (bind_float stmt 4 last_run_at);
+        ignore (bind_float stmt 5 (timestamp ()));
+        step_expect_done t.db stmt))
 
 let read_scheduled_task_run_row stmt =
   {
@@ -475,21 +529,25 @@ let read_scheduled_task_run_row stmt =
 
 let collect_scheduled_task_runs stmt =
   let rec loop acc =
-    match Sqlite3.step stmt with
-    | Rc.ROW -> loop (read_scheduled_task_run_row stmt :: acc)
-    | Rc.DONE -> Ok (List.rev acc)
-    | rc -> Error (Printf.sprintf "sqlite read scheduled task history failed: %s" (Rc.to_string rc))
+    try
+      match Sqlite3.step stmt with
+      | Rc.ROW -> loop (read_scheduled_task_run_row stmt :: acc)
+      | Rc.DONE -> Ok (List.rev acc)
+      | rc -> Error (Printf.sprintf "sqlite read scheduled task history failed: %s" (Rc.to_string rc))
+    with Sqlite3.SqliteError msg ->
+      Error (Printf.sprintf "sqlite read scheduled task history exception: %s" msg)
   in
   loop []
 
 let get_scheduled_task_history t ~chat_id ~task_id ~limit =
-  with_statement t.db
-    "SELECT id, task_id, chat_id, started_at, finished_at, success, summary \
-     FROM scheduled_task_runs \
-     WHERE chat_id = ?1 AND task_id = ?2 \
-     ORDER BY started_at DESC LIMIT ?3"
-    (fun stmt ->
-      ignore (bind_int stmt 1 chat_id);
-      ignore (bind_int stmt 2 task_id);
-      ignore (bind_int stmt 3 limit);
-      collect_scheduled_task_runs stmt)
+  with_lock t (fun () ->
+    with_statement t.db
+      "SELECT id, task_id, chat_id, started_at, finished_at, success, summary \
+       FROM scheduled_task_runs \
+       WHERE chat_id = ?1 AND task_id = ?2 \
+       ORDER BY started_at DESC LIMIT ?3"
+      (fun stmt ->
+        ignore (bind_int stmt 1 chat_id);
+        ignore (bind_int stmt 2 task_id);
+        ignore (bind_int stmt 3 limit);
+        collect_scheduled_task_runs stmt))

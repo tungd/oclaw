@@ -2,5 +2,5 @@
 
 type handle
 
-val start : Oclaw_config.Config.config -> handle option
+val start : Runtime.app_state -> handle option
 val stop : handle -> unit

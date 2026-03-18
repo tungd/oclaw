@@ -51,19 +51,12 @@ let run_task state (task : Db.scheduled_task) =
        ~last_run_at:finished_at);
   Log.info (fun m -> m "Scheduled task %d completed (success=%b)" task.Db.id success)
 
-let run_due_tasks config =
-  match Runtime.create_app_state config with
+let run_due_tasks state =
+  match Db.get_due_scheduled_tasks state.Runtime.db ~now:(Unix.gettimeofday ()) ~limit:8 with
   | Error err ->
-      Log.err (fun m -> m "Failed to create scheduler state: %s" err)
-  | Ok state ->
-      Fun.protect
-        ~finally:(fun () -> Db.close state.Runtime.db)
-        (fun () ->
-          match Db.get_due_scheduled_tasks state.Runtime.db ~now:(Unix.gettimeofday ()) ~limit:8 with
-          | Error err ->
-              Log.err (fun m -> m "Failed to query due scheduled tasks: %s" err)
-          | Ok tasks ->
-              List.iter (run_task state) tasks)
+      Log.err (fun m -> m "Failed to query due scheduled tasks: %s" err)
+  | Ok tasks ->
+      List.iter (run_task state) tasks
 
 let rec sleep_until_next_poll stop_flag seconds =
   if seconds <= 0. || Atomic.get stop_flag then ()
@@ -72,20 +65,20 @@ let rec sleep_until_next_poll stop_flag seconds =
     Unix.sleepf chunk;
     sleep_until_next_poll stop_flag (seconds -. chunk)
 
-let worker_loop config stop_flag =
+let worker_loop state stop_flag =
   Log.info (fun m ->
-      m "Scheduler worker started (poll_interval=%ds)" config.Oclaw_config.Config.scheduler_poll_interval_seconds);
+      m "Scheduler worker started (poll_interval=%ds)" state.Runtime.config.Oclaw_config.Config.scheduler_poll_interval_seconds);
   while not (Atomic.get stop_flag) do
-    run_due_tasks config;
-    sleep_until_next_poll stop_flag (float_of_int config.Oclaw_config.Config.scheduler_poll_interval_seconds)
+    run_due_tasks state;
+    sleep_until_next_poll stop_flag (float_of_int state.Runtime.config.Oclaw_config.Config.scheduler_poll_interval_seconds)
   done;
   Log.info (fun m -> m "Scheduler worker stopped")
 
-let start config =
-  if not config.Oclaw_config.Config.scheduler_enabled then None
+let start state =
+  if not state.Runtime.config.Oclaw_config.Config.scheduler_enabled then None
   else
     let stop_flag = Atomic.make false in
-    let domain = Domain.spawn (fun () -> worker_loop config stop_flag) in
+    let domain = Domain.spawn (fun () -> worker_loop state stop_flag) in
     Some { stop_flag; domain }
 
 let stop handle =

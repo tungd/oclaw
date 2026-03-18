@@ -714,9 +714,13 @@ let register_udfs db : (unit, string) result =
     create_fun2 db "cosine_similarity" cosine_similarity_udf;
     Log.info (fun m -> m "Registered vector search UDFs");
     Ok ()
-  with SqliteError msg ->
-    Log.err (fun m -> m "Failed to register UDFs: %s" msg);
-    Error msg
+  with
+  | Sqlite3.SqliteError msg ->
+      Log.err (fun m -> m "Failed to register UDFs: %s" msg);
+      Error msg
+  | exn ->
+      Log.err (fun m -> m "Failed to register UDFs: %s" (Printexc.to_string exn));
+      Error (Printexc.to_string exn)
 
 let init_schema db =
   let queries =
@@ -739,10 +743,13 @@ let init_schema db =
   in
   List.iter
     (fun sql ->
-      match Sqlite3.exec db sql with
-      | Sqlite3.Rc.OK -> ()
-      | Sqlite3.Rc.ERROR -> Log.err (fun m -> m "Schema error: %s" (Sqlite3.errmsg db))
-      | _ -> ())
+      try
+        match Sqlite3.exec db sql with
+        | Sqlite3.Rc.OK -> ()
+        | Sqlite3.Rc.ERROR -> Log.err (fun m -> m "Schema error: %s" (Sqlite3.errmsg db))
+        | rc -> Log.err (fun m -> m "Schema error (%s): %s" (Rc.to_string rc) (Sqlite3.errmsg db))
+      with Sqlite3.SqliteError msg ->
+        Log.err (fun m -> m "Schema exception: %s" msg))
     queries
 
 let configured_model_dir () =
@@ -819,26 +826,26 @@ let store_embedding db ~chat_id ~memory_id text : (unit, string) result =
         "INSERT INTO embeddings (chat_id, memory_id, text_content, embedding, dimensions, model_name) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
       in
-      let stmt = Sqlite3.prepare db sql in
-      bind_all stmt
-        [|
-          Data.INT (Int64.of_int chat_id);
-          Data.INT (Int64.of_int memory_id);
-          Data.TEXT text;
-          Data.TEXT embedding_json;
-          Data.INT (Int64.of_int encoder.dimensions);
-          Data.TEXT encoder.model_name;
-        |];
-      begin
-        match Sqlite3.step stmt with
-        | Rc.DONE | Rc.ROW ->
-            finalize_ignore stmt;
-            Ok ()
-        | rc ->
-            let msg = Printf.sprintf "sqlite step failed (%s): %s" (Rc.to_string rc) (Sqlite3.errmsg db) in
-            finalize_ignore stmt;
-            Error msg
-      end
+      try
+        let stmt = Sqlite3.prepare db sql in
+        Fun.protect
+          ~finally:(fun () -> ignore (Sqlite3.finalize stmt))
+          (fun () ->
+            bind_all stmt
+              [|
+                Data.INT (Int64.of_int chat_id);
+                Data.INT (Int64.of_int memory_id);
+                Data.TEXT text;
+                Data.TEXT embedding_json;
+                Data.INT (Int64.of_int encoder.dimensions);
+                Data.TEXT encoder.model_name;
+              |];
+            match Sqlite3.step stmt with
+            | Rc.DONE | Rc.ROW -> Ok ()
+            | rc ->
+                Error (Printf.sprintf "sqlite step failed (%s): %s" (Rc.to_string rc) (Sqlite3.errmsg db)))
+      with Sqlite3.SqliteError msg ->
+        Error (Printf.sprintf "sqlite store_embedding exception: %s" msg)
 
 let search_similar db ~chat_id query_text ~limit ~threshold : (search_result list, string) result =
   match generate_embedding query_text with
@@ -852,49 +859,53 @@ let search_similar db ~chat_id query_text ~limit ~threshold : (search_result lis
          ORDER BY similarity DESC \
          LIMIT ?3"
       in
-      let stmt = Sqlite3.prepare db sql in
-      bind_all stmt
-        [|
-          Data.INT (Int64.of_int chat_id);
-          Data.TEXT query_json;
-          Data.INT (Int64.of_int limit);
-        |];
-      let int_column stmt index =
-        match Sqlite3.column stmt index with
-        | Data.INT value -> Int64.to_int value
-        | _ -> 0
-      in
-      let text_column stmt index =
-        match Sqlite3.column stmt index with
-        | Data.TEXT value -> value
-        | _ -> ""
-      in
-      let float_column stmt index =
-        match Sqlite3.column stmt index with
-        | Data.FLOAT value -> value
-        | Data.INT value -> Int64.to_float value
-        | _ -> 0.0
-      in
-      let rec collect acc =
-        match Sqlite3.step stmt with
-        | Rc.ROW ->
-            let id = int_column stmt 0 in
-            let memory_id = int_column stmt 1 in
-            let text = text_column stmt 2 in
-            let similarity = float_column stmt 3 in
-            let acc =
-              if similarity >= threshold then
-                (id, memory_id, text, similarity) :: acc
-              else
-                acc
+      try
+        let stmt = Sqlite3.prepare db sql in
+        Fun.protect
+          ~finally:(fun () -> ignore (Sqlite3.finalize stmt))
+          (fun () ->
+            bind_all stmt
+              [|
+                Data.INT (Int64.of_int chat_id);
+                Data.TEXT query_json;
+                Data.INT (Int64.of_int limit);
+              |];
+            let int_column stmt index =
+              match Sqlite3.column stmt index with
+              | Data.INT value -> Int64.to_int value
+              | _ -> 0
             in
-            collect acc
-        | Rc.DONE -> List.rev acc
-        | _ -> List.rev acc
-      in
-      let results = collect [] in
-      finalize_ignore stmt;
-      Ok results
+            let text_column stmt index =
+              match Sqlite3.column stmt index with
+              | Data.TEXT value -> value
+              | _ -> ""
+            in
+            let float_column stmt index =
+              match Sqlite3.column stmt index with
+              | Data.FLOAT value -> value
+              | Data.INT value -> Int64.to_float value
+              | _ -> 0.0
+            in
+            let rec collect acc =
+              match Sqlite3.step stmt with
+              | Rc.ROW ->
+                  let id = int_column stmt 0 in
+                  let memory_id = int_column stmt 1 in
+                  let text = text_column stmt 2 in
+                  let similarity = float_column stmt 3 in
+                  let acc =
+                    if similarity >= threshold then
+                      (id, memory_id, text, similarity) :: acc
+                    else
+                      acc
+                  in
+                  collect acc
+              | Rc.DONE -> Ok (List.rev acc)
+              | rc -> Error (Printf.sprintf "sqlite search step failed (%s)" (Rc.to_string rc))
+            in
+            collect [])
+      with Sqlite3.SqliteError msg ->
+        Error (Printf.sprintf "sqlite search_similar exception: %s" msg)
 
 let batch_embed_memories db ~chat_id memories : (unit, string) result =
   let rec process = function
@@ -913,53 +924,55 @@ let get_stats db ~chat_id : (stats, string) result =
     "SELECT COUNT(*), AVG(LENGTH(embedding)), MIN(created_at), MAX(created_at) \
      FROM embeddings WHERE chat_id = ?1"
   in
-  let stmt = Sqlite3.prepare db sql in
-  bind_all stmt [| Data.INT (Int64.of_int chat_id) |];
-  begin
-    match Sqlite3.step stmt with
-    | Rc.ROW ->
-        let count =
-          match Sqlite3.column stmt 0 with
-          | Data.INT value -> Int64.to_int value
-          | _ -> 0
-        in
-        let avg_size =
-          match Sqlite3.column stmt 1 with
-          | Data.FLOAT value -> value
-          | Data.INT value -> Int64.to_float value
-          | _ -> 0.0
-        in
-        let opt_float index =
-          match Sqlite3.column stmt index with
-          | Data.FLOAT value -> Some value
-          | Data.INT value -> Some (Int64.to_float value)
-          | _ -> None
-        in
-        let created_min = opt_float 2 in
-        let created_max = opt_float 3 in
-        finalize_ignore stmt;
-        Ok { count; avg_size; created_min; created_max }
-    | _ ->
-        finalize_ignore stmt;
-        Ok { count = 0; avg_size = 0.0; created_min = None; created_max = None }
-  end
+  try
+    let stmt = Sqlite3.prepare db sql in
+    Fun.protect
+      ~finally:(fun () -> ignore (Sqlite3.finalize stmt))
+      (fun () ->
+        bind_all stmt [| Data.INT (Int64.of_int chat_id) |];
+        match Sqlite3.step stmt with
+        | Rc.ROW ->
+            let count =
+              match Sqlite3.column stmt 0 with
+              | Data.INT value -> Int64.to_int value
+              | _ -> 0
+            in
+            let avg_size =
+              match Sqlite3.column stmt 1 with
+              | Data.FLOAT value -> value
+              | Data.INT value -> Int64.to_float value
+              | _ -> 0.0
+            in
+            let opt_float index =
+              match Sqlite3.column stmt index with
+              | Data.FLOAT value -> Some value
+              | Data.INT value -> Some (Int64.to_float value)
+              | _ -> None
+            in
+            let created_min = opt_float 2 in
+            let created_max = opt_float 3 in
+            Ok { count; avg_size; created_min; created_max }
+        | _ ->
+            Ok { count = 0; avg_size = 0.0; created_min = None; created_max = None })
+  with Sqlite3.SqliteError msg ->
+    Error (Printf.sprintf "sqlite get_stats exception: %s" msg)
 
 let cleanup_old db ~chat_id ~before_timestamp : (int, string) result =
   let sql = "DELETE FROM embeddings WHERE chat_id = ?1 AND created_at < ?2" in
-  let stmt = Sqlite3.prepare db sql in
-  bind_all stmt
-    [|
-      Data.INT (Int64.of_int chat_id);
-      Data.FLOAT before_timestamp;
-    |];
-  begin
-    match Sqlite3.step stmt with
-    | Rc.DONE ->
-        let changes = Sqlite3.changes db in
-        finalize_ignore stmt;
-        Ok changes
-    | rc ->
-        let msg = Printf.sprintf "sqlite step failed (%s): %s" (Rc.to_string rc) (Sqlite3.errmsg db) in
-        finalize_ignore stmt;
-        Error msg
-  end
+  try
+    let stmt = Sqlite3.prepare db sql in
+    Fun.protect
+      ~finally:(fun () -> ignore (Sqlite3.finalize stmt))
+      (fun () ->
+        bind_all stmt
+          [|
+            Data.INT (Int64.of_int chat_id);
+            Data.FLOAT before_timestamp;
+          |];
+        match Sqlite3.step stmt with
+        | Rc.DONE ->
+            Ok (Sqlite3.changes db)
+        | rc ->
+            Error (Printf.sprintf "sqlite cleanup step failed (%s): %s" (Rc.to_string rc) (Sqlite3.errmsg db)))
+  with Sqlite3.SqliteError msg ->
+    Error (Printf.sprintf "sqlite cleanup_old exception: %s" msg)
