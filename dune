@@ -33,7 +33,7 @@
 (library
  (name vector_search)
  (modules vector_search)
- (libraries sqlite3 unix yojson logs)
+ (libraries caisar-onnx ocaml-protoc-plugin sqlite3 unix yojson logs)
  (flags :standard -w -A))
 
 (library
@@ -143,6 +143,12 @@
  (modules test_config)
  (libraries oclaw_config llm_provider)
  (preprocess (pps ppx_deriving.show))
+ (flags :standard -w -A))
+
+(executable
+ (name test_vector_search)
+ (modules test_vector_search)
+ (libraries caisar-onnx ocaml-protoc-plugin sqlite3 vector_search)
  (flags :standard -w -A))
 
 (executable

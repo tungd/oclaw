@@ -10,8 +10,6 @@ type cli_overrides = {
   mutable model : string option;
   mutable api_key : string option;
   mutable api_base : string option;
-  mutable temperature : float option;
-  mutable max_tokens : int option;
   mutable timeout : int option;
   mutable data_dir : string option;
   mutable skills_dir : string option;
@@ -31,8 +29,6 @@ let default_overrides () =
     model = None;
     api_key = None;
     api_base = None;
-    temperature = None;
-    max_tokens = None;
     timeout = None;
     data_dir = None;
     skills_dir = None;
@@ -60,8 +56,6 @@ let apply_cli_overrides (config : Config.config) (overrides : cli_overrides) =
     llm_model = Option.value ~default:config.llm_model overrides.model;
     llm_api_key = Option.value ~default:config.llm_api_key overrides.api_key;
     llm_api_base = Option.value ~default:config.llm_api_base overrides.api_base;
-    llm_temperature = Option.value ~default:config.llm_temperature overrides.temperature;
-    llm_max_tokens = Option.value ~default:config.llm_max_tokens overrides.max_tokens;
     llm_timeout = Option.value ~default:config.llm_timeout overrides.timeout;
     data_dir = Option.value ~default:config.data_dir overrides.data_dir;
     skills_dir = Option.value ~default:config.skills_dir overrides.skills_dir;
@@ -185,8 +179,6 @@ let () =
     ("--model", Arg.String (fun value -> overrides.model <- Some value), "Override the model name");
     ("--api-key", Arg.String (fun value -> overrides.api_key <- Some value), "Override the API key");
     ("--api-base", Arg.String (fun value -> overrides.api_base <- Some value), "Override the API base URL");
-    ("--temperature", Arg.Float (fun value -> overrides.temperature <- Some value), "Override sampling temperature");
-    ("--max-tokens", Arg.Int (fun value -> overrides.max_tokens <- Some value), "Override max completion tokens");
     ("--timeout", Arg.Int (fun value -> overrides.timeout <- Some value), "Override HTTP timeout in seconds");
     ("--data-dir", Arg.String (fun value -> overrides.data_dir <- Some value), "Set the runtime data root (default: workspace)");
     ("--skills-dir", Arg.String (fun value -> overrides.skills_dir <- Some value), "Override the skills directory");

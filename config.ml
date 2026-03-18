@@ -6,8 +6,6 @@ module Yaml = Protocol_conv_yaml.Yaml
 type config = {
   llm_provider : string [@default "dashscope"];
   llm_model : string [@default "qwen3.5-plus"];
-  llm_temperature : float [@default 0.7];
-  llm_max_tokens : int [@default 4096];
   llm_api_key : string [@default ""];
   llm_api_base : string [@default "https://coding-intl.dashscope.aliyuncs.com/v1"];
   llm_timeout : int [@default 60];
@@ -107,8 +105,6 @@ let apply_env_overrides config =
     config with
     llm_provider = env_string "OCLAW_LLM_PROVIDER" config.llm_provider;
     llm_model = env_string "OCLAW_MODEL" config.llm_model;
-    llm_temperature = env_float "OCLAW_TEMPERATURE" config.llm_temperature;
-    llm_max_tokens = env_int "OCLAW_MAX_TOKENS" config.llm_max_tokens;
     llm_api_key = env_string "OCLAW_API_KEY" config.llm_api_key;
     llm_api_base = env_string "OCLAW_API_BASE" config.llm_api_base;
     llm_timeout = env_int "OCLAW_TIMEOUT" config.llm_timeout;
@@ -148,14 +144,14 @@ let to_llm_provider_config config =
     input_types = [ "text" ];
     cost = (0.0, 0.0, 0.0, 0.0);
     context_window = 1000000;
-    max_tokens = config.llm_max_tokens;
+    max_tokens = 4096;  (* Use sensible default, not user-configurable *)
   } in
   Llm_provider.{
     api_base = config.llm_api_base;
     api_key = config.llm_api_key;
     model;
-    temperature = config.llm_temperature;
-    max_tokens = config.llm_max_tokens;
+    temperature = 0.7;  (* Use sensible default, not user-configurable *)
+    max_tokens = 4096;
     timeout = config.llm_timeout;
   }
 
@@ -165,8 +161,6 @@ let validate_config config =
     errors := "LLM API key is required. Set llm_api_key or OCLAW_API_KEY." :: !errors;
   if config.llm_timeout <= 0 then
     errors := "LLM timeout must be positive" :: !errors;
-  if config.llm_max_tokens <= 0 then
-    errors := "LLM max_tokens must be positive" :: !errors;
   if config.max_history_messages <= 0 then
     errors := "max_history_messages must be positive" :: !errors;
   if config.max_tool_iterations <= 0 then

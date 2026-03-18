@@ -7,7 +7,7 @@ OClaw is a CLI-first OCaml assistant with a rayclaw-style internal runtime:
 - one agent loop: structured messages, tool calls, persistent sessions, and file-backed memory
 - one default deployment shape: local CLI, with adapter-ready runtime seams for future channels
 
-External channels, schedulers, ACP/MCP, and embeddings are not shipped in this repo, but the runtime is structured so they can be added without another architectural rewrite.
+External channels, schedulers, and ACP/MCP are not shipped in this repo, but the runtime is structured so they can be added without another architectural rewrite.
 
 ## Usage
 
@@ -59,11 +59,10 @@ Useful environment variables:
 - `OCLAW_API_KEY`
 - `OCLAW_API_BASE`
 - `OCLAW_MODEL`
-- `OCLAW_TEMPERATURE`
-- `OCLAW_MAX_TOKENS`
 - `OCLAW_TIMEOUT`
 - `OCLAW_DATA_DIR`
 - `OCLAW_SKILLS_DIR`
+- `OCLAW_EMBEDDING_MODEL_DIR`
 - `OCLAW_MAX_HISTORY_MESSAGES`
 - `OCLAW_MAX_TOOL_ITERATIONS`
 - `OCLAW_WORKSPACE`
@@ -85,8 +84,6 @@ Useful CLI flags:
 - `--model`
 - `--api-key`
 - `--api-base`
-- `--temperature`
-- `--max-tokens`
 - `--timeout`
 - `--data-dir`
 - `--skills-dir`
@@ -118,6 +115,22 @@ Runtime state lives under `workspace/runtime/` by default:
 - scheduled tasks and run history: stored in SQLite by `chat_id`
 
 Local skills live under `workspace/skills/`.
+
+## Local Embeddings
+
+Vector search now uses a local model bundle instead of the placeholder hash embedder. Point OClaw at a bundle with:
+
+- `model.onnx`
+- `vocab.txt` or `tokenizer.json`
+- optional `tokenizer_config.json` / `config.json`
+
+Set the model bundle path with:
+
+```bash
+export OCLAW_EMBEDDING_MODEL_DIR=/absolute/path/to/bge-small-en-v1.5
+```
+
+The current local backend loads tokenizer assets plus the ONNX embedding initializers and produces normalized sentence vectors for SQLite-backed similarity search.
 
 ## Built-In Tools
 
@@ -154,4 +167,5 @@ dune exec ./test_assistant_runtime.exe
 _build/default/test_llm_provider.exe
 _build/default/test_config.exe
 _build/default/test_schedule_spec.exe
+_build/default/test_vector_search.exe
 ```

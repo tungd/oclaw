@@ -332,7 +332,7 @@ let process ?on_text_delta state ~chat_id prompt =
         
         (* Calculate current token usage *)
         let current_tokens = count_messages_tokens all_messages in
-        let context_limit = state.Runtime.config.llm_max_tokens + 10000 in  (* Rough estimate *)
+        let context_limit = state.Runtime.provider_config.max_tokens + 10000 in
         let context_window = 1000000 in  (* Model's full context window *)
         
         (* Check if we're approaching limits *)

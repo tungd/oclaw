@@ -9,6 +9,7 @@
   (dune (>= 3.15))
   domainslib
   sqlite3
+  caisar-onnx
   (h1 (>= 1.0.0))
   (iomux (>= 0.3.0))
   (ppx_protocol_conv (>= 5.2.3))
