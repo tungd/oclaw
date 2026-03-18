@@ -1,6 +1,6 @@
 # OClaw
 
-OClaw is a CLI-first OCaml assistant with a rayclaw-style internal runtime:
+OClaw is a CLI-first OCaml assistant with a structured, tool-first runtime:
 
 - one binary: `oclaw`
 - two runtime modes: REPL and single-shot
@@ -134,7 +134,7 @@ The current local backend loads tokenizer assets plus the ONNX embedding initial
 
 ## Built-In Tools
 
-The default registry is rayclaw-style and CLI-focused:
+The default tool registry is CLI-focused with structured input/output:
 
 - `bash`
 - `read_file`
@@ -162,10 +162,12 @@ The default registry is rayclaw-style and CLI-focused:
 
 ```bash
 dune build
-_build/default/test_tools_registry.exe
+
+# Run individual test suites
+dune exec ./test_config.exe
+dune exec ./test_http_client.exe
+dune exec ./test_tools_registry.exe
+dune exec ./test_llm_provider.exe
+dune exec ./test_schedule_spec.exe
 dune exec ./test_assistant_runtime.exe
-_build/default/test_llm_provider.exe
-_build/default/test_config.exe
-_build/default/test_schedule_spec.exe
-_build/default/test_vector_search.exe
 ```

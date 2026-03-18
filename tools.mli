@@ -1,4 +1,4 @@
-(** Registry-driven CLI tool layer inspired by rayclaw. *)
+(** Registry-driven CLI tool layer with sandbox support. *)
 
 type sandbox_config = {
   workspace_root : string;

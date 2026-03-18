@@ -1,4 +1,4 @@
-(** LLM provider for structured rayclaw-style messages on top of OpenAI-compatible APIs. *)
+(** LLM provider for structured tool-use messages on top of OpenAI-compatible APIs. *)
 
 type llm_model = {
   id : string;

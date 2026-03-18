@@ -1,4 +1,4 @@
-(** Structured LLM message and tool types inspired by rayclaw. *)
+(** Structured LLM message and tool types for agent workflows. *)
 
 type tool_definition = {
   name : string;

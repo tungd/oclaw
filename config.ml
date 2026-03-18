@@ -1,18 +1,39 @@
-(** YAML-backed configuration for the CLI-first assistant. *)
+(** YAML-backed configuration for the CLI-first assistant.
+    
+    Configuration is organized into logical groups:
+    - LLM: model, API key, base URL, timeout
+    - Data: directories for runtime state, skills, workspace
+    - Agent: history limits, tool iteration limits
+    - Tools: sandbox paths, exec timeouts, deny patterns
+    - Web: fetch timeouts, byte limits, search results
+    - Scheduler: enable/disable, poll interval
+    - Debug: logging level
+*)
 
 module Yaml_lib = Yaml
 module Yaml = Protocol_conv_yaml.Yaml
 
+(* ============================================================================
+   Configuration Type
+   ============================================================================ *)
+
 type config = {
+  (* LLM Settings *)
   llm_provider : string [@default "dashscope"];
   llm_model : string [@default "qwen3.5-plus"];
   llm_api_key : string [@default ""];
   llm_api_base : string [@default "https://coding-intl.dashscope.aliyuncs.com/v1"];
   llm_timeout : int [@default 60];
+  
+  (* Data Directories *)
   data_dir : string [@default "workspace"];
   skills_dir : string [@default ""];
+  
+  (* Agent Limits *)
   max_history_messages : int [@default 24];
   max_tool_iterations : int [@default 256];
+  
+  (* Tool Sandbox *)
   tools_workspace : string [@default "."];
   tools_restrict_to_workspace : bool [@default true];
   tools_allow_read_paths : string list [@default []];
@@ -21,11 +42,17 @@ type config = {
   tools_exec_enable_deny_patterns : bool [@default true];
   tools_exec_custom_deny_patterns : string list [@default []];
   tools_exec_custom_allow_patterns : string list [@default []];
+  
+  (* Web Tools *)
   web_request_timeout_seconds : int [@default 20];
   web_fetch_max_bytes : int [@default 20000];
   web_search_max_results : int [@default 5];
+  
+  (* Scheduler *)
   scheduler_enabled : bool [@default true];
   scheduler_poll_interval_seconds : int [@default 30];
+  
+  (* Debug *)
   debug : bool [@default false];
 }
 [@@deriving protocol ~driver:(module Yaml)]
@@ -100,18 +127,31 @@ let env_paths name current =
       String.split_on_char ':' value |> List.filter (fun path -> String.trim path <> "")
   | _ -> current
 
+(* ============================================================================
+   Environment Variable Overrides
+   Common: OCLAW_API_KEY, OCLAW_MODEL, OCLAW_TIMEOUT
+   Advanced: tool paths, web limits, scheduler settings
+   ============================================================================ *)
+
 let apply_env_overrides config =
   {
     config with
+    (* LLM *)
     llm_provider = env_string "OCLAW_LLM_PROVIDER" config.llm_provider;
     llm_model = env_string "OCLAW_MODEL" config.llm_model;
     llm_api_key = env_string "OCLAW_API_KEY" config.llm_api_key;
     llm_api_base = env_string "OCLAW_API_BASE" config.llm_api_base;
     llm_timeout = env_int "OCLAW_TIMEOUT" config.llm_timeout;
+    
+    (* Data *)
     data_dir = env_string "OCLAW_DATA_DIR" config.data_dir;
     skills_dir = env_string "OCLAW_SKILLS_DIR" config.skills_dir;
+    
+    (* Agent *)
     max_history_messages = env_int "OCLAW_MAX_HISTORY_MESSAGES" config.max_history_messages;
     max_tool_iterations = env_int "OCLAW_MAX_TOOL_ITERATIONS" config.max_tool_iterations;
+    
+    (* Tools *)
     tools_workspace = env_string "OCLAW_WORKSPACE" config.tools_workspace;
     tools_restrict_to_workspace = env_bool "OCLAW_RESTRICT_TO_WORKSPACE" config.tools_restrict_to_workspace;
     tools_allow_read_paths = env_paths "OCLAW_ALLOW_READ_PATHS" config.tools_allow_read_paths;
@@ -123,16 +163,22 @@ let apply_env_overrides config =
       env_paths "OCLAW_EXEC_CUSTOM_DENY_PATTERNS" config.tools_exec_custom_deny_patterns;
     tools_exec_custom_allow_patterns =
       env_paths "OCLAW_EXEC_CUSTOM_ALLOW_PATTERNS" config.tools_exec_custom_allow_patterns;
+    
+    (* Web *)
     web_request_timeout_seconds =
       env_int "OCLAW_WEB_REQUEST_TIMEOUT" config.web_request_timeout_seconds;
     web_fetch_max_bytes =
       env_int "OCLAW_WEB_FETCH_MAX_BYTES" config.web_fetch_max_bytes;
     web_search_max_results =
       env_int "OCLAW_WEB_SEARCH_MAX_RESULTS" config.web_search_max_results;
+    
+    (* Scheduler *)
     scheduler_enabled =
       env_bool "OCLAW_SCHEDULER_ENABLED" config.scheduler_enabled;
     scheduler_poll_interval_seconds =
       env_int "OCLAW_SCHEDULER_POLL_INTERVAL" config.scheduler_poll_interval_seconds;
+    
+    (* Debug *)
     debug = env_bool "OCLAW_DEBUG" config.debug;
   }
 
