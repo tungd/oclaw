@@ -1,0 +1,8 @@
+(lang dune 3.0)
+(name oclaw_libs)
+(package
+ (name matrix_iomux)
+ (synopsis "Matrix terminal runtime with iomux/Domainslib"))
+(package
+ (name oclaw_acp)
+ (synopsis "Agent Client Protocol (ACP) types and stdio frontend for OClaw"))

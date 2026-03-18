@@ -99,12 +99,18 @@
  (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))
 
+(library
+ (name tui)
+ (modules tui)
+ (libraries agent_engine logs mosaic domainslib oclaw_acp runtime unix yojson)
+ (preprocess (pps ppx_deriving.show))
+ (flags :standard -w -A))
+
 (executable
  (name oclaw)
  (modules oclaw)
  (libraries
   agent_engine
-  llm_provider
   linenoise
   log_color
   logs
@@ -113,6 +119,9 @@
   runtime
   scheduler
   tools
+  tui
+  mosaic
+  oclaw_acp
   unix)
  (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))

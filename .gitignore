@@ -1,3 +1,5 @@
 /_build/
 /config.yaml
 /.envrc
+/lib/_build/
+/workspace/runtime/

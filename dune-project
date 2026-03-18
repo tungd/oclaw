@@ -15,4 +15,6 @@
   (ppx_protocol_conv (>= 5.2.3))
   (ppx_protocol_conv_json (>= 5.2.3))
   (ppx_protocol_conv_yaml (>= 5.2.3))
-  yaml))
+  yaml
+  domainslib
+  mosaic))

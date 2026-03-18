@@ -172,10 +172,46 @@ let run_repl state chat_id persistent =
       in
       loop ())
 
+let run_tui state chat_id persistent =
+  Tui.run ~state ~chat_id ~persistent;
+  0
+
+let run_acp state chat_id persistent =
+  let frontend = Oclaw_acp.Stdio_frontend.create () in
+  let rec loop () =
+    match Oclaw_acp.Stdio_frontend.recv frontend with
+    | None -> loop ()
+    | Some msg ->
+        (match Oclaw_acp.Message.of_json_rpc msg with
+         | Some (Oclaw_acp.Message.Initialize _) ->
+             let id = match msg with Oclaw_acp.Json_rpc.Request r -> r.id | _ -> `Null in
+             Oclaw_acp.Stdio_frontend.send frontend (Oclaw_acp.Message.to_json_rpc ~id Oclaw_acp.Message.Initialized);
+             loop ()
+         | Some (Oclaw_acp.Message.Agent_message { content; _ }) ->
+             let id = match msg with Oclaw_acp.Json_rpc.Request r -> r.id | _ -> `Null in
+             let on_text_delta delta =
+               Oclaw_acp.Stdio_frontend.send frontend (Oclaw_acp.Message.to_json_rpc ~id:`Null (Oclaw_acp.Message.Agent_delta { content = delta }))
+             in
+             (match Agent_engine.process ~on_text_delta state ~chat_id ~persistent content with
+              | Ok response ->
+                  Oclaw_acp.Stdio_frontend.send frontend (Oclaw_acp.Message.to_json_rpc ~id (Oclaw_acp.Message.Agent_message { content = response; chat_id = Some chat_id }));
+                  Oclaw_acp.Stdio_frontend.send frontend (Oclaw_acp.Message.to_json_rpc ~id:`Null Oclaw_acp.Message.Done)
+              | Error err ->
+                  Oclaw_acp.Stdio_frontend.send frontend (Oclaw_acp.Message.to_json_rpc ~id (Oclaw_acp.Message.Error { message = err; code = 0 })))
+             ; loop ()
+         | _ -> loop ())
+  in
+  loop ();
+  0
+
 let () =
   let overrides = default_overrides () in
+  let use_tui = ref false in
+  let use_acp = ref false in
   let prompt_parts = ref [] in
   let spec = [
+    ("--tui", Arg.Set use_tui, "Run with TUI interface");
+    ("--acp", Arg.Set use_acp, "Run in ACP JSON-RPC mode via stdio");
     ("--single-shot", Arg.Unit (fun () -> overrides.single_shot <- true), "Run one prompt and exit");
     ("--persistent", Arg.Unit (fun () -> overrides.persistent <- true), "Enable persistent chat history/memory");
     ("--chat-id", Arg.Int (fun value -> overrides.chat_id <- value), "Use this persistent chat/session id (default: 1)");
@@ -226,7 +262,11 @@ let () =
         | Ok state ->
             let positional_prompt = String.concat " " !prompt_parts in
             let exit_code =
-              if overrides.single_shot || positional_prompt <> "" then
+              if !use_tui then
+                run_tui state overrides.chat_id overrides.persistent
+              else if !use_acp then
+                run_acp state overrides.chat_id overrides.persistent
+              else if overrides.single_shot || positional_prompt <> "" then
                 let prompt =
                   if positional_prompt <> "" then positional_prompt
                   else read_stdin ()
