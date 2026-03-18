@@ -1,4 +1,4 @@
-(** Agent Client Protocol (ACP) for OClaw.
+(** Agent Client Protocol (ACP) for OClaw using jsonrpc library.
 
     This implementation follows the Agent Client Protocol (ACP) specification,
     which is built on JSON-RPC 2.0 and re-uses Model Context Protocol (MCP)
@@ -6,44 +6,10 @@
 
     {1:jsonrpc JSON-RPC 2.0}
 
-    All messages follow the JSON-RPC 2.0 specification.
+    All messages follow the JSON-RPC 2.0 specification using the jsonrpc library.
 *)
 
 open Yojson.Safe
-
-module Json_rpc : sig
-  type id = [ `Int of int | `String of string | `Null ]
-
-  type request = {
-    id : id;
-    method_name : string;
-    params : Yojson.Safe.t;
-  }
-
-  type response = {
-    id : id;
-    result : (Yojson.Safe.t, error) result;
-  }
-
-  and error = {
-    code : int;
-    message : string;
-    data : Yojson.Safe.t option;
-  }
-
-  type notification = {
-    method_name : string;
-    params : Yojson.Safe.t;
-  }
-
-  type message =
-    | Request of request
-    | Response of response
-    | Notification of notification
-
-  val to_yojson : message -> Yojson.Safe.t
-  val of_yojson : Yojson.Safe.t -> message option
-end
 
 (** {1:acp_messages ACP Message Types} *)
 
@@ -73,8 +39,8 @@ module Message : sig
     | Error of { message : string; code : int }
     | Done
 
-  val to_json_rpc : id:Json_rpc.id -> t -> Json_rpc.message
-  val of_json_rpc : Json_rpc.message -> t option
+  val to_jsonrpc : ?id:Jsonrpc.Id.t -> t -> Jsonrpc.Packet.t
+  val of_jsonrpc_packet : Jsonrpc.Packet.t -> t option
 end
 
 (** {1:channels Thread-safe Channels} *)
@@ -97,8 +63,8 @@ module Stdio_frontend : sig
   }
   type t
   val create : ?config:config -> unit -> t
-  val send : t -> Json_rpc.message -> unit
-  val recv : t -> Json_rpc.message option
-  val recv_timeout : t -> float -> Json_rpc.message option
+  val send : t -> Jsonrpc.Packet.t -> unit
+  val recv : t -> Jsonrpc.Packet.t option
+  val recv_timeout : t -> float -> Jsonrpc.Packet.t option
   val close : t -> unit
 end

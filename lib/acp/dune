@@ -1,6 +1,5 @@
 (library
  (public_name oclaw_acp)
  (name oclaw_acp)
- (libraries yojson unix)
- (preprocess (pps ppx_deriving.show))
+ (libraries jsonrpc yojson unix logs)
  (flags :standard -w -A))

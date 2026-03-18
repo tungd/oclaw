@@ -1,7 +1,8 @@
 (library
  (name llm_types)
  (modules llm_types)
- (libraries yojson)
+ (libraries ppx_protocol_conv_json)
+ (preprocess (pps ppx_protocol_conv))
  (flags :standard -w -A))
 
 (library
@@ -14,14 +15,12 @@
  (name http_client)
  (modules http_client)
  (libraries curl iomux yojson logs)
- (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))
 
 (library
  (name llm_provider)
  (modules llm_provider)
  (libraries http_client curl iomux llm_types yojson logs)
- (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))
 
 (library
@@ -59,7 +58,6 @@
  (name tools)
  (modules tools)
  (libraries db http_client llm_types memory schedule_spec skills str unix yojson)
- (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))
 
 (library
@@ -90,14 +88,12 @@
  (name assistant_runtime)
  (modules assistant_runtime)
  (libraries agent_engine db llm_provider llm_types oclaw_config runtime yojson)
- (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))
 
 (library
  (name tui)
  (modules tui)
  (libraries agent_engine logs mosaic domainslib oclaw_acp runtime unix yojson)
- (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))
 
 (executable
@@ -116,41 +112,36 @@
   tui
   mosaic
   oclaw_acp
+  jsonrpc
   unix)
- (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))
 
 (executable
  (name test_tools_registry)
  (modules test_tools_registry)
  (libraries db tools yojson unix)
- (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))
 
 (executable
  (name test_assistant_runtime)
  (modules test_assistant_runtime)
  (libraries agent_engine db llm_provider llm_types memory oclaw_config runtime skills tools unix yojson)
- (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))
 
 (executable
  (name test_llm_provider)
  (modules test_llm_provider)
  (libraries llm_provider llm_types yojson)
- (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))
 
 (executable
  (name test_config)
  (modules test_config)
  (libraries oclaw_config llm_provider)
- (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))
 
 (executable
  (name test_schedule_spec)
  (modules test_schedule_spec)
  (libraries schedule_spec unix)
- (preprocess (pps ppx_deriving.show))
  (flags :standard -w -A))

@@ -11,6 +11,7 @@
   sqlite3
   (h1 (>= 1.0.0))
   (iomux (>= 0.3.0))
+  (jsonrpc (>= 0.21.0))
   (ppx_protocol_conv (>= 5.2.3))
   (ppx_protocol_conv_json (>= 5.2.3))
   (ppx_protocol_conv_yaml (>= 5.2.3))
