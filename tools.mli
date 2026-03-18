@@ -1,11 +1,5 @@
 (** Minimal CLI tools: read_file, write_file, edit_file, bash. No sandbox restrictions. *)
 
-type web_config = {
-  request_timeout_seconds : int;
-  fetch_max_bytes : int;
-  search_max_results : int;
-}
-
 type tool_result = {
   content : string;
   is_error : bool;

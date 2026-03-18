@@ -6,7 +6,6 @@ type cli_options = {
   single_shot : bool;
   persistent : bool;
   chat_id : int;
-  use_tui : bool;
   use_acp : bool;
   debug : bool;
   prompt_parts : string list;
@@ -18,7 +17,6 @@ let default_options () =
     single_shot = false;
     persistent = false;
     chat_id = 1;
-    use_tui = false;
     use_acp = false;
     debug = false;
     prompt_parts = [];
@@ -53,53 +51,6 @@ let run_single_shot state chat_id persistent prompt =
       if !streamed then print_newline ();
       prerr_endline ("OClaw error: " ^ err);
       1
-
-let run_repl state chat_id persistent =
-  let scheduler_handle = Scheduler.start state in
-  print_endline "OClaw REPL";
-  print_endline "Type /exit or /quit to quit.";
-  print_endline "";
-  
-  Fun.protect
-    ~finally:(fun () -> Option.iter Scheduler.stop scheduler_handle)
-    (fun () ->
-      let rec loop () =
-        print_string "┃ ";
-        flush stdout;
-        match read_line () with
-        | exception End_of_file ->
-            print_endline "\nGoodbye!";
-            0
-        | input ->
-            let trimmed = String.trim input in
-            if trimmed = "" then loop ()
-            else if trimmed = "/exit" || trimmed = "/quit" then (
-              print_endline "Goodbye!";
-              0
-            ) else (
-              let streamed = ref false in
-              let on_text_delta delta =
-                if not !streamed then (
-                  streamed := true;
-                  print_string "\r\027[K"
-                );
-                print_string delta;
-                flush stdout
-              in
-              match Agent_engine.process ~on_text_delta state ~chat_id ~persistent input with
-              | Ok response ->
-                  if !streamed then print_newline ()
-                  else print_endline response;
-                  print_endline "";
-                  loop ()
-              | Error err ->
-                  if !streamed then print_newline ();
-                  prerr_endline ("OClaw error: " ^ err);
-                  print_endline "";
-                  loop ()
-            )
-      in
-      loop ())
 
 let run_tui state chat_id persistent =
   Tui.run ~state ~chat_id ~persistent;
@@ -137,9 +88,8 @@ let () =
   let options = ref (default_options ()) in
   let config_args = ref [] in
   let spec = [
-    ("--tui", Arg.Unit (fun () -> options := { !options with use_tui = true }), "Run with TUI interface");
     ("--acp", Arg.Unit (fun () -> options := { !options with use_acp = true }), "Run in ACP JSON-RPC mode via stdio");
-    ("--single-shot", Arg.Unit (fun () -> options := { !options with single_shot = true }), "Run one prompt and exit");
+    ("--single-shot", Arg.Unit (fun () -> options := { !options with single_shot = true }), "Run one prompt and exit (default: TUI interactive mode)");
     ("--persistent", Arg.Unit (fun () -> options := { !options with persistent = true }), "Enable persistent chat history/memory");
     ("--chat-id", Arg.Int (fun value -> options := { !options with chat_id = value }), "Use this persistent chat/session id (default: 1)");
     ("--config", Arg.String (fun path -> options := { !options with config_path = Some path }), "Load configuration from this YAML file");
@@ -150,7 +100,7 @@ let () =
     ("--max-tool-iterations", Arg.Int (fun value -> config_args := !config_args @ ["--max-tool-iterations"; string_of_int value]), "Set max tool iterations");
     ("--debug", Arg.Unit (fun () -> options := { !options with debug = true }), "Enable debug logging");
   ] in
-  Arg.parse spec (fun arg -> options := { !options with prompt_parts = !options.prompt_parts @ [arg] }) "Usage: oclaw [--single-shot] [prompt]";
+  Arg.parse spec (fun arg -> options := { !options with prompt_parts = !options.prompt_parts @ [arg] }) "Usage: oclaw [OPTIONS] [prompt]";
   
   (* Load config with priority: file < env < args *)
   let config = Config.load ?config_file:!options.config_path ~cli_args:!config_args () in
@@ -173,9 +123,7 @@ let () =
         | Ok state ->
             let positional_prompt = String.concat " " !options.prompt_parts in
             let exit_code =
-              if !options.use_tui then
-                run_tui state !options.chat_id !options.persistent
-              else if !options.use_acp then
+              if !options.use_acp then
                 run_acp state !options.chat_id !options.persistent
               else if !options.single_shot || positional_prompt <> "" then
                 let prompt =
@@ -184,7 +132,7 @@ let () =
                 in
                 if String.trim prompt = "" then 0 else run_single_shot state !options.chat_id !options.persistent prompt
               else
-                run_repl state !options.chat_id !options.persistent
+                run_tui state !options.chat_id !options.persistent
             in
             Log.info (fun m -> m "OClaw exiting with code %d" exit_code);
             exit exit_code

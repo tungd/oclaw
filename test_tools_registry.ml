@@ -10,19 +10,6 @@ let expected_tools = [
   "read_file";
   "write_file";
   "edit_file";
-  "web_search";
-  "web_fetch";
-  "todo_read";
-  "todo_write";
-  "activate_skill";
-  "sync_skills";
-  "schedule_task";
-  "list_scheduled_tasks";
-  "pause_scheduled_task";
-  "resume_scheduled_task";
-  "cancel_scheduled_task";
-  "get_task_history";
-  "export_chat";
 ]
 
 let temp_dir () =

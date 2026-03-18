@@ -3,12 +3,6 @@
 open Yojson.Safe
 open Yojson.Safe.Util
 
-type web_config = {
-  request_timeout_seconds : int;
-  fetch_max_bytes : int;
-  search_max_results : int;
-}
-
 type tool_result = {
   content : string;
   is_error : bool;
@@ -24,7 +18,6 @@ type tool = {
 }
 
 type t = {
-  web : web_config;
   data_dir : string;
   skills_dir : string;
   db : Db.t;
@@ -204,76 +197,8 @@ let bash_tool =
               else failure ~status_code:exit_code ~duration_ms ~error_type:"command_failed" content)
 
 (* ============================================================================
-   Stub Tools (to be implemented)
-   ============================================================================ *)
-
-let todo_read_tool _db =
-  make_tool "todo_read" "Read todos."
-    (schema [] [])
-    (fun ~chat_id:_ _ -> failure "todo_read not yet implemented")
-
-let todo_write_tool _db =
-  make_tool "todo_write" "Write todos."
-    (schema [ ("todos", `Assoc [ ("type", `String "array") ]) ] [ "todos" ])
-    (fun ~chat_id:_ _ -> failure "todo_write not yet implemented")
-
-let activate_skill_tool _skills =
-  make_tool "activate_skill" "Activate a skill."
-    (schema [ ("name", `Assoc [ ("type", `String "string") ]) ] [ "name" ])
-    (fun ~chat_id:_ _ -> failure "activate_skill not yet implemented")
-
-let sync_skills_tool _skills =
-  make_tool "sync_skills" "Sync skills."
-    (schema [] [])
-    (fun ~chat_id:_ _ -> failure "sync_skills not yet implemented")
-
-let schedule_task_tool _db =
-  make_tool "schedule_task" "Schedule a task."
-    (schema [
-      ("prompt", `Assoc [ ("type", `String "string") ]);
-      ("run_at", `Assoc [ ("type", `String "string") ]);
-    ] [ "prompt" ])
-    (fun ~chat_id:_ _ -> failure "schedule_task not yet implemented")
-
-let list_scheduled_tasks_tool _db =
-  make_tool "list_scheduled_tasks" "List scheduled tasks."
-    (schema [] [])
-    (fun ~chat_id:_ _ -> failure "list_scheduled_tasks not yet implemented")
-
-let pause_scheduled_task_tool _db =
-  make_tool "pause_scheduled_task" "Pause a scheduled task."
-    (schema [ ("task_id", `Assoc [ ("type", `String "integer") ]) ] [ "task_id" ])
-    (fun ~chat_id:_ _ -> failure "pause_scheduled_task not yet implemented")
-
-let resume_scheduled_task_tool _db =
-  make_tool "resume_scheduled_task" "Resume a scheduled task."
-    (schema [ ("task_id", `Assoc [ ("type", `String "integer") ]) ] [ "task_id" ])
-    (fun ~chat_id:_ _ -> failure "resume_scheduled_task not yet implemented")
-
-let cancel_scheduled_task_tool _db =
-  make_tool "cancel_scheduled_task" "Cancel a scheduled task."
-    (schema [ ("task_id", `Assoc [ ("type", `String "integer") ]) ] [ "task_id" ])
-    (fun ~chat_id:_ _ -> failure "cancel_scheduled_task not yet implemented")
-
-let get_task_history_tool _db =
-  make_tool "get_task_history" "Get task history."
-    (schema [ ("task_id", `Assoc [ ("type", `String "integer") ]) ] [ "task_id" ])
-    (fun ~chat_id:_ _ -> failure "get_task_history not yet implemented")
-
-let export_chat_tool _db =
-  make_tool "export_chat" "Export chat to markdown."
-    (schema [ ("path", `Assoc [ ("type", `String "string") ]) ] [])
-    (fun ~chat_id:_ _ -> failure "export_chat not yet implemented")
-
-(* ============================================================================
    Tool Registry
    ============================================================================ *)
-
-let default_web_config = {
-  request_timeout_seconds = 20;
-  fetch_max_bytes = 20000;
-  search_max_results = 5;
-}
 
 let create_default_registry ~data_dir ~skills_dir ~db () =
   Random.self_init ();
@@ -283,29 +208,8 @@ let create_default_registry ~data_dir ~skills_dir ~db () =
     read_file_tool;
     write_file_tool;
     edit_file_tool;
-    (* Web tools *)
-    (let web = default_web_config in
-     make_tool "web_search" "Search the web."
-       (schema [ ("query", `Assoc [ ("type", `String "string") ]) ] [ "query" ])
-       (fun ~chat_id:_ _ -> failure "web_search not yet implemented"));
-    (let web = default_web_config in
-     make_tool "web_fetch" "Fetch a URL."
-       (schema [ ("url", `Assoc [ ("type", `String "string") ]) ] [ "url" ])
-       (fun ~chat_id:_ _ -> failure "web_fetch not yet implemented"));
-    (* Task tools *)
-    todo_read_tool db;
-    todo_write_tool db;
-    activate_skill_tool skills;
-    sync_skills_tool skills;
-    schedule_task_tool db;
-    list_scheduled_tasks_tool db;
-    pause_scheduled_task_tool db;
-    resume_scheduled_task_tool db;
-    cancel_scheduled_task_tool db;
-    get_task_history_tool db;
-    export_chat_tool db;
   ] in
-  { web = default_web_config; data_dir; skills_dir; db; skills; tools }
+  { data_dir; skills_dir; db; skills; tools }
 
 let definitions registry = List.map (fun tool -> tool.definition) registry.tools
 
