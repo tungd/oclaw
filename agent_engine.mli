@@ -6,5 +6,6 @@ val process :
   ?on_text_delta:(string -> unit) ->
   Runtime.app_state ->
   chat_id:int ->
+  ?persistent:bool ->
   string ->
   (string, string) result

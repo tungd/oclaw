@@ -320,13 +320,21 @@ let tool_results_of_response state ~chat_id response =
     }
   ) tool_results
 
-let process ?on_text_delta state ~chat_id prompt =
+let process ?on_text_delta state ~chat_id ?(persistent=false) prompt =
   let prompt = String.trim prompt in
   if prompt = "" then Error "Prompt is empty"
   else
-    match load_messages state ~chat_id with
-    | Error err -> Error err
-    | Ok base_messages ->
+    let base_messages =
+      if persistent then
+        match load_messages state ~chat_id with
+        | Error err -> 
+            Log.warn (fun m -> m "Failed to load chat history: %s" err);
+            []
+        | Ok messages -> messages
+      else
+        []
+    in
+    let base_messages = base_messages in
         let user_message = { Llm.role = "user"; content = Llm.Text_content prompt } in
         let all_messages = base_messages @ [user_message] in
         

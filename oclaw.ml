@@ -6,6 +6,7 @@ module LNoise = LNoise
 type cli_overrides = {
   mutable config_path : string option;
   mutable single_shot : bool;
+  mutable persistent : bool;
   mutable chat_id : int;
   mutable model : string option;
   mutable api_key : string option;
@@ -25,6 +26,7 @@ let default_overrides () =
   {
     config_path = None;
     single_shot = false;
+    persistent = false;
     chat_id = 1;
     model = None;
     api_key = None;
@@ -85,7 +87,7 @@ let sandbox_config_of_config (config : Config.config) =
     exec_custom_allow_patterns = config.tools_exec_custom_allow_patterns;
   }
 
-let run_single_shot state chat_id prompt =
+let run_single_shot state chat_id persistent prompt =
   let streamed = ref false in
   let on_text_delta delta =
     if not !streamed then (
@@ -95,7 +97,7 @@ let run_single_shot state chat_id prompt =
     print_string delta;
     flush stdout
   in
-  match Agent_engine.process ~on_text_delta state ~chat_id prompt with
+  match Agent_engine.process ~on_text_delta state ~chat_id ~persistent prompt with
   | Ok response ->
       if !streamed then print_newline ()
       else print_endline response;
@@ -105,7 +107,7 @@ let run_single_shot state chat_id prompt =
       prerr_endline ("OClaw error: " ^ err);
       1
 
-let run_repl state chat_id =
+let run_repl state chat_id persistent =
   let scheduler_handle = Scheduler.start state.Runtime.config in
   (* Setup linenoise with history file *)
   let history_file = Filename.concat (Filename.concat state.Runtime.config.data_dir "runtime") "linenoise_history" in
@@ -154,7 +156,7 @@ let run_repl state chat_id =
                 print_string delta;
                 flush stdout
               in
-              match Agent_engine.process ~on_text_delta state ~chat_id input with
+              match Agent_engine.process ~on_text_delta state ~chat_id ~persistent input with
               | Ok response ->
                   if !streamed then print_newline ()
                   else print_endline response;
@@ -174,6 +176,7 @@ let () =
   let prompt_parts = ref [] in
   let spec = [
     ("--single-shot", Arg.Unit (fun () -> overrides.single_shot <- true), "Run one prompt and exit");
+    ("--persistent", Arg.Unit (fun () -> overrides.persistent <- true), "Enable persistent chat history/memory");
     ("--chat-id", Arg.Int (fun value -> overrides.chat_id <- value), "Use this persistent chat/session id (default: 1)");
     ("--config", Arg.String (fun path -> overrides.config_path <- Some path), "Load configuration from this YAML file");
     ("--model", Arg.String (fun value -> overrides.model <- Some value), "Override the model name");
@@ -227,9 +230,9 @@ let () =
                   if positional_prompt <> "" then positional_prompt
                   else read_stdin ()
                 in
-                if String.trim prompt = "" then 0 else run_single_shot state overrides.chat_id prompt
+                if String.trim prompt = "" then 0 else run_single_shot state overrides.chat_id overrides.persistent prompt
               else
-                run_repl state overrides.chat_id
+                run_repl state overrides.chat_id overrides.persistent
             in
             Log.info (fun m -> m "OClaw exiting with code %d" exit_code);
             exit exit_code
