@@ -56,40 +56,27 @@ let run_single_shot state chat_id persistent prompt =
 
 let run_repl state chat_id persistent =
   let scheduler_handle = Scheduler.start state in
-  let history_file = Filename.concat (Filename.concat state.Runtime.config.data_dir "runtime") "linenoise_history" in
-  (match LNoise.history_set ~max_length:1000 with Error e -> Log.warn (fun m -> m "Failed to set history length: %s" e) | Ok () -> ());
-  (match LNoise.history_load ~filename:history_file with Error e -> Log.debug (fun m -> m "No history file yet: %s" e) | Ok () -> ());
-  LNoise.set_multiline true;
-  
-  let ansi_reset = "\027[0m" in
-  let ansi_bold = "\027[1m" in
-  let ansi_orange = "\027[38;5;208m" in
-  let repl_prompt = ansi_bold ^ ansi_orange ^ "┃" ^ ansi_reset ^ " " in
-  
   print_endline "OClaw REPL";
   print_endline "Type /exit or /quit to quit.";
   print_endline "";
   
   Fun.protect
-    ~finally:(fun () ->
-      Option.iter Scheduler.stop scheduler_handle)
+    ~finally:(fun () -> Option.iter Scheduler.stop scheduler_handle)
     (fun () ->
       let rec loop () =
-        match LNoise.linenoise repl_prompt with
-        | None ->
+        print_string "┃ ";
+        flush stdout;
+        match read_line () with
+        | exception End_of_file ->
             print_endline "\nGoodbye!";
             0
-        | Some input ->
+        | input ->
             let trimmed = String.trim input in
-            if trimmed = "" then
-              loop ()
+            if trimmed = "" then loop ()
             else if trimmed = "/exit" || trimmed = "/quit" then (
-              (match LNoise.history_save ~filename:history_file with Error e -> Log.warn (fun m -> m "Failed to save history: %s" e) | Ok () -> ());
               print_endline "Goodbye!";
               0
             ) else (
-              (match LNoise.history_add trimmed with Error e -> Log.debug (fun m -> m "Failed to add to history: %s" e) | Ok () -> ());
-
               let streamed = ref false in
               let on_text_delta delta =
                 if not !streamed then (
@@ -170,8 +157,8 @@ let () =
   
   (* Setup logging - default to Info level, Debug if --debug flag is set *)
   let log_level = if !options.debug || config.debug then Logs.Debug else Logs.Info in
-  LogColor.setup_auto ~level:(Some log_level) ~format_time:true ();
   Logs.set_level (Some log_level);
+  Logs.set_reporter (Logs.reporter ());
   
   match Config.validate config with
   | Error errors ->

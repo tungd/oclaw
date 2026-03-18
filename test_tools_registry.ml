@@ -10,8 +10,6 @@ let expected_tools = [
   "read_file";
   "write_file";
   "edit_file";
-  "glob";
-  "grep";
   "web_search";
   "web_fetch";
   "todo_read";

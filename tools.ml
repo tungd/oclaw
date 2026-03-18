@@ -158,10 +158,19 @@ let truncate_output output =
   if String.length output <= max_len then output
   else String.sub output 0 max_len ^ "\n... (truncated)"
 
+let quote_shell_arg arg =
+  (* Simple shell quoting - wrap in single quotes and escape any single quotes inside *)
+  let escape s =
+    let b = Buffer.create (String.length s + 10) in
+    String.iter (function '\'' -> Buffer.add_string b "'\\''" | c -> Buffer.add_char b c) s;
+    Buffer.contents b
+  in
+  "'" ^ escape arg ^ "'"
+
 let run_command ~timeout_seconds command =
   try
     let start_time = Unix.gettimeofday () in
-    let cmd = "bash -c " ^ Shell_escape.quote command in
+    let cmd = "bash -c " ^ quote_shell_arg command in
     let (output, status) =
       Unix.open_process_in cmd
       |> fun chan ->
@@ -193,6 +202,68 @@ let bash_tool =
               let content = Printf.sprintf "Command output:\n%s\nExit status: %d" (truncate_output output) exit_code in
               if exit_code = 0 then success ~status_code:exit_code ~duration_ms content
               else failure ~status_code:exit_code ~duration_ms ~error_type:"command_failed" content)
+
+(* ============================================================================
+   Stub Tools (to be implemented)
+   ============================================================================ *)
+
+let todo_read_tool _db =
+  make_tool "todo_read" "Read todos."
+    (schema [] [])
+    (fun ~chat_id:_ _ -> failure "todo_read not yet implemented")
+
+let todo_write_tool _db =
+  make_tool "todo_write" "Write todos."
+    (schema [ ("todos", `Assoc [ ("type", `String "array") ]) ] [ "todos" ])
+    (fun ~chat_id:_ _ -> failure "todo_write not yet implemented")
+
+let activate_skill_tool _skills =
+  make_tool "activate_skill" "Activate a skill."
+    (schema [ ("name", `Assoc [ ("type", `String "string") ]) ] [ "name" ])
+    (fun ~chat_id:_ _ -> failure "activate_skill not yet implemented")
+
+let sync_skills_tool _skills =
+  make_tool "sync_skills" "Sync skills."
+    (schema [] [])
+    (fun ~chat_id:_ _ -> failure "sync_skills not yet implemented")
+
+let schedule_task_tool _db =
+  make_tool "schedule_task" "Schedule a task."
+    (schema [
+      ("prompt", `Assoc [ ("type", `String "string") ]);
+      ("run_at", `Assoc [ ("type", `String "string") ]);
+    ] [ "prompt" ])
+    (fun ~chat_id:_ _ -> failure "schedule_task not yet implemented")
+
+let list_scheduled_tasks_tool _db =
+  make_tool "list_scheduled_tasks" "List scheduled tasks."
+    (schema [] [])
+    (fun ~chat_id:_ _ -> failure "list_scheduled_tasks not yet implemented")
+
+let pause_scheduled_task_tool _db =
+  make_tool "pause_scheduled_task" "Pause a scheduled task."
+    (schema [ ("task_id", `Assoc [ ("type", `String "integer") ]) ] [ "task_id" ])
+    (fun ~chat_id:_ _ -> failure "pause_scheduled_task not yet implemented")
+
+let resume_scheduled_task_tool _db =
+  make_tool "resume_scheduled_task" "Resume a scheduled task."
+    (schema [ ("task_id", `Assoc [ ("type", `String "integer") ]) ] [ "task_id" ])
+    (fun ~chat_id:_ _ -> failure "resume_scheduled_task not yet implemented")
+
+let cancel_scheduled_task_tool _db =
+  make_tool "cancel_scheduled_task" "Cancel a scheduled task."
+    (schema [ ("task_id", `Assoc [ ("type", `String "integer") ]) ] [ "task_id" ])
+    (fun ~chat_id:_ _ -> failure "cancel_scheduled_task not yet implemented")
+
+let get_task_history_tool _db =
+  make_tool "get_task_history" "Get task history."
+    (schema [ ("task_id", `Assoc [ ("type", `String "integer") ]) ] [ "task_id" ])
+    (fun ~chat_id:_ _ -> failure "get_task_history not yet implemented")
+
+let export_chat_tool _db =
+  make_tool "export_chat" "Export chat to markdown."
+    (schema [ ("path", `Assoc [ ("type", `String "string") ]) ] [])
+    (fun ~chat_id:_ _ -> failure "export_chat not yet implemented")
 
 (* ============================================================================
    Tool Registry

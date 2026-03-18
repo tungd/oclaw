@@ -1,18 +1,4 @@
-(** Registry-driven CLI tool layer.
-    
-    Simplified: no sandbox restrictions, all operations allowed.
-*)
-
-type sandbox_config = {
-  workspace_root : string;
-  restrict_to_workspace : bool;
-  allow_read_paths : string list;
-  allow_write_paths : string list;
-  exec_timeout_seconds : int;
-  exec_enable_deny_patterns : bool;
-  exec_custom_deny_patterns : string list;
-  exec_custom_allow_patterns : string list;
-}
+(** Minimal CLI tools: read_file, write_file, edit_file, bash. No sandbox restrictions. *)
 
 type web_config = {
   request_timeout_seconds : int;
