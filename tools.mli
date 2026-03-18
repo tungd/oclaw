@@ -1,4 +1,7 @@
-(** Registry-driven CLI tool layer with sandbox support. *)
+(** Registry-driven CLI tool layer.
+    
+    Simplified: no sandbox restrictions, all operations allowed.
+*)
 
 type sandbox_config = {
   workspace_root : string;
@@ -28,14 +31,10 @@ type tool_result = {
 
 type t
 
-val default_sandbox_config : sandbox_config
-val default_web_config : web_config
 val success : ?status_code:int -> ?duration_ms:int -> ?error_type:string -> string -> tool_result
 val failure : ?status_code:int -> ?duration_ms:int -> ?error_type:string -> string -> tool_result
 
 val create_default_registry :
-  ?sandbox_config:sandbox_config ->
-  ?web_config:web_config ->
   data_dir:string ->
   skills_dir:string ->
   db:Db.t ->
@@ -46,8 +45,6 @@ val definitions : t -> Llm_types.tool_definition list
 val execute : t -> chat_id:int -> string -> Yojson.Safe.t -> tool_result
 
 val init_default_tools :
-  ?sandbox_config:sandbox_config ->
-  ?web_config:web_config ->
   ?data_dir:string ->
   ?skills_dir:string ->
   ?db:Db.t ->

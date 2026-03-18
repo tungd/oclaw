@@ -1,4 +1,5 @@
 module Log = (val Logs.src_log (Logs.Src.create "scheduler") : Logs.LOG)
+module Config = Oclaw_config.Config
 
 type handle = {
   stop_flag : bool Atomic.t;
@@ -67,11 +68,11 @@ let rec sleep_until_next_poll stop_flag seconds =
 let worker_loop state stop_flag =
   while not (Atomic.get stop_flag) do
     run_due_tasks state;
-    sleep_until_next_poll stop_flag (float_of_int state.Runtime.config.Oclaw_config.Config.scheduler_poll_interval_seconds)
+    sleep_until_next_poll stop_flag (float_of_int Config.scheduler_poll_interval_seconds)
   done
 
 let start state =
-  if not state.Runtime.config.Oclaw_config.Config.scheduler_enabled then None
+  if not Config.scheduler_enabled then None
   else
     let stop_flag = Atomic.make false in
     let domain = Domain.spawn (fun () -> worker_loop state stop_flag) in

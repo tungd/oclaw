@@ -78,9 +78,6 @@ let make_config data_dir =
     llm_api_base = "http://example.invalid";
     llm_model = "test-model";
     data_dir;
-    tools_workspace = data_dir;
-    tools_restrict_to_workspace = true;
-    max_history_messages = 24;
     max_tool_iterations = 8;
   }
 

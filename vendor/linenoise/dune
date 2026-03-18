@@ -1,9 +1,0 @@
-
-(library
-  (name linenoise)
-  (modules LNoise)
-  (wrapped false)
-  (flags :standard -warn-error -3)
-  (foreign_stubs
-   (language c)
-   (names linenoise_src linenoise_stubs)))

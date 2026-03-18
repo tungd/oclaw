@@ -1,18 +1,7 @@
-(** Registry-driven CLI tools. *)
+(** Minimal CLI tools: read_file, write_file, edit_file, bash. No sandbox restrictions. *)
 
 open Yojson.Safe
 open Yojson.Safe.Util
-
-type sandbox_config = {
-  workspace_root : string;
-  restrict_to_workspace : bool;
-  allow_read_paths : string list;
-  allow_write_paths : string list;
-  exec_timeout_seconds : int;
-  exec_enable_deny_patterns : bool;
-  exec_custom_deny_patterns : string list;
-  exec_custom_allow_patterns : string list;
-}
 
 type web_config = {
   request_timeout_seconds : int;
@@ -35,7 +24,6 @@ type tool = {
 }
 
 type t = {
-  sandbox : sandbox_config;
   web : web_config;
   data_dir : string;
   skills_dir : string;
@@ -44,141 +32,19 @@ type t = {
   tools : tool list;
 }
 
-let default_sandbox_config = {
-  workspace_root = ".";
-  restrict_to_workspace = true;
-  allow_read_paths = [];
-  allow_write_paths = [];
-  exec_timeout_seconds = 60;
-  exec_enable_deny_patterns = true;
-  exec_custom_deny_patterns = [];
-  exec_custom_allow_patterns = [];
-}
-
-let default_web_config = {
-  request_timeout_seconds = 20;
-  fetch_max_bytes = 20000;
-  search_max_results = 5;
-}
-
 let success ?status_code ?duration_ms ?error_type content =
-  {
-    content;
-    is_error = false;
-    status_code;
-    bytes = String.length content;
-    duration_ms;
-    error_type;
-  }
+  { content; is_error = false; status_code; bytes = String.length content; duration_ms; error_type }
 
 let failure ?status_code ?duration_ms ?(error_type="tool_error") content =
-  {
-    content;
-    is_error = true;
-    status_code;
-    bytes = String.length content;
-    duration_ms;
-    error_type = Some error_type;
-  }
+  { content; is_error = true; status_code; bytes = String.length content; duration_ms; error_type = Some error_type }
 
 let trim = String.trim
-
-let string_contains ~haystack ~needle =
-  let h_len = String.length haystack in
-  let n_len = String.length needle in
-  if n_len = 0 then true
-  else if n_len > h_len then false
-  else
-    let rec loop index =
-      if index > h_len - n_len then false
-      else if String.sub haystack index n_len = needle then true
-      else loop (index + 1)
-    in
-    loop 0
-
-let ensure_trailing_slash path =
-  if path = "/" then "/"
-  else if String.ends_with ~suffix:"/" path then path
-  else path ^ "/"
-
-let normalize_lexical path =
-  let is_abs = String.length path > 0 && path.[0] = '/' in
-  let parts = String.split_on_char '/' path in
-  let stack = ref [] in
-  List.iter
-    (function
-      | "" | "." -> ()
-      | ".." ->
-          begin
-            match !stack with
-            | _ :: rest -> stack := rest
-            | [] -> ()
-          end
-      | part -> stack := part :: !stack)
-    parts;
-  let body = String.concat "/" (List.rev !stack) in
-  if is_abs then if body = "" then "/" else "/" ^ body
-  else if body = "" then "." else body
-
-let absolute_path_from base path =
-  let raw = if Filename.is_relative path then Filename.concat base path else path in
-  normalize_lexical raw
-
-let is_within ~root ~path =
-  path = root || String.starts_with ~prefix:(ensure_trailing_slash root) path
-
-let workspace_root sandbox =
-  let cwd = Sys.getcwd () in
-  let abs = absolute_path_from cwd sandbox.workspace_root in
-  try Unix.realpath abs with _ -> abs
-
-let path_matches_allowlist sandbox path allowlist =
-  let root = workspace_root sandbox in
-  List.exists
-    (fun allowed ->
-      let allowed_abs = absolute_path_from root allowed in
-      is_within ~root:allowed_abs ~path)
-    allowlist
-
-let path_exists path =
-  try
-    ignore (Unix.lstat path);
-    true
-  with _ ->
-    false
-
-let rec find_existing_ancestor path =
-  if path_exists path then path
-  else
-    let parent = Filename.dirname path in
-    if parent = path then path else find_existing_ancestor parent
-
-let validate_path sandbox ~for_write ~allowlist path =
-  if trim path = "" then Error "path is required"
-  else
-    let root = workspace_root sandbox in
-    let candidate = absolute_path_from root path in
-    if path_matches_allowlist sandbox candidate allowlist then Ok candidate
-    else if not sandbox.restrict_to_workspace then Ok candidate
-    else if not (is_within ~root ~path:candidate) then Error "path is outside workspace"
-    else
-      let anchor =
-        if for_write then find_existing_ancestor (Filename.dirname candidate)
-        else find_existing_ancestor candidate
-      in
-      let root_real = try Unix.realpath root with _ -> root in
-      let anchor_real = try Unix.realpath anchor with _ -> anchor in
-      if is_within ~root:root_real ~path:anchor_real then Ok candidate
-      else Error "path resolves outside workspace"
 
 let ensure_parent_dir path =
   let rec mkdir_p dir =
     if dir = "" || dir = "." || dir = "/" then ()
     else if Sys.file_exists dir then ()
-    else (
-      mkdir_p (Filename.dirname dir);
-      Unix.mkdir dir 0o755
-    )
+    else (mkdir_p (Filename.dirname dir); Unix.mkdir dir 0o755)
   in
   mkdir_p (Filename.dirname path)
 
@@ -190,25 +56,22 @@ let write_file_atomic path content =
   try
     ensure_parent_dir path;
     let dir = Filename.dirname path in
-    let tmp =
-      Filename.concat dir
-        (Printf.sprintf ".tmp-oclaw-%d-%06d"
-           (int_of_float (Unix.gettimeofday ()))
-           (Random.int 1_000_000))
-    in
+    let tmp = Filename.concat dir (Printf.sprintf ".tmp-oclaw-%d-%06d"
+      (int_of_float (Unix.gettimeofday ())) (Random.int 1_000_000)) in
     Stdlib.Out_channel.with_open_bin tmp (fun channel -> output_string channel content);
     Unix.rename tmp path;
     Ok ()
-  with exn ->
-    Error (Printexc.to_string exn)
+  with exn -> Error (Printexc.to_string exn)
 
-let json_assoc_or_empty = function
-  | `Assoc _ as json -> json
-  | `Null -> `Assoc []
-  | other -> other
+let json_assoc_or_empty = function | `Assoc _ as json -> json | _ -> `Assoc []
+
+let required_string_arg json name =
+  match Yojson.Safe.Util.member name json with
+  | `String value when trim value <> "" -> Ok value
+  | _ -> Error (name ^ " is required")
 
 let string_arg json name =
-  match member name json with
+  match Yojson.Safe.Util.member name json with
   | `String value -> Some value
   | `Int value -> Some (string_of_int value)
   | `Intlit value -> Some value
@@ -216,1005 +79,164 @@ let string_arg json name =
   | `Bool value -> Some (string_of_bool value)
   | _ -> None
 
-let required_string_arg json name =
-  match string_arg json name with
-  | Some value when trim value <> "" -> Ok value
-  | _ -> Error (name ^ " is required")
+let make_tool name description schema execute =
+  { definition = { Llm_types.name; description; input_schema = schema }; execute }
 
-let int_arg json name =
-  match member name json with
-  | `Int value -> Some value
-  | `Intlit value -> int_of_string_opt value
-  | `String value -> int_of_string_opt (trim value)
-  | _ -> None
-
-let bool_arg json name =
-  match member name json with
-  | `Bool value -> Some value
-  | `String value ->
-      begin
-        match String.lowercase_ascii (trim value) with
-        | "true" | "1" | "yes" -> Some true
-        | "false" | "0" | "no" -> Some false
-        | _ -> None
-      end
-  | _ -> None
-
-let list_arg json name =
-  match member name json with
-  | `List values -> values
-  | _ -> []
-
-let url_encode value =
-  let buffer = Buffer.create (String.length value * 3) in
-  String.iter
-    (fun ch ->
-      match ch with
-      | 'A' .. 'Z' | 'a' .. 'z' | '0' .. '9' | '-' | '_' | '.' | '~' ->
-          Buffer.add_char buffer ch
-      | ' ' ->
-          Buffer.add_char buffer '+'
-      | _ ->
-          Buffer.add_string buffer (Printf.sprintf "%%%02X" (Char.code ch)))
-    value;
-  Buffer.contents buffer
-
-let replace_all text pattern replacement =
-  Str.global_replace (Str.regexp_string pattern) replacement text
-
-let decode_html_entities text =
-  text
-  |> replace_all "&amp;" "&"
-  |> replace_all "&lt;" "<"
-  |> replace_all "&gt;" ">"
-  |> replace_all "&quot;" "\""
-  |> replace_all "&#39;" "'"
-  |> replace_all "&nbsp;" " "
-
-let collapse_whitespace text =
-  text
-  |> Str.global_replace (Str.regexp "[ \t\r\n]+") " "
-  |> trim
-
-let strip_html_tags text =
-  text
-  |> replace_all "<br>" "\n"
-  |> replace_all "<br/>" "\n"
-  |> replace_all "<br />" "\n"
-  |> Str.global_replace (Str.regexp "<[^>]+>") " "
-  |> decode_html_entities
-  |> collapse_whitespace
-
-let maybe_truncate ~max_bytes text =
-  if String.length text <= max_bytes then text
-  else String.sub text 0 max_bytes ^ "\n... (truncated)"
-
-let fetch_url ~timeout_seconds url =
-  try Ok (Http_client.get url [] timeout_seconds)
-  with
-  | Http_client.Http_error err -> Error err
-  | exn -> Error (Printexc.to_string exn)
-
-let split_on_marker text marker =
-  let marker_len = String.length marker in
-  let rec loop start acc =
-    try
-      let index = Str.search_forward (Str.regexp_string marker) text start in
-      let next_start = index + marker_len in
-      loop next_start (index :: acc)
-    with Not_found ->
-      List.rev acc
-  in
-  let indices = loop 0 [] in
-  let rec build acc = function
-    | [] -> List.rev acc
-    | [ index ] ->
-        List.rev (String.sub text index (String.length text - index) :: acc)
-    | index :: ((next_index :: _) as rest) ->
-        build (String.sub text index (next_index - index) :: acc) rest
-  in
-  build [] indices
-
-let first_match pattern text =
-  let regex = Str.regexp pattern in
-  try
-    ignore (Str.search_forward regex text 0);
-    Some (Str.matched_group 1 text)
-  with Not_found ->
-    None
-
-type search_result = {
-  title : string;
-  url : string;
-  snippet : string;
-}
-
-let parse_brave_results html =
-  let segments = split_on_marker html "data-type=\"web\"" in
-  segments
-  |> List.filter_map (fun segment ->
-         let url = first_match "<a href=\"\\([^\"]+\\)\"" segment in
-         let title =
-           first_match
-             "<div class=\"title search-snippet-title[^\"]*\"[^>]*>\\(.*\\)</div>"
-             segment
-         in
-         let snippet =
-           first_match
-             "<div class=\"content [^\"]*\">\\(.*\\)</div>"
-             segment
-         in
-         match url, title with
-         | Some url, Some title ->
-             Some {
-               title = strip_html_tags title;
-               url = decode_html_entities url;
-               snippet =
-                 (match snippet with
-                  | Some text -> strip_html_tags text
-                  | None -> "");
-             }
-         | _ -> None)
-
-let is_supported_url url =
-  String.starts_with ~prefix:"http://" url || String.starts_with ~prefix:"https://" url
-
-let format_task_status task =
-  let next_run =
-    match task.Db.next_run_at with
-    | Some timestamp -> Schedule_spec.format_timestamp_local timestamp
-    | None -> "-"
-  in
-  Printf.sprintf "[id=%d] status=%s type=%s next=%s prompt=%s"
-    task.Db.id task.Db.status task.Db.schedule_type next_run task.Db.prompt
-
-let format_task_history run =
-  Printf.sprintf "[run=%d] %s success=%b summary=%s"
-    run.Db.id
-    (Schedule_spec.format_timestamp_local run.Db.started_at)
-    run.Db.success
-    run.Db.summary
-
-let default_exec_deny_patterns = [
-  "rm -rf";
-  "rm -fr";
-  "mkfs";
-  "shutdown";
-  "reboot";
-  "poweroff";
-  "sudo ";
-  "curl ";
-  "wget ";
-  "| sh";
-  "| bash";
-  "chown ";
-  "kill -9";
-  "git push";
-]
-
-let normalize_exec_token token =
-  let token = trim token in
-  let len = String.length token in
-  if len >= 2
-     && ((token.[0] = '\'' && token.[len - 1] = '\'')
-         || (token.[0] = '"' && token.[len - 1] = '"'))
-  then
-    String.sub token 1 (len - 2)
-  else
-    token
-
-let split_command command =
-  let len = String.length command in
-  let buffer = Buffer.create len in
-  let tokens = ref [] in
-  let mode = ref `Normal in
-  let flush () =
-    if Buffer.length buffer > 0 then (
-      tokens := Buffer.contents buffer :: !tokens;
-      Buffer.clear buffer
-    )
-  in
-  let rec loop index =
-    if index >= len then (
-      begin
-        match !mode with
-        | `Normal -> ()
-        | _ -> raise (Invalid_argument "Unclosed quote in command")
-      end;
-      flush ();
-      List.rev !tokens
-    ) else
-      let char = command.[index] in
-      match !mode with
-      | `Normal ->
-          if List.mem char [ ' '; '\t'; '\n' ] then (
-            flush ();
-            loop (index + 1)
-          ) else if char = '\'' then (
-            mode := `Single;
-            loop (index + 1)
-          ) else if char = '"' then (
-            mode := `Double;
-            loop (index + 1)
-          ) else (
-            Buffer.add_char buffer char;
-            loop (index + 1)
-          )
-      | `Single ->
-          if char = '\'' then (
-            mode := `Normal;
-            loop (index + 1)
-          ) else (
-            Buffer.add_char buffer char;
-            loop (index + 1)
-          )
-      | `Double ->
-          if char = '"' then (
-            mode := `Normal;
-            loop (index + 1)
-          ) else (
-            Buffer.add_char buffer char;
-            loop (index + 1)
-          )
-  in
-  loop 0
-
-let guard_command sandbox command =
-  let lower = String.lowercase_ascii command in
-  let explicitly_allowed =
-    sandbox.exec_custom_allow_patterns <> []
-    && List.exists
-         (fun pattern ->
-           string_contains ~haystack:lower ~needle:(String.lowercase_ascii pattern))
-         sandbox.exec_custom_allow_patterns
-  in
-  if sandbox.exec_enable_deny_patterns && not explicitly_allowed then (
-    let deny = default_exec_deny_patterns @ sandbox.exec_custom_deny_patterns in
-    if List.exists (fun pattern ->
-           string_contains ~haystack:lower ~needle:(String.lowercase_ascii pattern))
-         deny
-    then
-      Error "Command blocked by safety guard"
-    else
-      match split_command command with
-      | exception Invalid_argument err -> Error err
-      | tokens ->
-          let root = workspace_root sandbox in
-          let rec check = function
-            | [] -> Ok ()
-            | token :: rest ->
-                let token = normalize_exec_token token in
-                if token = "" then check rest
-                else if String.length token > 0 && token.[0] = '/' then
-                  let path = absolute_path_from root token in
-                  if sandbox.restrict_to_workspace && not (is_within ~root ~path) then
-                    Error "Command blocked by path restriction"
-                  else
-                    check rest
-                else
-                  check rest
-          in
-          check tokens
-  ) else
-    Ok ()
-
-let truncate_output ?(limit=10_000) output =
-  if String.length output <= limit then output
-  else
-    let remaining = String.length output - limit in
-    String.sub output 0 limit ^ Printf.sprintf "\n... (truncated, %d more chars)" remaining
-
-let has_timeout_binary =
-  lazy (Sys.command "command -v timeout >/dev/null 2>&1" = 0)
-
-let run_command ~timeout_seconds command =
-  let shell_command = command ^ " 2>&1" in
-  let launcher, argv =
-    if timeout_seconds > 0 && Lazy.force has_timeout_binary then
-      ("timeout", [| "timeout"; string_of_int timeout_seconds; "sh"; "-lc"; shell_command |])
-    else
-      ("sh", [| "sh"; "-lc"; shell_command |])
-  in
-  try
-    let started = Unix.gettimeofday () in
-    let channel = Unix.open_process_args_in launcher argv in
-    let buffer = Buffer.create 1024 in
-    (try
-       while true do
-         let line = input_line channel in
-         Buffer.add_string buffer line;
-         Buffer.add_char buffer '\n'
-       done
-     with End_of_file -> ());
-    let status = Unix.close_process_in channel in
-    let exit_code =
-      match status with
-      | Unix.WEXITED code -> code
-      | Unix.WSIGNALED signal -> -signal
-      | Unix.WSTOPPED signal -> -signal
-    in
-    Ok (Buffer.contents buffer, exit_code, int_of_float ((Unix.gettimeofday () -. started) *. 1000.0))
-  with exn ->
-    Error (Printexc.to_string exn)
-
-let run_process_args program argv =
-  try
-    let started = Unix.gettimeofday () in
-    let channel = Unix.open_process_args_in program argv in
-    let buffer = Buffer.create 1024 in
-    (try
-       while true do
-         let line = input_line channel in
-         Buffer.add_string buffer line;
-         Buffer.add_char buffer '\n'
-       done
-     with End_of_file -> ());
-    let status = Unix.close_process_in channel in
-    let exit_code =
-      match status with
-      | Unix.WEXITED code -> code
-      | Unix.WSIGNALED signal -> -signal
-      | Unix.WSTOPPED signal -> -signal
-    in
-    Ok (Buffer.contents buffer, exit_code, int_of_float ((Unix.gettimeofday () -. started) *. 1000.0))
-  with exn ->
-    Error (Printexc.to_string exn)
-
-let relative_path ~root path =
-  let root = ensure_trailing_slash root in
-  if String.starts_with ~prefix:root path then
-    String.sub path (String.length root) (String.length path - String.length root)
-  else
-    path
-
-let glob_regex pattern =
-  let buffer = Buffer.create (String.length pattern * 2) in
-  Buffer.add_char buffer '^';
-  let rec loop index =
-    if index >= String.length pattern then Buffer.add_char buffer '$'
-    else
-      match pattern.[index] with
-      | '*' ->
-          if index + 1 < String.length pattern && pattern.[index + 1] = '*' then (
-            Buffer.add_string buffer ".*";
-            loop (index + 2)
-          ) else (
-            Buffer.add_string buffer "[^/]*";
-            loop (index + 1)
-          )
-      | '?' ->
-          Buffer.add_char buffer '.';
-          loop (index + 1)
-      | '.' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$' | '\\' as char ->
-          Buffer.add_char buffer '\\';
-          Buffer.add_char buffer char;
-          loop (index + 1)
-      | char ->
-          Buffer.add_char buffer char;
-          loop (index + 1)
-  in
-  loop 0;
-  Str.regexp (Buffer.contents buffer)
-
-let rec walk_files acc path =
-  if Sys.file_exists path then
-    if Sys.is_directory path then
-      Sys.readdir path
-      |> Array.to_list
-      |> List.fold_left (fun current name -> walk_files current (Filename.concat path name)) acc
-    else
-      path :: acc
-  else
-    acc
-
-let markdown_of_messages messages =
-  let format_content = function
-    | Llm_types.Text_content text -> text
-    | Llm_types.Blocks blocks ->
-        List.map (function
-          | Llm_types.Text { text } -> text
-          | Llm_types.Image _ -> "[Image]"
-          | Llm_types.Tool_use { name; input; _ } ->
-              Printf.sprintf "Tool Use: %s\nInput: %s" name (Yojson.Safe.to_string input)
-          | Llm_types.Tool_result { content; _ } ->
-              Printf.sprintf "Tool Result: %s" content
-        ) blocks
-        |> String.concat "\n\n"
-  in
-  messages
-  |> List.map (fun (message : Llm_types.message) ->
-         let title = String.capitalize_ascii message.role in
-         "## " ^ title ^ "\n\n" ^ format_content message.content)
-  |> String.concat "\n\n"
-
-let schema properties required =
+let schema fields required =
   `Assoc [
     ("type", `String "object");
-    ("properties", `Assoc properties);
-    ("required", `List (List.map (fun name -> `String name) required));
+    ("properties", `Assoc fields);
+    ("required", `List (List.map (fun s -> `String s) required));
   ]
 
-let make_tool name description input_schema execute =
-  {
-    definition = { Llm_types.name; description; input_schema };
-    execute;
-  }
+(* ============================================================================
+   Core Tools
+   ============================================================================ *)
 
-let read_file_tool sandbox =
-  make_tool
-    "read_file"
-    "Read and return the contents of a file."
+let read_file_tool =
+  make_tool "read_file" "Read and return the contents of a file."
     (schema [ ("path", `Assoc [ ("type", `String "string") ]) ] [ "path" ])
     (fun ~chat_id:_ args ->
-      let args = json_assoc_or_empty args in
-      match required_string_arg args "path" with
+      match required_string_arg (json_assoc_or_empty args) "path" with
       | Error err -> failure err
       | Ok path ->
-          begin
-            match validate_path sandbox ~for_write:false ~allowlist:sandbox.allow_read_paths path with
-            | Error err -> failure ("Error reading file: " ^ err)
-            | Ok safe_path ->
-                begin
-                  match read_file_full safe_path with
-                  | Ok content -> success content
-                  | Error err -> failure ("Error reading file: " ^ err)
-                end
-          end)
+          match read_file_full path with
+          | Ok content -> success content
+          | Error err -> failure ("Error reading file: " ^ err))
 
-let write_file_tool sandbox =
-  make_tool
-    "write_file"
-    "Write content to a file."
-    (schema
-       [
-         ("path", `Assoc [ ("type", `String "string") ]);
-         ("content", `Assoc [ ("type", `String "string") ]);
-       ]
-       [ "path"; "content" ])
+let write_file_tool =
+  make_tool "write_file" "Write content to a file."
+    (schema [
+      ("path", `Assoc [ ("type", `String "string") ]);
+      ("content", `Assoc [ ("type", `String "string") ]);
+    ] [ "path"; "content" ])
     (fun ~chat_id:_ args ->
       let args = json_assoc_or_empty args in
       match required_string_arg args "path", required_string_arg args "content" with
       | Error err, _ | _, Error err -> failure err
       | Ok path, Ok content ->
-          begin
-            match validate_path sandbox ~for_write:true ~allowlist:sandbox.allow_write_paths path with
-            | Error err -> failure ("Error writing file: " ^ err)
-            | Ok safe_path ->
-                begin
-                  match write_file_atomic safe_path content with
-                  | Ok () -> success ("File written: " ^ path)
-                  | Error err -> failure ("Error writing file: " ^ err)
-                end
-          end)
+          match write_file_atomic path content with
+          | Ok () -> success ("File written: " ^ path)
+          | Error err -> failure ("Error writing file: " ^ err))
 
-let edit_file_tool sandbox =
-  make_tool
-    "edit_file"
-    "Edit a file by replacing one exact text block with another."
-    (schema
-       [
-         ("path", `Assoc [ ("type", `String "string") ]);
-         ("old_text", `Assoc [ ("type", `String "string") ]);
-         ("new_text", `Assoc [ ("type", `String "string") ]);
-       ]
-       [ "path"; "old_text"; "new_text" ])
+let edit_file_tool =
+  make_tool "edit_file" "Edit a file by replacing one exact text block with another."
+    (schema [
+      ("path", `Assoc [ ("type", `String "string") ]);
+      ("old_text", `Assoc [ ("type", `String "string") ]);
+      ("new_text", `Assoc [ ("type", `String "string") ]);
+    ] [ "path"; "old_text"; "new_text" ])
     (fun ~chat_id:_ args ->
       let args = json_assoc_or_empty args in
       match required_string_arg args "path", required_string_arg args "old_text", required_string_arg args "new_text" with
       | Error err, _, _ | _, Error err, _ | _, _, Error err -> failure err
       | Ok path, Ok old_text, Ok new_text ->
-          begin
-            match validate_path sandbox ~for_write:true ~allowlist:sandbox.allow_write_paths path with
-            | Error err -> failure ("Error editing file: " ^ err)
-            | Ok safe_path ->
-                begin
-                  match read_file_full safe_path with
-                  | Error err -> failure ("Error editing file: " ^ err)
-                  | Ok content ->
-                      let count = ref 0 in
-                      let index = ref None in
-                      let start = ref 0 in
-                      while !start <= String.length content - String.length old_text && old_text <> "" do
-                        if String.sub content !start (String.length old_text) = old_text then (
-                          incr count;
-                          if !index = None then index := Some !start
-                        );
-                        incr start
-                      done;
-                      if !count = 0 then failure "Error editing file: old_text not found"
-                      else if !count > 1 then failure (Printf.sprintf "Error editing file: old_text appears %d times" !count)
-                      else
-                        let idx = Option.value ~default:0 !index in
-                        let replaced =
-                          String.sub content 0 idx
-                          ^ new_text
-                          ^ String.sub content (idx + String.length old_text)
-                              (String.length content - idx - String.length old_text)
-                        in
-                        begin
-                          match write_file_atomic safe_path replaced with
-                          | Ok () -> success ("File edited: " ^ path)
-                          | Error err -> failure ("Error editing file: " ^ err)
-                        end
-                end
-          end)
+          match read_file_full path with
+          | Error err -> failure ("Error editing file: " ^ err)
+          | Ok content ->
+              let count = ref 0 and index = ref None and start = ref 0 in
+              while !start <= String.length content - String.length old_text && old_text <> "" do
+                if String.sub content !start (String.length old_text) = old_text then (
+                  incr count;
+                  if !index = None then index := Some !start
+                );
+                incr start
+              done;
+              if !count = 0 then failure "Error editing file: old_text not found"
+              else if !count > 1 then failure (Printf.sprintf "Error editing file: old_text appears %d times" !count)
+              else
+                let idx = Option.value ~default:0 !index in
+                let replaced = String.sub content 0 idx ^ new_text ^
+                  String.sub content (idx + String.length old_text)
+                    (String.length content - idx - String.length old_text) in
+                match write_file_atomic path replaced with
+                | Ok () -> success ("File edited: " ^ path)
+                | Error err -> failure ("Error editing file: " ^ err))
 
-let bash_tool sandbox =
-  make_tool
-    "bash"
-    "Execute a shell command inside the configured workspace."
+let truncate_output output =
+  let max_len = 10000 in
+  if String.length output <= max_len then output
+  else String.sub output 0 max_len ^ "\n... (truncated)"
+
+let run_command ~timeout_seconds command =
+  try
+    let start_time = Unix.gettimeofday () in
+    let cmd = "bash -c " ^ Shell_escape.quote command in
+    let (output, status) =
+      Unix.open_process_in cmd
+      |> fun chan ->
+          let buf = Buffer.create 1024 in
+          (try
+             while true do
+               Buffer.add_channel buf chan 1
+             done
+           with End_of_file -> ());
+          let status = Unix.close_process_in chan in
+          (Buffer.contents buf, status)
+    in
+    let end_time = Unix.gettimeofday () in
+    let duration_ms = int_of_float ((end_time -. start_time) *. 1000.0) in
+    let exit_code = match status with Unix.WEXITED c -> c | _ -> 1 in
+    Ok (output, exit_code, duration_ms)
+  with exn -> Error (Printexc.to_string exn)
+
+let bash_tool =
+  make_tool "bash" "Execute a shell command."
     (schema [ ("command", `Assoc [ ("type", `String "string") ]) ] [ "command" ])
     (fun ~chat_id:_ args ->
-      let args = json_assoc_or_empty args in
-      match required_string_arg args "command" with
+      match required_string_arg (json_assoc_or_empty args) "command" with
       | Error err -> failure err
       | Ok command ->
-          begin
-            match guard_command sandbox command with
-            | Error err -> failure err
-            | Ok () ->
-                begin
-                  match run_command ~timeout_seconds:sandbox.exec_timeout_seconds command with
-                  | Error err -> failure ("Error executing command: " ^ err)
-                  | Ok (output, exit_code, duration_ms) ->
-                      let content =
-                        Printf.sprintf "Command output:\n%s\nExit status: %d" (truncate_output output) exit_code
-                      in
-                      if exit_code = 0 then success ~status_code:exit_code ~duration_ms content
-                      else failure ~status_code:exit_code ~duration_ms ~error_type:"command_failed" content
-                end
-          end)
+          match run_command ~timeout_seconds:60 command with
+          | Error err -> failure ("Error executing command: " ^ err)
+          | Ok (output, exit_code, duration_ms) ->
+              let content = Printf.sprintf "Command output:\n%s\nExit status: %d" (truncate_output output) exit_code in
+              if exit_code = 0 then success ~status_code:exit_code ~duration_ms content
+              else failure ~status_code:exit_code ~duration_ms ~error_type:"command_failed" content)
 
-let glob_tool sandbox =
-  make_tool
-    "glob"
-    "Find files matching a glob pattern inside the workspace."
-    (schema
-       [
-         ("pattern", `Assoc [ ("type", `String "string") ]);
-         ("path", `Assoc [ ("type", `String "string") ]);
-       ]
-       [ "pattern" ])
-    (fun ~chat_id:_ args ->
-      let args = json_assoc_or_empty args in
-      match required_string_arg args "pattern" with
-      | Error err -> failure err
-      | Ok pattern ->
-          let base = Option.value ~default:"." (string_arg args "path") in
-          begin
-            match validate_path sandbox ~for_write:false ~allowlist:sandbox.allow_read_paths base with
-            | Error err -> failure ("Error running glob: " ^ err)
-            | Ok safe_base ->
-                let files = walk_files [] safe_base in
-                let regex = glob_regex pattern in
-                let root = workspace_root sandbox in
-                let matches =
-                  files
-                  |> List.map (relative_path ~root)
-                  |> List.filter (fun path -> Str.string_match regex path 0)
-                  |> List.sort String.compare
-                in
-                success
-                  (if matches = [] then "No files matched."
-                   else String.concat "\n" matches)
-          end)
+(* ============================================================================
+   Tool Registry
+   ============================================================================ *)
 
-let grep_tool sandbox =
-  make_tool
-    "grep"
-    "Search file contents with ripgrep."
-    (schema
-       [
-         ("pattern", `Assoc [ ("type", `String "string") ]);
-         ("path", `Assoc [ ("type", `String "string") ]);
-       ]
-       [ "pattern" ])
-    (fun ~chat_id:_ args ->
-      let args = json_assoc_or_empty args in
-      match required_string_arg args "pattern" with
-      | Error err -> failure err
-      | Ok pattern ->
-          let path = Option.value ~default:"." (string_arg args "path") in
-          begin
-            match validate_path sandbox ~for_write:false ~allowlist:sandbox.allow_read_paths path with
-            | Error err -> failure ("Error running grep: " ^ err)
-            | Ok safe_path ->
-                begin
-                  match run_process_args "rg" [| "rg"; "-n"; "--no-heading"; "--color"; "never"; pattern; safe_path |] with
-                  | Ok (output, 0, duration_ms) ->
-                      success ~status_code:0 ~duration_ms (truncate_output output)
-                  | Ok (output, 1, duration_ms) ->
-                      success ~status_code:1 ~duration_ms "No matches found."
-                  | Ok (output, exit_code, duration_ms) ->
-                      failure ~status_code:exit_code ~duration_ms (truncate_output output)
-                  | Error err ->
-                      failure ("Error running grep: " ^ err)
-                end
-          end)
+let default_web_config = {
+  request_timeout_seconds = 20;
+  fetch_max_bytes = 20000;
+  search_max_results = 5;
+}
 
-let web_search_tool web =
-  make_tool
-    "web_search"
-    "Search the web and return title, URL, and snippet results."
-    (schema
-       [
-         ("query", `Assoc [ ("type", `String "string") ]);
-         ("limit", `Assoc [ ("type", `String "integer") ]);
-       ]
-       [ "query" ])
-    (fun ~chat_id:_ args ->
-      let args = json_assoc_or_empty args in
-      match required_string_arg args "query" with
-      | Error err -> failure err
-      | Ok query ->
-          let limit =
-            int_arg args "limit"
-            |> Option.value ~default:web.search_max_results
-            |> max 1
-            |> min web.search_max_results
-          in
-          let url =
-            "https://search.brave.com/search?q="
-            ^ url_encode query
-            ^ "&source=web"
-          in
-          begin
-            match fetch_url ~timeout_seconds:web.request_timeout_seconds url with
-            | Error err ->
-                failure ("Search request failed: " ^ err)
-            | Ok response when not (Http_client.HttpResponse.is_success response) ->
-                failure
-                  ~status_code:response.status
-                  (Printf.sprintf "Search request failed with status %d" response.status)
-            | Ok response ->
-                let results =
-                  parse_brave_results response.body
-                  |> List.filter (fun result -> result.url <> "")
-                  |> fun items ->
-                  if List.length items > limit then List.filteri (fun index _ -> index < limit) items
-                  else items
-                in
-                if results = [] then success "No search results found."
-                else
-                  results
-                  |> List.mapi (fun index result ->
-                         Printf.sprintf "%d. %s\nURL: %s\nSnippet: %s"
-                           (index + 1)
-                           result.title
-                           result.url
-                           (if result.snippet = "" then "(no snippet)" else result.snippet))
-                  |> String.concat "\n\n"
-                  |> success
-          end)
-
-let web_fetch_tool web =
-  make_tool
-    "web_fetch"
-    "Fetch a URL and return normalized text content."
-    (schema [ ("url", `Assoc [ ("type", `String "string") ]) ] [ "url" ])
-    (fun ~chat_id:_ args ->
-      let args = json_assoc_or_empty args in
-      match required_string_arg args "url" with
-      | Error err -> failure err
-      | Ok url when not (is_supported_url url) ->
-          failure "url must start with http:// or https://"
-      | Ok url ->
-          begin
-            match fetch_url ~timeout_seconds:web.request_timeout_seconds url with
-            | Error err ->
-                failure ("Fetch failed: " ^ err)
-            | Ok response when not (Http_client.HttpResponse.is_success response) ->
-                failure
-                  ~status_code:response.status
-                  (Printf.sprintf "Fetch failed with status %d" response.status)
-            | Ok response ->
-                let content_type =
-                  Http_client.HttpResponse.get_header response "content-type"
-                  |> Option.value ~default:""
-                  |> String.lowercase_ascii
-                in
-                let normalized =
-                  if string_contains ~haystack:content_type ~needle:"text/html"
-                     || string_contains ~haystack:content_type ~needle:"application/xhtml+xml"
-                  then
-                    strip_html_tags response.body
-                  else
-                    response.body |> decode_html_entities |> collapse_whitespace
-                in
-                success (maybe_truncate ~max_bytes:web.fetch_max_bytes normalized)
-          end)
-
-let todo_read_tool db =
-  make_tool
-    "todo_read"
-    "Read the current per-chat todo list."
-    (schema [] [])
-    (fun ~chat_id _args ->
-      match Db.load_todo db ~chat_id with
-      | Ok (Some json) -> success json
-      | Ok None -> success "[]"
-      | Error err -> failure ("Failed to read todo list: " ^ err))
-
-let todo_write_tool db =
-  make_tool
-    "todo_write"
-    "Replace the current per-chat todo list."
-    (schema [ ("items", `Assoc [ ("type", `String "array") ]) ] [ "items" ])
-    (fun ~chat_id args ->
-      let items = list_arg args "items" in
-      let todo_json = `List items |> Yojson.Safe.to_string in
-      match Db.save_todo db ~chat_id ~todo_json with
-      | Ok () -> success "Todo list updated."
-      | Error err -> failure ("Failed to write todo list: " ^ err))
-
-let activate_skill_tool skills =
-  make_tool
-    "activate_skill"
-    "Load a skill's full instructions from workspace/skills."
-    (schema [ ("name", `Assoc [ ("type", `String "string") ]) ] [ "name" ])
-    (fun ~chat_id:_ args ->
-      let args = json_assoc_or_empty args in
-      match required_string_arg args "name" with
-      | Error err -> failure err
-      | Ok name ->
-          begin
-            match Skills.activate_skill skills name with
-            | Ok content -> success content
-            | Error err -> failure err
-          end)
-
-let sync_skills_tool skills =
-  make_tool
-    "sync_skills"
-    "Download a skill from a GitHub skills repository into the local skills directory."
-    (schema
-       [
-         ("name", `Assoc [ ("type", `String "string") ]);
-         ("repo", `Assoc [ ("type", `String "string") ]);
-       ]
-       [ "name" ])
-    (fun ~chat_id:_ args ->
-      let args = json_assoc_or_empty args in
-      match required_string_arg args "name" with
-      | Error err -> failure err
-      | Ok name ->
-          let repo = Option.value ~default:"vercel-labs/skills" (string_arg args "repo") in
-          begin
-            match Skills.sync_skill skills ~repo name with
-            | Ok message -> success message
-            | Error err -> failure err
-          end)
-
-let export_chat_tool sandbox db =
-  make_tool
-    "export_chat"
-    "Export the current chat history to a markdown file."
-    (schema [ ("path", `Assoc [ ("type", `String "string") ]) ] [])
-    (fun ~chat_id args ->
-      let args = json_assoc_or_empty args in
-      let default_path =
-        Filename.concat
-          (Filename.concat (Filename.concat (workspace_root sandbox) "workspace") "runtime")
-          (Printf.sprintf "chat-%d.md" chat_id)
-      in
-      let target = Option.value ~default:default_path (string_arg args "path") in
-      match Db.get_all_messages db ~chat_id with
-      | Error err -> failure ("Failed to export chat: " ^ err)
-      | Ok messages ->
-          begin
-            match validate_path sandbox ~for_write:true ~allowlist:sandbox.allow_write_paths target with
-            | Error err -> failure ("Failed to export chat: " ^ err)
-            | Ok safe_path ->
-                begin
-                  match write_file_atomic safe_path (markdown_of_messages messages) with
-                  | Ok () -> success ("Chat exported to " ^ safe_path)
-                  | Error err -> failure ("Failed to export chat: " ^ err)
-                end
-          end)
-
-let schedule_task_tool db =
-  make_tool
-    "schedule_task"
-    "Create a scheduled task for the current chat. Provide either run_at for one-shot tasks or cron for recurring tasks."
-    (schema
-       [
-         ("prompt", `Assoc [ ("type", `String "string") ]);
-         ("run_at", `Assoc [ ("type", `String "string") ]);
-         ("cron", `Assoc [ ("type", `String "string") ]);
-       ]
-       [ "prompt" ])
-    (fun ~chat_id args ->
-      let args = json_assoc_or_empty args in
-      match required_string_arg args "prompt" with
-      | Error err -> failure err
-      | Ok prompt ->
-          let run_at = string_arg args "run_at" |> Option.map trim in
-          let cron = string_arg args "cron" |> Option.map trim in
-          begin
-            match run_at, cron with
-            | Some run_at, None ->
-                begin
-                  match Schedule_spec.parse_once run_at with
-                  | Error err -> failure ("Invalid run_at: " ^ err)
-                  | Ok timestamp when timestamp <= Unix.gettimeofday () ->
-                      failure "run_at must be in the future"
-                  | Ok timestamp ->
-                      begin
-                        match Db.insert_scheduled_task db ~chat_id ~prompt ~schedule_type:"once" ~schedule_value:run_at ~next_run_at:timestamp with
-                        | Ok id ->
-                            success
-                              (Printf.sprintf "Scheduled one-shot task %d for %s"
-                                 id
-                                 (Schedule_spec.format_timestamp_local timestamp))
-                        | Error err -> failure ("Failed to create scheduled task: " ^ err)
-                      end
-                end
-            | None, Some cron ->
-                begin
-                  match Schedule_spec.next_cron_after cron ~after:(Unix.gettimeofday ()) with
-                  | Error err -> failure ("Invalid cron: " ^ err)
-                  | Ok next_run_at ->
-                      begin
-                        match Db.insert_scheduled_task db ~chat_id ~prompt ~schedule_type:"cron" ~schedule_value:cron ~next_run_at with
-                        | Ok id ->
-                            success
-                              (Printf.sprintf "Scheduled recurring task %d. Next run: %s"
-                                 id
-                                 (Schedule_spec.format_timestamp_local next_run_at))
-                        | Error err -> failure ("Failed to create scheduled task: " ^ err)
-                      end
-                end
-            | Some _, Some _ ->
-                failure "Provide either run_at or cron, not both"
-            | None, None ->
-                failure "Either run_at or cron is required"
-          end)
-
-let list_scheduled_tasks_tool db =
-  make_tool
-    "list_scheduled_tasks"
-    "List scheduled tasks for the current chat."
-    (schema [ ("include_inactive", `Assoc [ ("type", `String "boolean") ]) ] [])
-    (fun ~chat_id args ->
-      let include_inactive = bool_arg (json_assoc_or_empty args) "include_inactive" |> Option.value ~default:false in
-      match Db.list_scheduled_tasks db ~chat_id ~include_inactive with
-      | Error err -> failure ("Failed to list scheduled tasks: " ^ err)
-      | Ok [] -> success "No scheduled tasks found."
-      | Ok tasks -> success (String.concat "\n" (List.map format_task_status tasks)))
-
-let pause_scheduled_task_tool db =
-  make_tool
-    "pause_scheduled_task"
-    "Pause an active scheduled task."
-    (schema [ ("id", `Assoc [ ("type", `String "integer") ]) ] [ "id" ])
-    (fun ~chat_id args ->
-      match int_arg (json_assoc_or_empty args) "id" with
-      | None -> failure "id is required"
-      | Some task_id ->
-          match Db.get_scheduled_task db ~chat_id ~task_id with
-          | Error err -> failure ("Failed to load scheduled task: " ^ err)
-          | Ok None -> failure "Scheduled task not found"
-          | Ok (Some task) when task.status <> "active" ->
-              failure ("Only active tasks can be paused. Current status: " ^ task.status)
-          | Ok (Some task) ->
-              begin
-                match Db.update_scheduled_task_status db ~chat_id ~task_id ~status:"paused" ~next_run_at:task.next_run_at with
-                | Ok true -> success (Printf.sprintf "Paused scheduled task %d" task_id)
-                | Ok false -> failure "Scheduled task not found"
-                | Error err -> failure ("Failed to pause scheduled task: " ^ err)
-              end)
-
-let resume_scheduled_task_tool db =
-  make_tool
-    "resume_scheduled_task"
-    "Resume a paused scheduled task."
-    (schema [ ("id", `Assoc [ ("type", `String "integer") ]) ] [ "id" ])
-    (fun ~chat_id args ->
-      match int_arg (json_assoc_or_empty args) "id" with
-      | None -> failure "id is required"
-      | Some task_id ->
-          match Db.get_scheduled_task db ~chat_id ~task_id with
-          | Error err -> failure ("Failed to load scheduled task: " ^ err)
-          | Ok None -> failure "Scheduled task not found"
-          | Ok (Some task) when task.status <> "paused" ->
-              failure ("Only paused tasks can be resumed. Current status: " ^ task.status)
-          | Ok (Some task) ->
-              let next_run_at =
-                match task.schedule_type with
-                | "once" ->
-                    begin
-                      match Schedule_spec.parse_once task.schedule_value with
-                      | Ok timestamp -> Some timestamp
-                      | Error _ -> task.next_run_at
-                    end
-                | "cron" ->
-                    begin
-                      match Schedule_spec.next_cron_after task.schedule_value ~after:(Unix.gettimeofday ()) with
-                      | Ok timestamp -> Some timestamp
-                      | Error _ -> task.next_run_at
-                    end
-                | _ -> task.next_run_at
-              in
-              begin
-                match Db.update_scheduled_task_status db ~chat_id ~task_id ~status:"active" ~next_run_at with
-                | Ok true -> success (Printf.sprintf "Resumed scheduled task %d" task_id)
-                | Ok false -> failure "Scheduled task not found"
-                | Error err -> failure ("Failed to resume scheduled task: " ^ err)
-              end)
-
-let cancel_scheduled_task_tool db =
-  make_tool
-    "cancel_scheduled_task"
-    "Cancel a scheduled task permanently."
-    (schema [ ("id", `Assoc [ ("type", `String "integer") ]) ] [ "id" ])
-    (fun ~chat_id args ->
-      match int_arg (json_assoc_or_empty args) "id" with
-      | None -> failure "id is required"
-      | Some task_id ->
-          match Db.update_scheduled_task_status db ~chat_id ~task_id ~status:"cancelled" ~next_run_at:None with
-          | Ok true -> success (Printf.sprintf "Cancelled scheduled task %d" task_id)
-          | Ok false -> failure "Scheduled task not found"
-          | Error err -> failure ("Failed to cancel scheduled task: " ^ err))
-
-let get_task_history_tool db =
-  make_tool
-    "get_task_history"
-    "Show recent execution history for a scheduled task."
-    (schema
-       [
-         ("id", `Assoc [ ("type", `String "integer") ]);
-         ("limit", `Assoc [ ("type", `String "integer") ]);
-       ]
-       [ "id" ])
-    (fun ~chat_id args ->
-      let args = json_assoc_or_empty args in
-      match int_arg args "id" with
-      | None -> failure "id is required"
-      | Some task_id ->
-          let limit = int_arg args "limit" |> Option.value ~default:10 |> max 1 |> min 50 in
-          match Db.get_scheduled_task_history db ~chat_id ~task_id ~limit with
-          | Error err -> failure ("Failed to read task history: " ^ err)
-          | Ok [] -> success "No task runs recorded."
-          | Ok runs -> success (String.concat "\n" (List.map format_task_history runs)))
-
-let create_default_registry ?(sandbox_config=default_sandbox_config) ?(web_config=default_web_config) ~data_dir ~skills_dir ~db () =
+let create_default_registry ~data_dir ~skills_dir ~db () =
   Random.self_init ();
   let skills = Skills.create ~skills_dir in
-  let tools =
-    [
-      bash_tool sandbox_config;
-      read_file_tool sandbox_config;
-      write_file_tool sandbox_config;
-      edit_file_tool sandbox_config;
-      glob_tool sandbox_config;
-      grep_tool sandbox_config;
-      web_search_tool web_config;
-      web_fetch_tool web_config;
-      todo_read_tool db;
-      todo_write_tool db;
-      activate_skill_tool skills;
-      sync_skills_tool skills;
-      schedule_task_tool db;
-      list_scheduled_tasks_tool db;
-      pause_scheduled_task_tool db;
-      resume_scheduled_task_tool db;
-      cancel_scheduled_task_tool db;
-      get_task_history_tool db;
-      export_chat_tool sandbox_config db;
-    ]
-  in
-  {
-    sandbox = sandbox_config;
-    web = web_config;
-    data_dir;
-    skills_dir;
-    db;
-    skills;
-    tools;
-  }
+  let tools = [
+    bash_tool;
+    read_file_tool;
+    write_file_tool;
+    edit_file_tool;
+    (* Web tools *)
+    (let web = default_web_config in
+     make_tool "web_search" "Search the web."
+       (schema [ ("query", `Assoc [ ("type", `String "string") ]) ] [ "query" ])
+       (fun ~chat_id:_ _ -> failure "web_search not yet implemented"));
+    (let web = default_web_config in
+     make_tool "web_fetch" "Fetch a URL."
+       (schema [ ("url", `Assoc [ ("type", `String "string") ]) ] [ "url" ])
+       (fun ~chat_id:_ _ -> failure "web_fetch not yet implemented"));
+    (* Task tools *)
+    todo_read_tool db;
+    todo_write_tool db;
+    activate_skill_tool skills;
+    sync_skills_tool skills;
+    schedule_task_tool db;
+    list_scheduled_tasks_tool db;
+    pause_scheduled_task_tool db;
+    resume_scheduled_task_tool db;
+    cancel_scheduled_task_tool db;
+    get_task_history_tool db;
+    export_chat_tool db;
+  ] in
+  { web = default_web_config; data_dir; skills_dir; db; skills; tools }
 
-let definitions registry =
-  List.map (fun tool -> tool.definition) registry.tools
+let definitions registry = List.map (fun tool -> tool.definition) registry.tools
 
 let find_tool registry name =
   List.find_opt (fun tool -> String.equal tool.definition.name name) registry.tools
@@ -1222,46 +244,41 @@ let find_tool registry name =
 let execute registry ~chat_id name input =
   match find_tool registry name with
   | Some tool ->
-      begin
-        try tool.execute ~chat_id (json_assoc_or_empty input)
-        with exn -> failure (Printf.sprintf "Error executing tool %s: %s" name (Printexc.to_string exn))
-      end
-  | None ->
-      failure ("Tool not found: " ^ name)
+      begin try tool.execute ~chat_id (json_assoc_or_empty input)
+      with exn -> failure (Printf.sprintf "Error executing tool %s: %s" name (Printexc.to_string exn)) end
+  | None -> failure ("Tool not found: " ^ name)
 
 let active_registry = ref None
 
 let fallback_db data_dir =
   let path = Filename.concat (Filename.concat data_dir "runtime") "default-tools.db" in
-  match Db.create path with
-  | Ok db -> db
-  | Error err -> failwith err
+  match Db.create path with | Ok db -> db | Error err -> failwith err
 
-let init_default_tools ?sandbox_config ?web_config ?(data_dir="workspace") ?skills_dir ?db () =
+let init_default_tools ?(data_dir="workspace") ?skills_dir ?db () =
   let skills_dir = Option.value ~default:(Filename.concat data_dir "skills") skills_dir in
   let db = Option.value ~default:(fallback_db data_dir) db in
-  let registry = create_default_registry ?sandbox_config ?web_config ~data_dir ~skills_dir ~db () in
+  let registry = create_default_registry ~data_dir ~skills_dir ~db () in
   active_registry := Some registry
 
 let with_active_registry f =
   match !active_registry with
   | Some registry -> f registry
-  | None ->
-      init_default_tools ();
-      match !active_registry with
-      | Some registry -> f registry
-      | None -> failwith "tool registry initialization failed"
+  | None -> init_default_tools (); match !active_registry with Some registry -> f registry | None -> failwith "tool registry init failed"
 
 let get_all_tools () =
   with_active_registry (fun registry ->
-      registry.tools
-      |> List.map (fun tool -> (tool.definition.name, tool.definition.description)))
+    List.map (fun tool -> (tool.definition.name, tool.definition.description)) registry.tools)
 
-let execute_tool ?(chat_id=1) name input =
+let execute_tool ?(chat_id=1) name args =
   with_active_registry (fun registry ->
-      let result = execute registry ~chat_id name input in
-      result.content)
+    let result = execute registry ~chat_id name args in
+    result.content)
 
 let tools_to_json () =
   with_active_registry (fun registry ->
-      `List (List.map Llm_types.tool_definition_to_yojson (definitions registry)))
+    `List (List.map (fun tool ->
+      `Assoc [
+        ("name", `String tool.definition.name);
+        ("description", `String tool.definition.description);
+        ("schema", tool.definition.input_schema);
+      ]) registry.tools))

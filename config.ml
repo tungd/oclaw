@@ -1,13 +1,7 @@
 (** YAML-backed configuration for the CLI-first assistant.
     
-    Configuration is organized into logical groups:
-    - LLM: model, API key, base URL, timeout
-    - Data: directories for runtime state, skills, workspace
-    - Agent: history limits, tool iteration limits
-    - Tools: sandbox paths, exec timeouts, deny patterns
-    - Web: fetch timeouts, byte limits, search results
-    - Scheduler: enable/disable, poll interval
-    - Debug: logging level
+    Simplified configuration with sensible defaults.
+    Most settings are hardcoded; only essential overrides are exposed.
 *)
 
 module Yaml_lib = Yaml
@@ -18,49 +12,52 @@ module Yaml = Protocol_conv_yaml.Yaml
    ============================================================================ *)
 
 type config = {
-  (* LLM Settings *)
-  llm_provider : string [@default "dashscope"];
-  llm_model : string [@default "qwen3.5-plus"];
-  llm_api_key : string [@default ""];
-  llm_api_base : string [@default "https://coding-intl.dashscope.aliyuncs.com/v1"];
-  llm_timeout : int [@default 60];
+  (* LLM Settings - required *)
+  llm_model : string;
+  llm_api_key : string;
+  llm_api_base : string;
   
-  (* Data Directories *)
-  data_dir : string [@default "workspace"];
-  skills_dir : string [@default ""];
+  (* Data Directory *)
+  data_dir : string;
   
   (* Agent Limits *)
-  max_history_messages : int [@default 24];
-  max_tool_iterations : int [@default 256];
-  
-  (* Tool Sandbox *)
-  tools_workspace : string [@default "."];
-  tools_restrict_to_workspace : bool [@default true];
-  tools_allow_read_paths : string list [@default []];
-  tools_allow_write_paths : string list [@default []];
-  tools_exec_timeout_seconds : int [@default 60];
-  tools_exec_enable_deny_patterns : bool [@default true];
-  tools_exec_custom_deny_patterns : string list [@default []];
-  tools_exec_custom_allow_patterns : string list [@default []];
-  
-  (* Web Tools *)
-  web_request_timeout_seconds : int [@default 20];
-  web_fetch_max_bytes : int [@default 20000];
-  web_search_max_results : int [@default 5];
-  
-  (* Scheduler *)
-  scheduler_enabled : bool [@default true];
-  scheduler_poll_interval_seconds : int [@default 30];
+  max_tool_iterations : int;
   
   (* Debug *)
-  debug : bool [@default false];
+  debug : bool;
 }
 [@@deriving protocol ~driver:(module Yaml)]
 
-let default_config : config =
-  config_of_yaml_exn (`O [])
+(* ============================================================================
+   Hardcoded Constants
+   ============================================================================ *)
 
-let load_config filename =
+let default_llm_api_base = "https://coding-intl.dashscope.aliyuncs.com/v1"
+let default_data_dir = "workspace"
+let default_max_tool_iterations = 256
+let default_llm_timeout = 60
+let scheduler_poll_interval_seconds = 60
+let scheduler_enabled = true
+
+(* ============================================================================
+   Default Configuration
+   ============================================================================ *)
+
+let default_config : config = {
+  llm_model = "qwen3.5-plus";
+  llm_api_key = "";
+  llm_api_base = default_llm_api_base;
+  data_dir = default_data_dir;
+  max_tool_iterations = default_max_tool_iterations;
+  debug = false;
+}
+
+(* ============================================================================
+   Immutable Configuration Loading Functions
+   ============================================================================ *)
+
+(** Load configuration from a YAML file *)
+let from_file filename =
   try
     let yaml_content = In_channel.with_open_text filename In_channel.input_all in
     match Yaml_lib.of_string yaml_content with
@@ -76,7 +73,104 @@ let load_config filename =
     Printf.printf "Error loading config: %s\nUsing default configuration.\n" (Printexc.to_string exn);
     default_config
 
-let save_config filename config =
+(** Load configuration from environment variables *)
+let from_env () =
+  let env_string name default =
+    match Sys.getenv_opt name with
+    | Some value when String.trim value <> "" -> value
+    | _ -> default
+  in
+  let env_bool name default =
+    match Sys.getenv_opt name with
+    | Some value ->
+        let value = String.lowercase_ascii (String.trim value) in
+        value = "1" || value = "true" || value = "yes" || (default && value <> "0" && value <> "false" && value <> "no")
+    | None -> default
+  in
+  let env_int name default =
+    match Sys.getenv_opt name with
+    | Some value ->
+        begin
+          match int_of_string_opt (String.trim value) with
+          | Some parsed -> parsed
+          | None -> default
+        end
+    | None -> default
+  in
+  {
+    llm_model = env_string "OCLAW_MODEL" default_config.llm_model;
+    llm_api_key = env_string "OCLAW_API_KEY" default_config.llm_api_key;
+    llm_api_base = env_string "OCLAW_API_BASE" default_config.llm_api_base;
+    data_dir = env_string "OCLAW_DATA_DIR" default_config.data_dir;
+    max_tool_iterations = env_int "OCLAW_MAX_TOOL_ITERATIONS" default_config.max_tool_iterations;
+    debug = env_bool "OCLAW_DEBUG" default_config.debug;
+  }
+
+(** Parse configuration from command-line arguments.
+    Returns a config with only the overridden fields set, others use defaults.
+    
+    Supported arguments:
+    - --model <string>
+    - --api-key <string>
+    - --api-base <string>
+    - --data-dir <string>
+    - --max-tool-iterations <int>
+    - --debug
+*)
+let from_args args =
+  let rec parse acc remaining =
+    match remaining with
+    | [] -> acc
+    | "--model" :: value :: rest ->
+        parse { acc with llm_model = value } rest
+    | "--api-key" :: value :: rest ->
+        parse { acc with llm_api_key = value } rest
+    | "--api-base" :: value :: rest ->
+        parse { acc with llm_api_base = value } rest
+    | "--data-dir" :: value :: rest ->
+        parse { acc with data_dir = value } rest
+    | "--max-tool-iterations" :: value :: rest ->
+        begin
+          match int_of_string_opt value with
+          | Some v -> parse { acc with max_tool_iterations = v } rest
+          | None -> parse acc rest
+        end
+    | "--debug" :: rest ->
+        parse { acc with debug = true } rest
+    | _ :: rest ->
+        parse acc rest
+  in
+  parse default_config args
+
+(** Merge multiple configurations. Later configs override earlier ones. *)
+let merge configs =
+  let merge_two base override =
+    {
+      llm_model = if override.llm_model <> default_config.llm_model then override.llm_model else base.llm_model;
+      llm_api_key = if override.llm_api_key <> default_config.llm_api_key then override.llm_api_key else base.llm_api_key;
+      llm_api_base = if override.llm_api_base <> default_config.llm_api_base then override.llm_api_base else base.llm_api_base;
+      data_dir = if override.data_dir <> default_config.data_dir then override.data_dir else base.data_dir;
+      max_tool_iterations = if override.max_tool_iterations <> default_config.max_tool_iterations then override.max_tool_iterations else base.max_tool_iterations;
+      debug = base.debug || override.debug;
+    }
+  in
+  List.fold_left merge_two default_config configs
+
+(** Convenience function to load config with standard priority: file < env < args *)
+let load ?config_file ?(cli_args=[]) () =
+  let file_config = match config_file with
+    | Some path when Sys.file_exists path -> from_file path
+    | _ -> default_config
+  in
+  let env_config = from_env () in
+  let args_config = from_args cli_args in
+  merge [file_config; env_config; args_config]
+
+(* ============================================================================
+   Save Configuration
+   ============================================================================ *)
+
+let save filename config =
   try
     let yaml_value = config_to_yaml config in
     let yaml_string = Yaml_lib.to_string_exn yaml_value in
@@ -86,101 +180,43 @@ let save_config filename config =
     Printf.printf "Error saving config: %s\n" (Printexc.to_string exn);
     false
 
-let create_default_config filename =
-  save_config filename default_config
-
-let env_string name current =
-  match Sys.getenv_opt name with
-  | Some value when String.trim value <> "" -> value
-  | _ -> current
-
-let env_bool name current =
-  match Sys.getenv_opt name with
-  | Some value ->
-      let value = String.lowercase_ascii (String.trim value) in
-      value = "1" || value = "true" || value = "yes" || (current && value <> "0" && value <> "false" && value <> "no")
-  | None -> current
-
-let env_int name current =
-  match Sys.getenv_opt name with
-  | Some value ->
-      begin
-        match int_of_string_opt (String.trim value) with
-        | Some parsed -> parsed
-        | None -> current
-      end
-  | None -> current
-
-let env_float name current =
-  match Sys.getenv_opt name with
-  | Some value ->
-      begin
-        match float_of_string_opt (String.trim value) with
-        | Some parsed -> parsed
-        | None -> current
-      end
-  | None -> current
-
-let env_paths name current =
-  match Sys.getenv_opt name with
-  | Some value when String.trim value <> "" ->
-      String.split_on_char ':' value |> List.filter (fun path -> String.trim path <> "")
-  | _ -> current
+let create_default filename =
+  save filename default_config
 
 (* ============================================================================
-   Environment Variable Overrides
-   Common: OCLAW_API_KEY, OCLAW_MODEL, OCLAW_TIMEOUT
-   Advanced: tool paths, web limits, scheduler settings
+   Validation
    ============================================================================ *)
 
-let apply_env_overrides config =
-  {
-    config with
-    (* LLM *)
-    llm_provider = env_string "OCLAW_LLM_PROVIDER" config.llm_provider;
-    llm_model = env_string "OCLAW_MODEL" config.llm_model;
-    llm_api_key = env_string "OCLAW_API_KEY" config.llm_api_key;
-    llm_api_base = env_string "OCLAW_API_BASE" config.llm_api_base;
-    llm_timeout = env_int "OCLAW_TIMEOUT" config.llm_timeout;
-    
-    (* Data *)
-    data_dir = env_string "OCLAW_DATA_DIR" config.data_dir;
-    skills_dir = env_string "OCLAW_SKILLS_DIR" config.skills_dir;
-    
-    (* Agent *)
-    max_history_messages = env_int "OCLAW_MAX_HISTORY_MESSAGES" config.max_history_messages;
-    max_tool_iterations = env_int "OCLAW_MAX_TOOL_ITERATIONS" config.max_tool_iterations;
-    
-    (* Tools *)
-    tools_workspace = env_string "OCLAW_WORKSPACE" config.tools_workspace;
-    tools_restrict_to_workspace = env_bool "OCLAW_RESTRICT_TO_WORKSPACE" config.tools_restrict_to_workspace;
-    tools_allow_read_paths = env_paths "OCLAW_ALLOW_READ_PATHS" config.tools_allow_read_paths;
-    tools_allow_write_paths = env_paths "OCLAW_ALLOW_WRITE_PATHS" config.tools_allow_write_paths;
-    tools_exec_timeout_seconds = env_int "OCLAW_EXEC_TIMEOUT" config.tools_exec_timeout_seconds;
-    tools_exec_enable_deny_patterns =
-      env_bool "OCLAW_EXEC_ENABLE_DENY_PATTERNS" config.tools_exec_enable_deny_patterns;
-    tools_exec_custom_deny_patterns =
-      env_paths "OCLAW_EXEC_CUSTOM_DENY_PATTERNS" config.tools_exec_custom_deny_patterns;
-    tools_exec_custom_allow_patterns =
-      env_paths "OCLAW_EXEC_CUSTOM_ALLOW_PATTERNS" config.tools_exec_custom_allow_patterns;
-    
-    (* Web *)
-    web_request_timeout_seconds =
-      env_int "OCLAW_WEB_REQUEST_TIMEOUT" config.web_request_timeout_seconds;
-    web_fetch_max_bytes =
-      env_int "OCLAW_WEB_FETCH_MAX_BYTES" config.web_fetch_max_bytes;
-    web_search_max_results =
-      env_int "OCLAW_WEB_SEARCH_MAX_RESULTS" config.web_search_max_results;
-    
-    (* Scheduler *)
-    scheduler_enabled =
-      env_bool "OCLAW_SCHEDULER_ENABLED" config.scheduler_enabled;
-    scheduler_poll_interval_seconds =
-      env_int "OCLAW_SCHEDULER_POLL_INTERVAL" config.scheduler_poll_interval_seconds;
-    
-    (* Debug *)
-    debug = env_bool "OCLAW_DEBUG" config.debug;
-  }
+let validate config =
+  let errors = ref [] in
+  if String.trim config.llm_api_key = "" then
+    errors := "LLM API key is required. Set llm_api_key or OCLAW_API_KEY." :: !errors;
+  if config.max_tool_iterations <= 0 then
+    errors := "max_tool_iterations must be positive" :: !errors;
+  if !errors = [] then Ok config else Error !errors
+
+(* ============================================================================
+   Helper Functions
+   ============================================================================ *)
+
+let runtime_data_dir config =
+  Filename.concat config.data_dir "runtime"
+
+let skills_data_dir config =
+  Filename.concat config.data_dir "skills"
+
+let llm_timeout _config =
+  default_llm_timeout
+
+let scheduler_interval _config =
+  scheduler_poll_interval_seconds
+
+let is_scheduler_enabled _config =
+  scheduler_enabled
+
+(* ============================================================================
+   Conversion to LLM Provider Config
+   ============================================================================ *)
 
 let to_llm_provider_config config =
   let model = {
@@ -190,41 +226,12 @@ let to_llm_provider_config config =
     input_types = [ "text" ];
     cost = (0.0, 0.0, 0.0, 0.0);
     context_window = 1000000;
-    max_tokens = 4096;  (* Use sensible default, not user-configurable *)
+    max_tokens = 4096;
   } in
   Llm_provider.{
     api_base = config.llm_api_base;
     api_key = config.llm_api_key;
     model;
     max_tokens = 4096;
-    timeout = config.llm_timeout;
+    timeout = default_llm_timeout;
   }
-
-let validate_config config =
-  let errors = ref [] in
-  if String.trim config.llm_api_key = "" then
-    errors := "LLM API key is required. Set llm_api_key or OCLAW_API_KEY." :: !errors;
-  if config.llm_timeout <= 0 then
-    errors := "LLM timeout must be positive" :: !errors;
-  if config.max_history_messages <= 0 then
-    errors := "max_history_messages must be positive" :: !errors;
-  if config.max_tool_iterations <= 0 then
-    errors := "max_tool_iterations must be positive" :: !errors;
-  if config.tools_exec_timeout_seconds <= 0 then
-    errors := "Tools exec_timeout_seconds must be positive" :: !errors;
-  if config.web_request_timeout_seconds <= 0 then
-    errors := "web_request_timeout_seconds must be positive" :: !errors;
-  if config.web_fetch_max_bytes <= 0 then
-    errors := "web_fetch_max_bytes must be positive" :: !errors;
-  if config.web_search_max_results <= 0 then
-    errors := "web_search_max_results must be positive" :: !errors;
-  if config.scheduler_poll_interval_seconds <= 0 then
-    errors := "scheduler_poll_interval_seconds must be positive" :: !errors;
-  if !errors = [] then Ok config else Error !errors
-
-let runtime_data_dir config =
-  Filename.concat config.data_dir "runtime"
-
-let skills_data_dir config =
-  if String.trim config.skills_dir <> "" then config.skills_dir
-  else Filename.concat config.data_dir "skills"

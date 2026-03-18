@@ -43,21 +43,6 @@ let create_app_state ?(llm_call=default_llm_call) ?system_prompt_override config
         let skills = Skills.create ~skills_dir in
         let tools =
           Tools.create_default_registry
-            ~sandbox_config:{
-              Tools.workspace_root = config.tools_workspace;
-              restrict_to_workspace = config.tools_restrict_to_workspace;
-              allow_read_paths = config.tools_allow_read_paths;
-              allow_write_paths = config.tools_allow_write_paths;
-              exec_timeout_seconds = config.tools_exec_timeout_seconds;
-              exec_enable_deny_patterns = config.tools_exec_enable_deny_patterns;
-              exec_custom_deny_patterns = config.tools_exec_custom_deny_patterns;
-              exec_custom_allow_patterns = config.tools_exec_custom_allow_patterns;
-            }
-            ~web_config:Tools.{
-              request_timeout_seconds = config.web_request_timeout_seconds;
-              fetch_max_bytes = config.web_fetch_max_bytes;
-              search_max_results = config.web_search_max_results;
-            }
             ~data_dir:config.data_dir
             ~skills_dir
             ~db

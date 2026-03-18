@@ -6,12 +6,6 @@
  (flags :standard -w -A))
 
 (library
- (name log_color)
- (modules log_color)
- (libraries fmt.tty logs logs.fmt unix)
- (flags :standard -w -A))
-
-(library
  (name http_client)
  (modules http_client)
  (libraries curl iomux yojson logs)
@@ -101,8 +95,6 @@
  (modules oclaw)
  (libraries
   agent_engine
-  linenoise
-  log_color
   logs
   logs.fmt
   oclaw_config

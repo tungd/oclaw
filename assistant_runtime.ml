@@ -6,16 +6,14 @@ type t = {
 type llm_call =
   Runtime.llm_call
 
-let create ?llm_call ?system_prompt ?history_limit ?(chat_id=1) ?data_dir ~provider_config () =
+let create ?llm_call ?system_prompt ?(chat_id=1) ?data_dir ~provider_config () =
   let config =
     {
       Oclaw_config.Config.default_config with
       llm_model = provider_config.Llm_provider.model.name;
       llm_api_key = provider_config.api_key;
       llm_api_base = provider_config.api_base;
-      llm_timeout = provider_config.timeout;
       data_dir = Option.value ~default:"workspace" data_dir;
-      max_history_messages = Option.value ~default:Oclaw_config.Config.default_config.max_history_messages history_limit;
     }
   in
   match Runtime.create_app_state ?llm_call ?system_prompt_override:system_prompt config with

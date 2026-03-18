@@ -15,15 +15,13 @@ let expect cond msg =
 
 let test_env_overrides () =
   Unix.putenv "OCLAW_MODEL" "env-model";
-  Unix.putenv "OCLAW_WORKSPACE" "/tmp/oclaw-workspace";
-  Unix.putenv "OCLAW_ALLOW_READ_PATHS" "/tmp/read-a:/tmp/read-b";
-  Unix.putenv "OCLAW_WEB_SEARCH_MAX_RESULTS" "7";
+  Unix.putenv "OCLAW_DATA_DIR" "/tmp/oclaw-data";
+  Unix.putenv "OCLAW_MAX_TOOL_ITERATIONS" "500";
   Unix.putenv "OCLAW_DEBUG" "true";
-  let config = Config.apply_env_overrides Config.default_config in
+  let config = Config.from_env () in
   expect (String.equal config.llm_model "env-model") "model env override failed";
-  expect (String.equal config.tools_workspace "/tmp/oclaw-workspace") "workspace env override failed";
-  expect (config.tools_allow_read_paths = [ "/tmp/read-a"; "/tmp/read-b" ]) "allow_read_paths env override failed";
-  expect (config.web_search_max_results = 7) "web_search_max_results env override failed";
+  expect (String.equal config.data_dir "/tmp/oclaw-data") "data_dir env override failed";
+  expect (config.max_tool_iterations = 500) "max_tool_iterations env override failed";
   expect config.debug "debug env override failed";
   print_endline "  ✓ env_overrides"
 
@@ -34,19 +32,19 @@ let test_env_overrides () =
 let test_validation () =
   (* Missing API key *)
   let config1 = { Config.default_config with llm_api_key = "" } in
-  match Config.validate_config config1 with
+  match Config.validate config1 with
   | Ok _ -> fail "expected missing API key to fail validation"
   | Error errors -> expect (List.length errors >= 1) "expected API key error";
   
-  (* Invalid timeout *)
-  let config2 = { Config.default_config with llm_timeout = 0 } in
-  match Config.validate_config config2 with
-  | Ok _ -> fail "expected zero timeout to fail validation"
-  | Error errors -> expect (List.length errors >= 1) "expected timeout error";
+  (* Invalid max_tool_iterations *)
+  let config2 = { Config.default_config with max_tool_iterations = 0 } in
+  match Config.validate config2 with
+  | Ok _ -> fail "expected zero max_tool_iterations to fail validation"
+  | Error errors -> expect (List.length errors >= 1) "expected max_tool_iterations error";
   
   (* Multiple errors *)
-  let config3 = { Config.default_config with llm_api_key = ""; llm_timeout = 0 } in
-  match Config.validate_config config3 with
+  let config3 = { Config.default_config with llm_api_key = ""; max_tool_iterations = 0 } in
+  match Config.validate config3 with
   | Ok _ -> fail "expected invalid config to fail validation"
   | Error errors -> expect (List.length errors >= 2) "expected multiple validation errors";
   print_endline "  ✓ validation"
@@ -62,16 +60,14 @@ let test_save_load () =
     let original = {
       Config.default_config with
       llm_model = "test-model-123";
-      llm_timeout = 99;
-      max_history_messages = 50;
+      max_tool_iterations = 500;
       debug = true;
     } in
-    let saved = Config.save_config temp_file original in
-    if not saved then fail "save_config returned false";
-    let loaded = Config.load_config temp_file in
+    let saved = Config.save temp_file original in
+    if not saved then fail "save returned false";
+    let loaded = Config.from_file temp_file in
     expect (loaded.llm_model = "test-model-123") "model not preserved";
-    expect (loaded.llm_timeout = 99) "timeout not preserved";
-    expect (loaded.max_history_messages = 50) "history limit not preserved";
+    expect (loaded.max_tool_iterations = 500) "max_tool_iterations not preserved";
     expect loaded.debug "debug flag not preserved";
     Unix.unlink temp_file;
     print_endline "✓"
@@ -80,14 +76,40 @@ let test_save_load () =
     fail (Printf.sprintf "save/load test exception: %s" (Printexc.to_string exn))
 
 (* ============================================================================
+   Merge Priority
+   ============================================================================ *)
+
+let test_merge () =
+  let file_config = {
+    Config.default_config with
+    llm_model = "file-model";
+    llm_api_key = "file-key";
+  } in
+  let env_config = {
+    Config.default_config with
+    llm_model = "env-model";
+    data_dir = "/env/data";
+  } in
+  let args_config = {
+    Config.default_config with
+    llm_model = "args-model";
+    debug = true;
+  } in
+  let merged = Config.merge [file_config; env_config; args_config] in
+  expect (merged.llm_model = "args-model") "args should override env and file";
+  expect (merged.llm_api_key = "file-key") "file value preserved when not overridden";
+  expect (merged.data_dir = "/env/data") "env value preserved when not overridden";
+  expect merged.debug "debug from args";
+  print_endline "  ✓ merge"
+
+(* ============================================================================
    Default Config Sanity
    ============================================================================ *)
 
 let test_defaults () =
   let cfg = Config.default_config in
-  expect (cfg.llm_provider = "dashscope") "default provider wrong";
+  expect (cfg.llm_model = "qwen3.5-plus") "default model wrong";
   expect (cfg.max_tool_iterations = 256) "default tool iterations wrong";
-  expect cfg.tools_restrict_to_workspace "workspace restriction should default to true";
   expect (not cfg.debug) "debug should default to false";
   print_endline "  ✓ defaults"
 
@@ -101,4 +123,5 @@ let () =
   test_env_overrides ();
   test_validation ();
   test_save_load ();
+  test_merge ();
   print_endline "[PASS] all config tests ✓"
