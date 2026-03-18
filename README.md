@@ -50,6 +50,8 @@ The remaining configuration surface includes:
 - runtime data directories
 - session/history limits
 - tool sandbox settings
+- web tool limits
+- scheduler polling
 - debug logging
 
 Useful environment variables:
@@ -68,6 +70,11 @@ Useful environment variables:
 - `OCLAW_ALLOW_READ_PATHS`
 - `OCLAW_ALLOW_WRITE_PATHS`
 - `OCLAW_EXEC_TIMEOUT`
+- `OCLAW_WEB_REQUEST_TIMEOUT`
+- `OCLAW_WEB_FETCH_MAX_BYTES`
+- `OCLAW_WEB_SEARCH_MAX_RESULTS`
+- `OCLAW_SCHEDULER_ENABLED`
+- `OCLAW_SCHEDULER_POLL_INTERVAL`
 - `OCLAW_DEBUG`
 
 Useful CLI flags:
@@ -108,6 +115,7 @@ Runtime state lives under `workspace/runtime/` by default:
 - SQLite DB: `workspace/runtime/oclaw.db`
 - resumable sessions: stored in SQLite by `chat_id`
 - todo lists: stored in SQLite by `chat_id`
+- scheduled tasks and run history: stored in SQLite by `chat_id`
 
 Local skills live under `workspace/skills/`.
 
@@ -121,12 +129,20 @@ The default registry is rayclaw-style and CLI-focused:
 - `edit_file`
 - `glob`
 - `grep`
+- `web_search`
+- `web_fetch`
 - `read_memory`
 - `write_memory`
 - `todo_read`
 - `todo_write`
 - `activate_skill`
 - `sync_skills`
+- `schedule_task`
+- `list_scheduled_tasks`
+- `pause_scheduled_task`
+- `resume_scheduled_task`
+- `cancel_scheduled_task`
+- `get_task_history`
 - `export_chat`
 
 ## Build and Test
@@ -137,4 +153,5 @@ _build/default/test_tools_registry.exe
 dune exec ./test_assistant_runtime.exe
 _build/default/test_llm_provider.exe
 _build/default/test_config.exe
+_build/default/test_schedule_spec.exe
 ```

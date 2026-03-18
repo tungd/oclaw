@@ -11,6 +11,12 @@ type sandbox_config = {
   exec_custom_allow_patterns : string list;
 }
 
+type web_config = {
+  request_timeout_seconds : int;
+  fetch_max_bytes : int;
+  search_max_results : int;
+}
+
 type tool_result = {
   content : string;
   is_error : bool;
@@ -23,11 +29,13 @@ type tool_result = {
 type t
 
 val default_sandbox_config : sandbox_config
+val default_web_config : web_config
 val success : ?status_code:int -> ?duration_ms:int -> ?error_type:string -> string -> tool_result
 val failure : ?status_code:int -> ?duration_ms:int -> ?error_type:string -> string -> tool_result
 
 val create_default_registry :
   ?sandbox_config:sandbox_config ->
+  ?web_config:web_config ->
   data_dir:string ->
   skills_dir:string ->
   db:Db.t ->
@@ -39,6 +47,7 @@ val execute : t -> chat_id:int -> string -> Yojson.Safe.t -> tool_result
 
 val init_default_tools :
   ?sandbox_config:sandbox_config ->
+  ?web_config:web_config ->
   ?data_dir:string ->
   ?skills_dir:string ->
   ?db:Db.t ->

@@ -14,6 +14,12 @@ type sandbox_config = {
   exec_custom_allow_patterns : string list;
 }
 
+type web_config = {
+  request_timeout_seconds : int;
+  fetch_max_bytes : int;
+  search_max_results : int;
+}
+
 type tool_result = {
   content : string;
   is_error : bool;
@@ -30,6 +36,7 @@ type tool = {
 
 type t = {
   sandbox : sandbox_config;
+  web : web_config;
   data_dir : string;
   skills_dir : string;
   db : Db.t;
@@ -47,6 +54,12 @@ let default_sandbox_config = {
   exec_enable_deny_patterns = true;
   exec_custom_deny_patterns = [];
   exec_custom_allow_patterns = [];
+}
+
+let default_web_config = {
+  request_timeout_seconds = 20;
+  fetch_max_bytes = 20000;
+  search_max_results = 5;
 }
 
 let success ?status_code ?duration_ms ?error_type content =
@@ -216,10 +229,152 @@ let int_arg json name =
   | `String value -> int_of_string_opt (trim value)
   | _ -> None
 
+let bool_arg json name =
+  match member name json with
+  | `Bool value -> Some value
+  | `String value ->
+      begin
+        match String.lowercase_ascii (trim value) with
+        | "true" | "1" | "yes" -> Some true
+        | "false" | "0" | "no" -> Some false
+        | _ -> None
+      end
+  | _ -> None
+
 let list_arg json name =
   match member name json with
   | `List values -> values
   | _ -> []
+
+let url_encode value =
+  let buffer = Buffer.create (String.length value * 3) in
+  String.iter
+    (fun ch ->
+      match ch with
+      | 'A' .. 'Z' | 'a' .. 'z' | '0' .. '9' | '-' | '_' | '.' | '~' ->
+          Buffer.add_char buffer ch
+      | ' ' ->
+          Buffer.add_char buffer '+'
+      | _ ->
+          Buffer.add_string buffer (Printf.sprintf "%%%02X" (Char.code ch)))
+    value;
+  Buffer.contents buffer
+
+let replace_all text pattern replacement =
+  Str.global_replace (Str.regexp_string pattern) replacement text
+
+let decode_html_entities text =
+  text
+  |> replace_all "&amp;" "&"
+  |> replace_all "&lt;" "<"
+  |> replace_all "&gt;" ">"
+  |> replace_all "&quot;" "\""
+  |> replace_all "&#39;" "'"
+  |> replace_all "&nbsp;" " "
+
+let collapse_whitespace text =
+  text
+  |> Str.global_replace (Str.regexp "[ \t\r\n]+") " "
+  |> trim
+
+let strip_html_tags text =
+  text
+  |> replace_all "<br>" "\n"
+  |> replace_all "<br/>" "\n"
+  |> replace_all "<br />" "\n"
+  |> Str.global_replace (Str.regexp "<[^>]+>") " "
+  |> decode_html_entities
+  |> collapse_whitespace
+
+let maybe_truncate ~max_bytes text =
+  if String.length text <= max_bytes then text
+  else String.sub text 0 max_bytes ^ "\n... (truncated)"
+
+let fetch_url ~timeout_seconds url =
+  try Ok (Http_client.get url [] timeout_seconds)
+  with
+  | Http_client.Http_error err -> Error err
+  | exn -> Error (Printexc.to_string exn)
+
+let split_on_marker text marker =
+  let marker_len = String.length marker in
+  let rec loop start acc =
+    try
+      let index = Str.search_forward (Str.regexp_string marker) text start in
+      let next_start = index + marker_len in
+      loop next_start (index :: acc)
+    with Not_found ->
+      List.rev acc
+  in
+  let indices = loop 0 [] in
+  let rec build acc = function
+    | [] -> List.rev acc
+    | [ index ] ->
+        List.rev (String.sub text index (String.length text - index) :: acc)
+    | index :: ((next_index :: _) as rest) ->
+        build (String.sub text index (next_index - index) :: acc) rest
+  in
+  build [] indices
+
+let first_match pattern text =
+  let regex = Str.regexp pattern in
+  try
+    ignore (Str.search_forward regex text 0);
+    Some (Str.matched_group 1 text)
+  with Not_found ->
+    None
+
+type search_result = {
+  title : string;
+  url : string;
+  snippet : string;
+}
+
+let parse_brave_results html =
+  let segments = split_on_marker html "data-type=\"web\"" in
+  segments
+  |> List.filter_map (fun segment ->
+         let url = first_match "<a href=\"\\([^\"]+\\)\"" segment in
+         let title =
+           first_match
+             "<div class=\"title search-snippet-title[^\"]*\"[^>]*>\\(.*\\)</div>"
+             segment
+         in
+         let snippet =
+           first_match
+             "<div class=\"content [^\"]*\">\\(.*\\)</div>"
+             segment
+         in
+         match url, title with
+         | Some url, Some title ->
+             Some {
+               title = strip_html_tags title;
+               url = decode_html_entities url;
+               snippet =
+                 (match snippet with
+                  | Some text -> strip_html_tags text
+                  | None -> "");
+             }
+         | _ -> None)
+
+let is_supported_url url =
+  String.starts_with ~prefix:"http://" url || String.starts_with ~prefix:"https://" url
+
+let format_task_status task =
+  let next_run =
+    match task.Db.next_run_at with
+    | Some timestamp -> Schedule_spec.format_timestamp_local timestamp
+    | None -> "-"
+  in
+  Printf.sprintf "[id=%d] status=%s type=%s next=%s prompt=%s"
+    task.Db.id task.Db.status task.Db.schedule_type next_run task.Db.prompt
+
+let format_task_history run =
+  Printf.sprintf "[run=%d] %s success=%b summary=%s"
+    run.Db.id
+    (Schedule_spec.format_timestamp_local run.Db.started_at)
+    run.Db.success
+    run.Db.summary
 
 let default_exec_deny_patterns = [
   "rm -rf";
@@ -670,6 +825,98 @@ let grep_tool sandbox =
                 end
           end)
 
+let web_search_tool web =
+  make_tool
+    "web_search"
+    "Search the web and return title, URL, and snippet results."
+    (schema
+       [
+         ("query", `Assoc [ ("type", `String "string") ]);
+         ("limit", `Assoc [ ("type", `String "integer") ]);
+       ]
+       [ "query" ])
+    (fun ~chat_id:_ args ->
+      let args = json_assoc_or_empty args in
+      match required_string_arg args "query" with
+      | Error err -> failure err
+      | Ok query ->
+          let limit =
+            int_arg args "limit"
+            |> Option.value ~default:web.search_max_results
+            |> max 1
+            |> min web.search_max_results
+          in
+          let url =
+            "https://search.brave.com/search?q="
+            ^ url_encode query
+            ^ "&source=web"
+          in
+          begin
+            match fetch_url ~timeout_seconds:web.request_timeout_seconds url with
+            | Error err ->
+                failure ("Search request failed: " ^ err)
+            | Ok response when not (Http_client.HttpResponse.is_success response) ->
+                failure
+                  ~status_code:response.status
+                  (Printf.sprintf "Search request failed with status %d" response.status)
+            | Ok response ->
+                let results =
+                  parse_brave_results response.body
+                  |> List.filter (fun result -> result.url <> "")
+                  |> fun items ->
+                  if List.length items > limit then List.filteri (fun index _ -> index < limit) items
+                  else items
+                in
+                if results = [] then success "No search results found."
+                else
+                  results
+                  |> List.mapi (fun index result ->
+                         Printf.sprintf "%d. %s\nURL: %s\nSnippet: %s"
+                           (index + 1)
+                           result.title
+                           result.url
+                           (if result.snippet = "" then "(no snippet)" else result.snippet))
+                  |> String.concat "\n\n"
+                  |> success
+          end)
+
+let web_fetch_tool web =
+  make_tool
+    "web_fetch"
+    "Fetch a URL and return normalized text content."
+    (schema [ ("url", `Assoc [ ("type", `String "string") ]) ] [ "url" ])
+    (fun ~chat_id:_ args ->
+      let args = json_assoc_or_empty args in
+      match required_string_arg args "url" with
+      | Error err -> failure err
+      | Ok url when not (is_supported_url url) ->
+          failure "url must start with http:// or https://"
+      | Ok url ->
+          begin
+            match fetch_url ~timeout_seconds:web.request_timeout_seconds url with
+            | Error err ->
+                failure ("Fetch failed: " ^ err)
+            | Ok response when not (Http_client.HttpResponse.is_success response) ->
+                failure
+                  ~status_code:response.status
+                  (Printf.sprintf "Fetch failed with status %d" response.status)
+            | Ok response ->
+                let content_type =
+                  Http_client.HttpResponse.get_header response "content-type"
+                  |> Option.value ~default:""
+                  |> String.lowercase_ascii
+                in
+                let normalized =
+                  if string_contains ~haystack:content_type ~needle:"text/html"
+                     || string_contains ~haystack:content_type ~needle:"application/xhtml+xml"
+                  then
+                    strip_html_tags response.body
+                  else
+                    response.body |> decode_html_entities |> collapse_whitespace
+                in
+                success (maybe_truncate ~max_bytes:web.fetch_max_bytes normalized)
+          end)
+
 let read_memory_tool memory =
   make_tool
     "read_memory"
@@ -814,7 +1061,172 @@ let export_chat_tool sandbox db =
                 end
           end)
 
-let create_default_registry ?(sandbox_config=default_sandbox_config) ~data_dir ~skills_dir ~db () =
+let schedule_task_tool db =
+  make_tool
+    "schedule_task"
+    "Create a scheduled task for the current chat. Provide either run_at for one-shot tasks or cron for recurring tasks."
+    (schema
+       [
+         ("prompt", `Assoc [ ("type", `String "string") ]);
+         ("run_at", `Assoc [ ("type", `String "string") ]);
+         ("cron", `Assoc [ ("type", `String "string") ]);
+       ]
+       [ "prompt" ])
+    (fun ~chat_id args ->
+      let args = json_assoc_or_empty args in
+      match required_string_arg args "prompt" with
+      | Error err -> failure err
+      | Ok prompt ->
+          let run_at = string_arg args "run_at" |> Option.map trim in
+          let cron = string_arg args "cron" |> Option.map trim in
+          begin
+            match run_at, cron with
+            | Some run_at, None ->
+                begin
+                  match Schedule_spec.parse_once run_at with
+                  | Error err -> failure ("Invalid run_at: " ^ err)
+                  | Ok timestamp when timestamp <= Unix.gettimeofday () ->
+                      failure "run_at must be in the future"
+                  | Ok timestamp ->
+                      begin
+                        match Db.insert_scheduled_task db ~chat_id ~prompt ~schedule_type:"once" ~schedule_value:run_at ~next_run_at:timestamp with
+                        | Ok id ->
+                            success
+                              (Printf.sprintf "Scheduled one-shot task %d for %s"
+                                 id
+                                 (Schedule_spec.format_timestamp_local timestamp))
+                        | Error err -> failure ("Failed to create scheduled task: " ^ err)
+                      end
+                end
+            | None, Some cron ->
+                begin
+                  match Schedule_spec.next_cron_after cron ~after:(Unix.gettimeofday ()) with
+                  | Error err -> failure ("Invalid cron: " ^ err)
+                  | Ok next_run_at ->
+                      begin
+                        match Db.insert_scheduled_task db ~chat_id ~prompt ~schedule_type:"cron" ~schedule_value:cron ~next_run_at with
+                        | Ok id ->
+                            success
+                              (Printf.sprintf "Scheduled recurring task %d. Next run: %s"
+                                 id
+                                 (Schedule_spec.format_timestamp_local next_run_at))
+                        | Error err -> failure ("Failed to create scheduled task: " ^ err)
+                      end
+                end
+            | Some _, Some _ ->
+                failure "Provide either run_at or cron, not both"
+            | None, None ->
+                failure "Either run_at or cron is required"
+          end)
+
+let list_scheduled_tasks_tool db =
+  make_tool
+    "list_scheduled_tasks"
+    "List scheduled tasks for the current chat."
+    (schema [ ("include_inactive", `Assoc [ ("type", `String "boolean") ]) ] [])
+    (fun ~chat_id args ->
+      let include_inactive = bool_arg (json_assoc_or_empty args) "include_inactive" |> Option.value ~default:false in
+      match Db.list_scheduled_tasks db ~chat_id ~include_inactive with
+      | Error err -> failure ("Failed to list scheduled tasks: " ^ err)
+      | Ok [] -> success "No scheduled tasks found."
+      | Ok tasks -> success (String.concat "\n" (List.map format_task_status tasks)))
+
+let pause_scheduled_task_tool db =
+  make_tool
+    "pause_scheduled_task"
+    "Pause an active scheduled task."
+    (schema [ ("id", `Assoc [ ("type", `String "integer") ]) ] [ "id" ])
+    (fun ~chat_id args ->
+      match int_arg (json_assoc_or_empty args) "id" with
+      | None -> failure "id is required"
+      | Some task_id ->
+          match Db.get_scheduled_task db ~chat_id ~task_id with
+          | Error err -> failure ("Failed to load scheduled task: " ^ err)
+          | Ok None -> failure "Scheduled task not found"
+          | Ok (Some task) when task.status <> "active" ->
+              failure ("Only active tasks can be paused. Current status: " ^ task.status)
+          | Ok (Some task) ->
+              begin
+                match Db.update_scheduled_task_status db ~chat_id ~task_id ~status:"paused" ~next_run_at:task.next_run_at with
+                | Ok true -> success (Printf.sprintf "Paused scheduled task %d" task_id)
+                | Ok false -> failure "Scheduled task not found"
+                | Error err -> failure ("Failed to pause scheduled task: " ^ err)
+              end)
+
+let resume_scheduled_task_tool db =
+  make_tool
+    "resume_scheduled_task"
+    "Resume a paused scheduled task."
+    (schema [ ("id", `Assoc [ ("type", `String "integer") ]) ] [ "id" ])
+    (fun ~chat_id args ->
+      match int_arg (json_assoc_or_empty args) "id" with
+      | None -> failure "id is required"
+      | Some task_id ->
+          match Db.get_scheduled_task db ~chat_id ~task_id with
+          | Error err -> failure ("Failed to load scheduled task: " ^ err)
+          | Ok None -> failure "Scheduled task not found"
+          | Ok (Some task) when task.status <> "paused" ->
+              failure ("Only paused tasks can be resumed. Current status: " ^ task.status)
+          | Ok (Some task) ->
+              let next_run_at =
+                match task.schedule_type with
+                | "once" ->
+                    begin
+                      match Schedule_spec.parse_once task.schedule_value with
+                      | Ok timestamp -> Some timestamp
+                      | Error _ -> task.next_run_at
+                    end
+                | "cron" ->
+                    begin
+                      match Schedule_spec.next_cron_after task.schedule_value ~after:(Unix.gettimeofday ()) with
+                      | Ok timestamp -> Some timestamp
+                      | Error _ -> task.next_run_at
+                    end
+                | _ -> task.next_run_at
+              in
+              begin
+                match Db.update_scheduled_task_status db ~chat_id ~task_id ~status:"active" ~next_run_at with
+                | Ok true -> success (Printf.sprintf "Resumed scheduled task %d" task_id)
+                | Ok false -> failure "Scheduled task not found"
+                | Error err -> failure ("Failed to resume scheduled task: " ^ err)
+              end)
+
+let cancel_scheduled_task_tool db =
+  make_tool
+    "cancel_scheduled_task"
+    "Cancel a scheduled task permanently."
+    (schema [ ("id", `Assoc [ ("type", `String "integer") ]) ] [ "id" ])
+    (fun ~chat_id args ->
+      match int_arg (json_assoc_or_empty args) "id" with
+      | None -> failure "id is required"
+      | Some task_id ->
+          match Db.update_scheduled_task_status db ~chat_id ~task_id ~status:"cancelled" ~next_run_at:None with
+          | Ok true -> success (Printf.sprintf "Cancelled scheduled task %d" task_id)
+          | Ok false -> failure "Scheduled task not found"
+          | Error err -> failure ("Failed to cancel scheduled task: " ^ err))
+
+let get_task_history_tool db =
+  make_tool
+    "get_task_history"
+    "Show recent execution history for a scheduled task."
+    (schema
+       [
+         ("id", `Assoc [ ("type", `String "integer") ]);
+         ("limit", `Assoc [ ("type", `String "integer") ]);
+       ]
+       [ "id" ])
+    (fun ~chat_id args ->
+      let args = json_assoc_or_empty args in
+      match int_arg args "id" with
+      | None -> failure "id is required"
+      | Some task_id ->
+          let limit = int_arg args "limit" |> Option.value ~default:10 |> max 1 |> min 50 in
+          match Db.get_scheduled_task_history db ~chat_id ~task_id ~limit with
+          | Error err -> failure ("Failed to read task history: " ^ err)
+          | Ok [] -> success "No task runs recorded."
+          | Ok runs -> success (String.concat "\n" (List.map format_task_history runs)))
+
+let create_default_registry ?(sandbox_config=default_sandbox_config) ?(web_config=default_web_config) ~data_dir ~skills_dir ~db () =
   Random.self_init ();
   let runtime_dir = Filename.concat data_dir "runtime" in
   let memory = Memory.create ~data_dir ~runtime_dir () in
@@ -827,17 +1239,26 @@ let create_default_registry ?(sandbox_config=default_sandbox_config) ~data_dir ~
       edit_file_tool sandbox_config;
       glob_tool sandbox_config;
       grep_tool sandbox_config;
+      web_search_tool web_config;
+      web_fetch_tool web_config;
       read_memory_tool memory;
       write_memory_tool db memory;
       todo_read_tool db;
       todo_write_tool db;
       activate_skill_tool skills;
       sync_skills_tool skills;
+      schedule_task_tool db;
+      list_scheduled_tasks_tool db;
+      pause_scheduled_task_tool db;
+      resume_scheduled_task_tool db;
+      cancel_scheduled_task_tool db;
+      get_task_history_tool db;
       export_chat_tool sandbox_config db;
     ]
   in
   {
     sandbox = sandbox_config;
+    web = web_config;
     data_dir;
     skills_dir;
     db;
@@ -870,10 +1291,10 @@ let fallback_db data_dir =
   | Ok db -> db
   | Error err -> failwith err
 
-let init_default_tools ?sandbox_config ?(data_dir="workspace") ?skills_dir ?db () =
+let init_default_tools ?sandbox_config ?web_config ?(data_dir="workspace") ?skills_dir ?db () =
   let skills_dir = Option.value ~default:(Filename.concat data_dir "skills") skills_dir in
   let db = Option.value ~default:(fallback_db data_dir) db in
-  let registry = create_default_registry ?sandbox_config ~data_dir ~skills_dir ~db () in
+  let registry = create_default_registry ?sandbox_config ?web_config ~data_dir ~skills_dir ~db () in
   active_registry := Some registry
 
 let with_active_registry f =

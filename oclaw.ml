@@ -112,6 +112,7 @@ let run_single_shot state chat_id prompt =
       1
 
 let run_repl state chat_id =
+  let scheduler_handle = Scheduler.start state.Runtime.config in
   (* Setup linenoise with history file *)
   let history_file = Filename.concat (Filename.concat state.Runtime.config.data_dir "runtime") "linenoise_history" in
   (match LNoise.history_set ~max_length:1000 with Error e -> Log.warn (fun m -> m "Failed to set history length: %s" e) | Ok () -> ());
@@ -128,47 +129,51 @@ let run_repl state chat_id =
   print_endline "Type /exit or /quit to quit.";
   print_endline "";
   
-  let rec loop () =
-    match LNoise.linenoise repl_prompt with
-    | None ->
-        print_endline "\nGoodbye!";
-        0
-    | Some input ->
-        let trimmed = String.trim input in
-        if trimmed = "" then
-          loop ()
-        else if trimmed = "/exit" || trimmed = "/quit" then (
-          (* Save history before exiting *)
-          (match LNoise.history_save ~filename:history_file with Error e -> Log.warn (fun m -> m "Failed to save history: %s" e) | Ok () -> ());
-          print_endline "Goodbye!";
-          0
-        ) else (
-          (* Add to history if not empty *)
-          (match LNoise.history_add trimmed with Error e -> Log.debug (fun m -> m "Failed to add to history: %s" e) | Ok () -> ());
+  Fun.protect
+    ~finally:(fun () ->
+      Option.iter Scheduler.stop scheduler_handle)
+    (fun () ->
+      let rec loop () =
+        match LNoise.linenoise repl_prompt with
+        | None ->
+            print_endline "\nGoodbye!";
+            0
+        | Some input ->
+            let trimmed = String.trim input in
+            if trimmed = "" then
+              loop ()
+            else if trimmed = "/exit" || trimmed = "/quit" then (
+              (* Save history before exiting *)
+              (match LNoise.history_save ~filename:history_file with Error e -> Log.warn (fun m -> m "Failed to save history: %s" e) | Ok () -> ());
+              print_endline "Goodbye!";
+              0
+            ) else (
+              (* Add to history if not empty *)
+              (match LNoise.history_add trimmed with Error e -> Log.debug (fun m -> m "Failed to add to history: %s" e) | Ok () -> ());
 
-          let streamed = ref false in
-          let on_text_delta delta =
-            if not !streamed then (
-              streamed := true;
-              print_string "\r\027[K"
-            );
-            print_string delta;
-            flush stdout
-          in
-          match Agent_engine.process ~on_text_delta state ~chat_id input with
-          | Ok response ->
-              if !streamed then print_newline ()
-              else print_endline response;
-              print_endline "";
-              loop ()
-          | Error err ->
-              if !streamed then print_newline ();
-              prerr_endline ("OClaw error: " ^ err);
-              print_endline "";
-              loop ()
-        )
-  in
-  loop ()
+              let streamed = ref false in
+              let on_text_delta delta =
+                if not !streamed then (
+                  streamed := true;
+                  print_string "\r\027[K"
+                );
+                print_string delta;
+                flush stdout
+              in
+              match Agent_engine.process ~on_text_delta state ~chat_id input with
+              | Ok response ->
+                  if !streamed then print_newline ()
+                  else print_endline response;
+                  print_endline "";
+                  loop ()
+              | Error err ->
+                  if !streamed then print_newline ();
+                  prerr_endline ("OClaw error: " ^ err);
+                  print_endline "";
+                  loop ()
+            )
+      in
+      loop ())
 
 let () =
   let overrides = default_overrides () in

@@ -12,12 +12,20 @@ let expected_tools = [
   "edit_file";
   "glob";
   "grep";
+  "web_search";
+  "web_fetch";
   "read_memory";
   "write_memory";
   "todo_read";
   "todo_write";
   "activate_skill";
   "sync_skills";
+  "schedule_task";
+  "list_scheduled_tasks";
+  "pause_scheduled_task";
+  "resume_scheduled_task";
+  "cancel_scheduled_task";
+  "get_task_history";
   "export_chat";
 ]
 

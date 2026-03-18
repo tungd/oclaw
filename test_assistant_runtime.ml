@@ -210,10 +210,35 @@ let test_skill_activation () =
   expect (not activate.Tools.is_error) "activate_skill should succeed";
   expect (contains_substring activate.Tools.content "Convert things to PDF") "activate_skill returned wrong content"
 
+let test_schedule_task_tool () =
+  let data_dir = temp_dir () in
+  let state = create_state data_dir in
+  let result =
+    Tools.execute state.tools ~chat_id:11 "schedule_task"
+      (`Assoc
+         [
+           ("prompt", `String "Say hello");
+           ("run_at", `String "2099-01-01T09:30:00");
+         ])
+  in
+  expect (not result.Tools.is_error) "schedule_task should succeed for future one-shot tasks";
+  let listed = Tools.execute state.tools ~chat_id:11 "list_scheduled_tasks" (`Assoc []) in
+  expect (contains_substring listed.Tools.content "Say hello") "scheduled task should be listed"
+
+let test_web_fetch_validation () =
+  let data_dir = temp_dir () in
+  let state = create_state data_dir in
+  let result =
+    Tools.execute state.tools ~chat_id:1 "web_fetch" (`Assoc [ ("url", `String "file:///etc/passwd") ])
+  in
+  expect result.Tools.is_error "web_fetch should reject unsupported schemes"
+
 let () =
   test_persistent_session ();
   test_session_isolation ();
   test_memory_injection ();
   test_tool_loop_and_resume ();
   test_skill_activation ();
+  test_schedule_task_tool ();
+  test_web_fetch_validation ();
   Printf.printf "[PASS] assistant runtime tests\n"

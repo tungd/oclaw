@@ -13,6 +13,29 @@ type stored_message = {
   created_at : float;
 }
 
+type scheduled_task = {
+  id : int;
+  chat_id : int;
+  prompt : string;
+  schedule_type : string;
+  schedule_value : string;
+  next_run_at : float option;
+  status : string;
+  created_at : float;
+  updated_at : float;
+  last_run_at : float option;
+}
+
+type scheduled_task_run = {
+  id : int;
+  task_id : int;
+  chat_id : int;
+  started_at : float;
+  finished_at : float;
+  success : bool;
+  summary : string;
+}
+
 let ensure_parent_dir path =
   let rec mkdir_p dir =
     if dir = "" || dir = "." || dir = "/" then ()
@@ -57,6 +80,10 @@ let bind_opt_int stmt index = function
   | None -> Sqlite3.bind stmt index Data.NULL
   | Some value -> bind_int stmt index value
 
+let bind_opt_float stmt index = function
+  | None -> Sqlite3.bind stmt index Data.NULL
+  | Some value -> bind_float stmt index value
+
 let with_statement db sql f =
   let stmt = prepare db sql in
   Fun.protect
@@ -97,6 +124,34 @@ let create path =
          source TEXT NOT NULL,\
          created_at REAL NOT NULL\
          )";
+        "CREATE TABLE IF NOT EXISTS scheduled_tasks (\
+         id INTEGER PRIMARY KEY AUTOINCREMENT,\
+         chat_id INTEGER NOT NULL,\
+         prompt TEXT NOT NULL,\
+         schedule_type TEXT NOT NULL,\
+         schedule_value TEXT NOT NULL,\
+         next_run_at REAL NULL,\
+         status TEXT NOT NULL,\
+         created_at REAL NOT NULL,\
+         updated_at REAL NOT NULL,\
+         last_run_at REAL NULL\
+         )";
+        "CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_due \
+         ON scheduled_tasks(status, next_run_at)";
+        "CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_chat \
+         ON scheduled_tasks(chat_id, status, updated_at DESC)";
+        "CREATE TABLE IF NOT EXISTS scheduled_task_runs (\
+         id INTEGER PRIMARY KEY AUTOINCREMENT,\
+         task_id INTEGER NOT NULL,\
+         chat_id INTEGER NOT NULL,\
+         started_at REAL NOT NULL,\
+         finished_at REAL NOT NULL,\
+         success INTEGER NOT NULL,\
+         summary TEXT NOT NULL,\
+         FOREIGN KEY(task_id) REFERENCES scheduled_tasks(id)\
+         )";
+        "CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_task \
+         ON scheduled_task_runs(task_id, started_at DESC)";
       ]
     in
     let result =
@@ -267,3 +322,174 @@ let insert_memory t ~chat_id ~scope ~content ~source =
       ignore (bind_text stmt 4 source);
       ignore (bind_float stmt 5 (timestamp ()));
       step_expect_done t.db stmt)
+
+let float_column stmt index =
+  match Sqlite3.column stmt index with
+  | Data.FLOAT value -> Some value
+  | Data.INT value -> Some (Int64.to_float value)
+  | _ -> None
+
+let required_int_column stmt index =
+  match Sqlite3.column stmt index with
+  | Data.INT value -> Int64.to_int value
+  | _ -> 0
+
+let required_text_column stmt index =
+  match Sqlite3.column stmt index with
+  | Data.TEXT value -> value
+  | _ -> ""
+
+let required_float_column stmt index =
+  match float_column stmt index with
+  | Some value -> value
+  | None -> 0.0
+
+let read_scheduled_task_row stmt =
+  {
+    id = required_int_column stmt 0;
+    chat_id = required_int_column stmt 1;
+    prompt = required_text_column stmt 2;
+    schedule_type = required_text_column stmt 3;
+    schedule_value = required_text_column stmt 4;
+    next_run_at = float_column stmt 5;
+    status = required_text_column stmt 6;
+    created_at = required_float_column stmt 7;
+    updated_at = required_float_column stmt 8;
+    last_run_at = float_column stmt 9;
+  }
+
+let collect_scheduled_tasks stmt =
+  let rec loop acc =
+    match Sqlite3.step stmt with
+    | Rc.ROW -> loop (read_scheduled_task_row stmt :: acc)
+    | Rc.DONE -> Ok (List.rev acc)
+    | rc -> Error (Printf.sprintf "sqlite read scheduled tasks failed: %s" (Rc.to_string rc))
+  in
+  loop []
+
+let insert_scheduled_task t ~chat_id ~prompt ~schedule_type ~schedule_value ~next_run_at =
+  with_statement t.db
+    "INSERT INTO scheduled_tasks \
+     (chat_id, prompt, schedule_type, schedule_value, next_run_at, status, created_at, updated_at, last_run_at) \
+     VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, NULL)"
+    (fun stmt ->
+      let now = timestamp () in
+      ignore (bind_int stmt 1 chat_id);
+      ignore (bind_text stmt 2 prompt);
+      ignore (bind_text stmt 3 schedule_type);
+      ignore (bind_text stmt 4 schedule_value);
+      ignore (bind_float stmt 5 next_run_at);
+      ignore (bind_float stmt 6 now);
+      ignore (bind_float stmt 7 now);
+      match step_expect_done t.db stmt with
+      | Error _ as err -> err
+      | Ok () -> Ok (Int64.to_int (Sqlite3.last_insert_rowid t.db)))
+
+let list_scheduled_tasks t ~chat_id ~include_inactive =
+  let sql =
+    if include_inactive then
+      "SELECT id, chat_id, prompt, schedule_type, schedule_value, next_run_at, status, created_at, updated_at, last_run_at \
+       FROM scheduled_tasks WHERE chat_id = ?1 ORDER BY updated_at DESC"
+    else
+      "SELECT id, chat_id, prompt, schedule_type, schedule_value, next_run_at, status, created_at, updated_at, last_run_at \
+       FROM scheduled_tasks WHERE chat_id = ?1 AND status IN ('active', 'paused') ORDER BY updated_at DESC"
+  in
+  with_statement t.db sql (fun stmt ->
+      ignore (bind_int stmt 1 chat_id);
+      collect_scheduled_tasks stmt)
+
+let get_scheduled_task t ~chat_id ~task_id =
+  with_statement t.db
+    "SELECT id, chat_id, prompt, schedule_type, schedule_value, next_run_at, status, created_at, updated_at, last_run_at \
+     FROM scheduled_tasks WHERE chat_id = ?1 AND id = ?2"
+    (fun stmt ->
+      ignore (bind_int stmt 1 chat_id);
+      ignore (bind_int stmt 2 task_id);
+      match Sqlite3.step stmt with
+      | Rc.ROW -> Ok (Some (read_scheduled_task_row stmt))
+      | Rc.DONE -> Ok None
+      | rc -> Error (Printf.sprintf "sqlite get scheduled task failed: %s" (Rc.to_string rc)))
+
+let update_scheduled_task_status t ~chat_id ~task_id ~status ~next_run_at =
+  with_statement t.db
+    "UPDATE scheduled_tasks SET status = ?3, next_run_at = ?4, updated_at = ?5 \
+     WHERE chat_id = ?1 AND id = ?2"
+    (fun stmt ->
+      ignore (bind_int stmt 1 chat_id);
+      ignore (bind_int stmt 2 task_id);
+      ignore (bind_text stmt 3 status);
+      ignore (bind_opt_float stmt 4 next_run_at);
+      ignore (bind_float stmt 5 (timestamp ()));
+      match step_expect_done t.db stmt with
+      | Error _ as err -> err
+      | Ok () -> Ok (Sqlite3.changes t.db > 0))
+
+let get_due_scheduled_tasks t ~now ~limit =
+  with_statement t.db
+    "SELECT id, chat_id, prompt, schedule_type, schedule_value, next_run_at, status, created_at, updated_at, last_run_at \
+     FROM scheduled_tasks \
+     WHERE status = 'active' AND next_run_at IS NOT NULL AND next_run_at <= ?1 \
+     ORDER BY next_run_at ASC LIMIT ?2"
+    (fun stmt ->
+      ignore (bind_float stmt 1 now);
+      ignore (bind_int stmt 2 limit);
+      collect_scheduled_tasks stmt)
+
+let insert_scheduled_task_run t ~task_id ~chat_id ~started_at ~finished_at ~success ~summary =
+  with_statement t.db
+    "INSERT INTO scheduled_task_runs \
+     (task_id, chat_id, started_at, finished_at, success, summary) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+    (fun stmt ->
+      ignore (bind_int stmt 1 task_id);
+      ignore (bind_int stmt 2 chat_id);
+      ignore (bind_float stmt 3 started_at);
+      ignore (bind_float stmt 4 finished_at);
+      ignore (bind_int stmt 5 (if success then 1 else 0));
+      ignore (bind_text stmt 6 summary);
+      step_expect_done t.db stmt)
+
+let update_scheduled_task_after_run t ~task_id ~next_run_at ~status ~last_run_at =
+  with_statement t.db
+    "UPDATE scheduled_tasks \
+     SET next_run_at = ?2, status = ?3, last_run_at = ?4, updated_at = ?5 \
+     WHERE id = ?1"
+    (fun stmt ->
+      ignore (bind_int stmt 1 task_id);
+      ignore (bind_opt_float stmt 2 next_run_at);
+      ignore (bind_text stmt 3 status);
+      ignore (bind_float stmt 4 last_run_at);
+      ignore (bind_float stmt 5 (timestamp ()));
+      step_expect_done t.db stmt)
+
+let read_scheduled_task_run_row stmt =
+  {
+    id = required_int_column stmt 0;
+    task_id = required_int_column stmt 1;
+    chat_id = required_int_column stmt 2;
+    started_at = required_float_column stmt 3;
+    finished_at = required_float_column stmt 4;
+    success = required_int_column stmt 5 <> 0;
+    summary = required_text_column stmt 6;
+  }
+
+let collect_scheduled_task_runs stmt =
+  let rec loop acc =
+    match Sqlite3.step stmt with
+    | Rc.ROW -> loop (read_scheduled_task_run_row stmt :: acc)
+    | Rc.DONE -> Ok (List.rev acc)
+    | rc -> Error (Printf.sprintf "sqlite read scheduled task history failed: %s" (Rc.to_string rc))
+  in
+  loop []
+
+let get_scheduled_task_history t ~chat_id ~task_id ~limit =
+  with_statement t.db
+    "SELECT id, task_id, chat_id, started_at, finished_at, success, summary \
+     FROM scheduled_task_runs \
+     WHERE chat_id = ?1 AND task_id = ?2 \
+     ORDER BY started_at DESC LIMIT ?3"
+    (fun stmt ->
+      ignore (bind_int stmt 1 chat_id);
+      ignore (bind_int stmt 2 task_id);
+      ignore (bind_int stmt 3 limit);
+      collect_scheduled_task_runs stmt)

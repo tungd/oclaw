@@ -23,6 +23,11 @@ type config = {
   tools_exec_enable_deny_patterns : bool [@default true];
   tools_exec_custom_deny_patterns : string list [@default []];
   tools_exec_custom_allow_patterns : string list [@default []];
+  web_request_timeout_seconds : int [@default 20];
+  web_fetch_max_bytes : int [@default 20000];
+  web_search_max_results : int [@default 5];
+  scheduler_enabled : bool [@default true];
+  scheduler_poll_interval_seconds : int [@default 30];
   debug : bool [@default false];
 }
 [@@deriving protocol ~driver:(module Yaml)]
@@ -122,6 +127,16 @@ let apply_env_overrides config =
       env_paths "OCLAW_EXEC_CUSTOM_DENY_PATTERNS" config.tools_exec_custom_deny_patterns;
     tools_exec_custom_allow_patterns =
       env_paths "OCLAW_EXEC_CUSTOM_ALLOW_PATTERNS" config.tools_exec_custom_allow_patterns;
+    web_request_timeout_seconds =
+      env_int "OCLAW_WEB_REQUEST_TIMEOUT" config.web_request_timeout_seconds;
+    web_fetch_max_bytes =
+      env_int "OCLAW_WEB_FETCH_MAX_BYTES" config.web_fetch_max_bytes;
+    web_search_max_results =
+      env_int "OCLAW_WEB_SEARCH_MAX_RESULTS" config.web_search_max_results;
+    scheduler_enabled =
+      env_bool "OCLAW_SCHEDULER_ENABLED" config.scheduler_enabled;
+    scheduler_poll_interval_seconds =
+      env_int "OCLAW_SCHEDULER_POLL_INTERVAL" config.scheduler_poll_interval_seconds;
     debug = env_bool "OCLAW_DEBUG" config.debug;
   }
 
@@ -158,6 +173,14 @@ let validate_config config =
     errors := "max_tool_iterations must be positive" :: !errors;
   if config.tools_exec_timeout_seconds <= 0 then
     errors := "Tools exec_timeout_seconds must be positive" :: !errors;
+  if config.web_request_timeout_seconds <= 0 then
+    errors := "web_request_timeout_seconds must be positive" :: !errors;
+  if config.web_fetch_max_bytes <= 0 then
+    errors := "web_fetch_max_bytes must be positive" :: !errors;
+  if config.web_search_max_results <= 0 then
+    errors := "web_search_max_results must be positive" :: !errors;
+  if config.scheduler_poll_interval_seconds <= 0 then
+    errors := "scheduler_poll_interval_seconds must be positive" :: !errors;
   if !errors = [] then Ok config else Error !errors
 
 let runtime_data_dir config =

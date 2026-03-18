@@ -18,6 +18,15 @@ type embedding_model = {
   normalize : bool;
 }
 
+type search_result = int * int * string * float
+
+type stats = {
+  count : int;
+  avg_size : float;
+  created_min : float option;
+  created_max : float option;
+}
+
 (* Default embedding model config *)
 let default_model = {
   name = "ocaml-tiny-embed";
@@ -41,9 +50,9 @@ let embed_text_simple ~dimensions text =
   (* Normalize to unit vector *)
   let magnitude = sqrt (Array.fold_left (fun acc x -> acc +. x *. x) 0.0 vec) in
   if magnitude > 0.0 then
-    Array.map (fun x -> x /. magnitude) vec
+    Array.map (fun x -> x /. magnitude) vec |> Array.to_list
   else
-    vec
+    Array.to_list vec
 
 (* Better embedding using word frequencies + hash *)
 let embed_text ~dimensions text =
@@ -69,9 +78,9 @@ let embed_text ~dimensions text =
   (* L2 normalize *)
   let magnitude = sqrt (Array.fold_left (fun acc x -> acc +. x *. x) 0.0 vec) in
   if magnitude > 0.001 then
-    Array.map (fun x -> x /. magnitude) vec
+    Array.map (fun x -> x /. magnitude) vec |> Array.to_list
   else
-    vec
+    Array.to_list vec
 
 (* Cosine similarity between two vectors *)
 let cosine_similarity vec1 vec2 =
@@ -146,11 +155,42 @@ let init_schema db =
     | Sqlite3.Rc.OK -> Log.debug (fun m -> m "Created schema item %d" i)
     | Sqlite3.Rc.ERROR -> Log.err (fun m -> m "Schema error %d: %s" i (Sqlite3.errmsg db))
     | _ -> ()
-  )
+  ) queries
 
 (* Generate embedding for text *)
 let generate_embedding ?(model=default_model) text =
-  Array.to_list (embed_text ~dimensions:model.dimensions text)
+  embed_text ~dimensions:model.dimensions text
+
+let prepare db sql =
+  Sqlite3.prepare db sql
+
+let finalize stmt =
+  ignore (Sqlite3.finalize stmt)
+
+let bind_text stmt index value =
+  ignore (Sqlite3.bind stmt index (Sqlite3.Data.TEXT value))
+
+let bind_int stmt index value =
+  ignore (Sqlite3.bind stmt index (Sqlite3.Data.INT (Int64.of_int value)))
+
+let bind_float stmt index value =
+  ignore (Sqlite3.bind stmt index (Sqlite3.Data.FLOAT value))
+
+let int_column stmt index =
+  match Sqlite3.column stmt index with
+  | Sqlite3.Data.INT value -> Int64.to_int value
+  | _ -> 0
+
+let text_column stmt index =
+  match Sqlite3.column stmt index with
+  | Sqlite3.Data.TEXT value -> value
+  | _ -> ""
+
+let float_column stmt index =
+  match Sqlite3.column stmt index with
+  | Sqlite3.Data.FLOAT value -> Some value
+  | Sqlite3.Data.INT value -> Some (Int64.to_float value)
+  | _ -> None
 
 (* Store embedding in database *)
 let store_embedding db ~chat_id ~memory_id text =
@@ -158,27 +198,19 @@ let store_embedding db ~chat_id ~memory_id text =
   let embedding_json = vector_to_json embedding in
   let sql = "INSERT INTO embeddings (chat_id, memory_id, text_content, embedding, dimensions, model_name) 
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)" in
-  match Db.prepare db sql with
-  | Error (`Msg msg) -> Error msg
-  | Ok stmt ->
-      Db.bind stmt [|
-        Db.Data.INT (Int64.of_int chat_id);
-        Db.Data.INT (Int64.of_int memory_id);
-        Db.Data.TEXT text;
-        Db.Data.TEXT embedding_json;
-        Db.Data.INT (Int64.of_int model.dimensions);
-        Db.Data.TEXT model.name;
-      |];
-      match Db.step stmt with
-      | Result.ROW | Result.DONE -> 
-          Db.finalize stmt;
-          Ok ()
-      | Result.ERROR msg -> 
-          Db.finalize stmt;
-          Error msg
-      | _ -> 
-          Db.finalize stmt;
-          Error "Unexpected result"
+  let stmt = prepare db sql in
+  Fun.protect
+    ~finally:(fun () -> finalize stmt)
+    (fun () ->
+      bind_int stmt 1 chat_id;
+      bind_int stmt 2 memory_id;
+      bind_text stmt 3 text;
+      bind_text stmt 4 embedding_json;
+      bind_int stmt 5 default_model.dimensions;
+      bind_text stmt 6 default_model.name;
+      match Sqlite3.step stmt with
+      | Sqlite3.Rc.DONE | Sqlite3.Rc.ROW -> Ok ()
+      | rc -> Error (Printf.sprintf "sqlite store embedding failed: %s" (Sqlite3.Rc.to_string rc)))
 
 (* Search for similar texts *)
 let search_similar db ~chat_id query_text ~limit ~threshold =
@@ -193,33 +225,27 @@ let search_similar db ~chat_id query_text ~limit ~threshold =
      LIMIT ?2" query_json
   in
   
-  match Db.prepare db sql with
-  | Error (`Msg msg) -> Error msg
-  | Ok stmt ->
-      Db.bind stmt [|
-        Db.Data.INT (Int64.of_int chat_id);
-        Db.Data.INT (Int64.of_int limit);
-      |];
-      
+  let stmt = prepare db sql in
+  Fun.protect
+    ~finally:(fun () -> finalize stmt)
+    (fun () ->
+      bind_int stmt 1 chat_id;
+      bind_int stmt 2 limit;
       let rec collect acc =
-        match Db.step stmt with
-        | Result.ROW ->
-            let id = Db.column stmt 0 |> Db.Data.to_int64_exn |> Int64.to_int in
-            let memory_id = Db.column stmt 1 |> Db.Data.to_int64_exn |> Int64.to_int in
-            let text = Db.column stmt 2 |> Db.Data.to_string_exn in
-            let similarity = Db.column stmt 3 |> Db.Data.to_float_exn in
-            
+        match Sqlite3.step stmt with
+        | Sqlite3.Rc.ROW ->
+            let id = int_column stmt 0 in
+            let memory_id = int_column stmt 1 in
+            let text = text_column stmt 2 in
+            let similarity = float_column stmt 3 |> Option.value ~default:0.0 in
             if similarity >= threshold then
               collect ((id, memory_id, text, similarity) :: acc)
             else
-              List.rev acc
-        | Result.DONE -> List.rev acc
-        | _ -> List.rev acc
+              Ok (List.rev acc)
+        | Sqlite3.Rc.DONE -> Ok (List.rev acc)
+        | rc -> Error (Printf.sprintf "sqlite search_similar failed: %s" (Sqlite3.Rc.to_string rc))
       in
-      
-      let results = collect [] in
-      Db.finalize stmt;
-      Ok results
+      collect [])
 
 (* Batch generate embeddings for existing memories *)
 let batch_embed_memories db ~chat_id memories =
@@ -236,40 +262,32 @@ let batch_embed_memories db ~chat_id memories =
 let get_stats db ~chat_id =
   let sql = "SELECT COUNT(*), AVG(LENGTH(embedding)), MIN(created_at), MAX(created_at)
              FROM embeddings WHERE chat_id = ?1" in
-  match Db.prepare db sql with
-  | Error (`Msg msg) -> Error msg
-  | Ok stmt ->
-      Db.bind stmt [| Db.Data.INT (Int64.of_int chat_id) |];
-      match Db.step stmt with
-      | Result.ROW ->
-          let count = Db.column stmt 0 |> Db.Data.to_int64_exn |> Int64.to_int in
-          let avg_size = Db.column stmt 1 |> Db.Data.to_float_exn in
-          let created_min = Db.column stmt 2 |> Db.Data.to_float_opt in
-          let created_max = Db.column stmt 3 |> Db.Data.to_float_opt in
-          Db.finalize stmt;
+  let stmt = prepare db sql in
+  Fun.protect
+    ~finally:(fun () -> finalize stmt)
+    (fun () ->
+      bind_int stmt 1 chat_id;
+      match Sqlite3.step stmt with
+      | Sqlite3.Rc.ROW ->
+          let count = int_column stmt 0 in
+          let avg_size = float_column stmt 1 |> Option.value ~default:0.0 in
+          let created_min = float_column stmt 2 in
+          let created_max = float_column stmt 3 in
           Ok { count; avg_size; created_min; created_max }
-      | _ -> 
-          Db.finalize stmt;
+      | Sqlite3.Rc.DONE ->
           Ok { count = 0; avg_size = 0.0; created_min = None; created_max = None }
+      | rc ->
+          Error (Printf.sprintf "sqlite get_stats failed: %s" (Sqlite3.Rc.to_string rc)))
 
 (* Clean up old embeddings *)
 let cleanup_old db ~chat_id ~before_timestamp =
   let sql = "DELETE FROM embeddings WHERE chat_id = ?1 AND created_at < ?2" in
-  match Db.prepare db sql with
-  | Error (`Msg msg) -> Error msg
-  | Ok stmt ->
-      Db.bind stmt [|
-        Db.Data.INT (Int64.of_int chat_id);
-        Db.Data.REAL before_timestamp;
-      |];
-      match Db.step stmt with
-      | Result.DONE -> 
-          let changes = Db.changes db in
-          Db.finalize stmt;
-          Ok changes
-      | Result.ERROR msg -> 
-          Db.finalize stmt;
-          Error msg
-      | _ -> 
-          Db.finalize stmt;
-          Error "Unexpected result"
+  let stmt = prepare db sql in
+  Fun.protect
+    ~finally:(fun () -> finalize stmt)
+    (fun () ->
+      bind_int stmt 1 chat_id;
+      bind_float stmt 2 before_timestamp;
+      match Sqlite3.step stmt with
+      | Sqlite3.Rc.DONE -> Ok (Sqlite3.changes db)
+      | rc -> Error (Printf.sprintf "sqlite cleanup_old failed: %s" (Sqlite3.Rc.to_string rc)))

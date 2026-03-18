@@ -55,6 +55,11 @@ let create_app_state ?(llm_call=default_llm_call) ?system_prompt_override config
               exec_custom_deny_patterns = config.tools_exec_custom_deny_patterns;
               exec_custom_allow_patterns = config.tools_exec_custom_allow_patterns;
             }
+            ~web_config:Tools.{
+              request_timeout_seconds = config.web_request_timeout_seconds;
+              fetch_max_bytes = config.web_fetch_max_bytes;
+              search_max_results = config.web_search_max_results;
+            }
             ~data_dir:config.data_dir
             ~skills_dir
             ~db
