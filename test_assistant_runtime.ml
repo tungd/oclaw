@@ -148,20 +148,6 @@ let test_session_isolation () =
   let state2 = create_state ~llm_call:second_llm data_dir in
   ignore (Agent_engine.process state2 ~chat_id:2 "chat two prompt")
 
-let test_memory_injection () =
-  let data_dir = temp_dir () in
-  write_file (Filename.concat data_dir "AGENTS.md") "global fact";
-  write_file
-    (Filename.concat (Filename.concat (Filename.concat data_dir "runtime") "groups/42") "AGENTS.md")
-    "chat fact";
-  let llm _provider ?on_text_delta:_ ~system_prompt _messages ~tools:_ =
-    expect (contains_substring system_prompt "global fact") "global memory missing from system prompt";
-    expect (contains_substring system_prompt "chat fact") "chat memory missing from system prompt";
-    text_response "done"
-  in
-  let state = create_state ~llm_call:llm data_dir in
-  ignore (Agent_engine.process state ~chat_id:42 "hello")
-
 let test_tool_loop_and_resume () =
   let data_dir = temp_dir () in
   write_file (Filename.concat data_dir "note.txt") "tool output";
@@ -235,7 +221,6 @@ let test_web_fetch_validation () =
 let () =
   test_persistent_session ();
   test_session_isolation ();
-  test_memory_injection ();
   test_tool_loop_and_resume ();
   test_skill_activation ();
   test_schedule_task_tool ();

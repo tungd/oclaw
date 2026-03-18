@@ -40,7 +40,6 @@ type t = {
   data_dir : string;
   skills_dir : string;
   db : Db.t;
-  memory : Memory.t;
   skills : Skills.t;
   tools : tool list;
 }
@@ -925,62 +924,6 @@ let web_fetch_tool web =
                 success (maybe_truncate ~max_bytes:web.fetch_max_bytes normalized)
           end)
 
-let read_memory_tool memory =
-  make_tool
-    "read_memory"
-    "Read global or chat memory from AGENTS.md files."
-    (schema
-       [
-         ("scope", `Assoc [ ("type", `String "string"); ("enum", `List [ `String "global"; `String "chat" ]) ]);
-       ]
-       [ "scope" ])
-    (fun ~chat_id args ->
-      let args = json_assoc_or_empty args in
-      match required_string_arg args "scope" with
-      | Error err -> failure err
-      | Ok "global" ->
-          begin
-            match Memory.read_global_memory memory with
-            | Some content when String.trim content <> "" -> success content
-            | _ -> success "No global memory file found."
-          end
-      | Ok "chat" ->
-          begin
-            match Memory.read_chat_memory memory chat_id with
-            | Some content when String.trim content <> "" -> success content
-            | _ -> success "No chat memory file found."
-          end
-      | Ok _ -> failure "scope must be 'global' or 'chat'")
-
-let write_memory_tool db memory =
-  make_tool
-    "write_memory"
-    "Write global or chat memory to AGENTS.md files."
-    (schema
-       [
-         ("scope", `Assoc [ ("type", `String "string"); ("enum", `List [ `String "global"; `String "chat" ]) ]);
-         ("content", `Assoc [ ("type", `String "string") ]);
-       ]
-       [ "scope"; "content" ])
-    (fun ~chat_id args ->
-      let args = json_assoc_or_empty args in
-      match required_string_arg args "scope", required_string_arg args "content" with
-      | Error err, _ | _, Error err -> failure err
-      | Ok scope, Ok content ->
-          let write_result =
-            match scope with
-            | "global" -> Memory.write_global_memory memory content
-            | "chat" -> Memory.write_chat_memory memory chat_id content
-            | _ -> Error "scope must be 'global' or 'chat'"
-          in
-          begin
-            match write_result with
-            | Error err -> failure ("Failed to write memory: " ^ err)
-            | Ok () ->
-                ignore (Db.insert_memory db ~chat_id:(if scope = "chat" then Some chat_id else None) ~scope ~content ~source:"write_memory");
-                success ("Memory saved to " ^ scope ^ " scope.")
-          end)
-
 let todo_read_tool db =
   make_tool
     "todo_read"
@@ -1236,8 +1179,6 @@ let get_task_history_tool db =
 
 let create_default_registry ?(sandbox_config=default_sandbox_config) ?(web_config=default_web_config) ~data_dir ~skills_dir ~db () =
   Random.self_init ();
-  let runtime_dir = Filename.concat data_dir "runtime" in
-  let memory = Memory.create ~data_dir ~runtime_dir () in
   let skills = Skills.create ~skills_dir in
   let tools =
     [
@@ -1249,8 +1190,6 @@ let create_default_registry ?(sandbox_config=default_sandbox_config) ?(web_confi
       grep_tool sandbox_config;
       web_search_tool web_config;
       web_fetch_tool web_config;
-      read_memory_tool memory;
-      write_memory_tool db memory;
       todo_read_tool db;
       todo_write_tool db;
       activate_skill_tool skills;
@@ -1270,7 +1209,6 @@ let create_default_registry ?(sandbox_config=default_sandbox_config) ?(web_confi
     data_dir;
     skills_dir;
     db;
-    memory;
     skills;
     tools;
   }

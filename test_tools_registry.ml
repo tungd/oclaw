@@ -14,8 +14,6 @@ let expected_tools = [
   "grep";
   "web_search";
   "web_fetch";
-  "read_memory";
-  "write_memory";
   "todo_read";
   "todo_write";
   "activate_skill";

@@ -12,7 +12,6 @@ type app_state = {
   config : Oclaw_config.Config.config;
   provider_config : Llm_provider.provider_config;
   db : Db.t;
-  memory : Memory.t;
   skills : Skills.t;
   tools : Tools.t;
   llm_call : llm_call;

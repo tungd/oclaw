@@ -3,67 +3,29 @@ open Yojson.Safe
 module Llm = Llm_types
 module Log = (val Logs.src_log (Logs.Src.create "agent_engine") : Logs.LOG)
 
-let read_optional_file path =
-  try Some (Stdlib.In_channel.with_open_bin path Stdlib.In_channel.input_all)
-  with _ -> None
-
-let load_optional_fragment path heading =
-  match read_optional_file path with
-  | Some content when String.trim content <> "" ->
-      Some (heading ^ "\n" ^ content)
-  | _ ->
-      None
-
-let default_identity caller =
-  Printf.sprintf
-    "You are OClaw, a CLI-first agentic assistant. You solve tasks by planning briefly, using tools when needed, verifying results, and reporting concrete outcomes.\n\nConnected via: %s."
-    caller
-
-let builtin_operational_guidance =
+let default_system_prompt =
   String.concat "\n"
     [
+      "You are OClaw, a CLI-first agentic assistant. You solve tasks by planning briefly, using tools when needed, verifying results, and reporting concrete outcomes.";
+      "";
       "# Operational Guidance";
       "";
       "- Use tools when they reduce uncertainty or perform the requested action.";
       "- Do not claim success until the tool result confirms it.";
       "- For multi-step work, keep the todo list in sync with real progress.";
       "- Prefer editing targeted files over rewriting unrelated code.";
-      "- Use memory for durable user or workspace facts, not transient scratch notes.";
       "- Keep answers concise and directly tied to the request.";
     ]
 
-let build_system_prompt state ~chat_id =
+let build_system_prompt state ~chat_id:_ =
   match state.Runtime.system_prompt_override with
   | Some prompt -> prompt
   | None ->
-      let data_dir = state.Runtime.config.data_dir in
-      let soul_path = Filename.concat data_dir "SOUL.md" in
-      let identity_path = Filename.concat data_dir "IDENTITY.md" in
-      let user_path = Filename.concat data_dir "USER.md" in
-      let identity =
-        match read_optional_file soul_path with
-        | Some soul when String.trim soul <> "" ->
-            "<soul>\n" ^ soul ^ "\n</soul>\n\n" ^ default_identity "cli"
-        | _ -> default_identity "cli"
-      in
-      let sections =
-        [
-          Some identity;
-          load_optional_fragment identity_path "# Identity Context";
-          load_optional_fragment user_path "# User Context";
-          Some builtin_operational_guidance;
-          (let memory_context = Memory.build_memory_context state.Runtime.memory chat_id in
-           if String.trim memory_context = "" then None
-           else Some ("# Memories\n\n" ^ memory_context));
-          (let skills_catalog = Skills.build_skills_catalog state.Runtime.skills in
-           if String.trim skills_catalog = "" then None
-           else
-             Some
-               ("# Agent Skills\n\nThe following skills are available. Use `activate_skill` before following a skill-specific workflow.\n\n"
-                ^ skills_catalog));
-        ]
-      in
-      sections |> List.filter_map Fun.id |> String.concat "\n\n"
+      let skills_catalog = Skills.build_skills_catalog state.Runtime.skills in
+      if String.trim skills_catalog = "" then
+        default_system_prompt
+      else
+        default_system_prompt ^ "\n\n# Skills\n\nThe following skills are available. Use `activate_skill` before following a skill-specific workflow.\n\n" ^ skills_catalog
 
 let load_messages state ~chat_id =
   match Db.get_all_messages state.Runtime.db ~chat_id with

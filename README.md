@@ -4,7 +4,7 @@ OClaw is a CLI-first OCaml assistant with a structured, tool-first runtime:
 
 - one binary: `oclaw`
 - two runtime modes: REPL and single-shot
-- one agent loop: structured messages, tool calls, persistent sessions, and file-backed memory
+- one agent loop: structured messages, tool calls, and persistent sessions
 - one default deployment shape: local CLI, with adapter-ready runtime seams for future channels
 
 External channels, schedulers, and ACP/MCP are not shipped in this repo, but the runtime is structured so they can be added without another architectural rewrite.
@@ -56,25 +56,24 @@ The remaining configuration surface includes:
 
 Useful environment variables:
 
-- `OCLAW_API_KEY`
-- `OCLAW_API_BASE`
-- `OCLAW_MODEL`
-- `OCLAW_TIMEOUT`
-- `OCLAW_DATA_DIR`
-- `OCLAW_SKILLS_DIR`
-- `OCLAW_EMBEDDING_MODEL_DIR`
-- `OCLAW_MAX_HISTORY_MESSAGES`
-- `OCLAW_MAX_TOOL_ITERATIONS`
-- `OCLAW_WORKSPACE`
-- `OCLAW_ALLOW_READ_PATHS`
-- `OCLAW_ALLOW_WRITE_PATHS`
-- `OCLAW_EXEC_TIMEOUT`
-- `OCLAW_WEB_REQUEST_TIMEOUT`
-- `OCLAW_WEB_FETCH_MAX_BYTES`
-- `OCLAW_WEB_SEARCH_MAX_RESULTS`
-- `OCLAW_SCHEDULER_ENABLED`
-- `OCLAW_SCHEDULER_POLL_INTERVAL`
-- `OCLAW_DEBUG`
+- `OCLAW_API_KEY` - LLM API key
+- `OCLAW_API_BASE` - LLM API base URL
+- `OCLAW_MODEL` - Model name to use
+- `OCLAW_TIMEOUT` - HTTP timeout in seconds
+- `OCLAW_DATA_DIR` - Runtime data directory
+- `OCLAW_SKILLS_DIR` - Skills directory
+- `OCLAW_MAX_HISTORY_MESSAGES` - Max messages in history
+- `OCLAW_MAX_TOOL_ITERATIONS` - Max tool iterations per request
+- `OCLAW_WORKSPACE` - Workspace root for tools
+- `OCLAW_ALLOW_READ_PATHS` - Colon-separated paths allowed for reads
+- `OCLAW_ALLOW_WRITE_PATHS` - Colon-separated paths allowed for writes
+- `OCLAW_EXEC_TIMEOUT` - Shell command timeout in seconds
+- `OCLAW_WEB_REQUEST_TIMEOUT` - Web request timeout
+- `OCLAW_WEB_FETCH_MAX_BYTES` - Max bytes to fetch from web
+- `OCLAW_WEB_SEARCH_MAX_RESULTS` - Max web search results
+- `OCLAW_SCHEDULER_ENABLED` - Enable/disable scheduler
+- `OCLAW_SCHEDULER_POLL_INTERVAL` - Scheduler poll interval in seconds
+- `OCLAW_DEBUG` - Enable debug logging
 
 Useful CLI flags:
 
@@ -94,43 +93,16 @@ Useful CLI flags:
 - `--exec-timeout`
 - `--debug`
 
-## Prompt and Memory Layout
-
-OClaw builds its system prompt from:
-
-- `workspace/SOUL.md`
-- `workspace/IDENTITY.md`
-- `workspace/USER.md`
-
-Persistent memory is file-backed:
-
-- global memory: `workspace/AGENTS.md`
-- chat memory: `workspace/runtime/groups/<chat_id>/AGENTS.md`
+## Runtime State
 
 Runtime state lives under `workspace/runtime/` by default:
 
 - SQLite DB: `workspace/runtime/oclaw.db`
-- resumable sessions: stored in SQLite by `chat_id`
-- todo lists: stored in SQLite by `chat_id`
-- scheduled tasks and run history: stored in SQLite by `chat_id`
+- Resumable sessions: stored in SQLite by `chat_id`
+- Todo lists: stored in SQLite by `chat_id`
+- Scheduled tasks and run history: stored in SQLite by `chat_id`
 
 Local skills live under `workspace/skills/`.
-
-## Local Embeddings
-
-Vector search now uses a local model bundle instead of the placeholder hash embedder. Point OClaw at a bundle with:
-
-- `model.onnx`
-- `vocab.txt` or `tokenizer.json`
-- optional `tokenizer_config.json` / `config.json`
-
-Set the model bundle path with:
-
-```bash
-export OCLAW_EMBEDDING_MODEL_DIR=/absolute/path/to/bge-small-en-v1.5
-```
-
-The current local backend loads tokenizer assets plus the ONNX embedding initializers and produces normalized sentence vectors for SQLite-backed similarity search.
 
 ## Built-In Tools
 
@@ -144,8 +116,6 @@ The default tool registry is CLI-focused with structured input/output:
 - `grep`
 - `web_search`
 - `web_fetch`
-- `read_memory`
-- `write_memory`
 - `todo_read`
 - `todo_write`
 - `activate_skill`

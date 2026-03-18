@@ -2,7 +2,8 @@
 
 (package
  (name oclaw)
- (synopsis "OCaml 5 personal AI assistant with client-server architecture")
+ (synopsis "OCaml 5 CLI AI assistant with tool-first runtime")
+ ;; CLI tool - no installation rules, run via dune exec
  (allow_empty)
  (depends
   (ocaml (>= 5.0))
