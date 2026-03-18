@@ -7,13 +7,6 @@ type t = {
   mutex : Mutex.t;
 }
 
-type stored_message = {
-  chat_id : int;
-  role : string;
-  content : string;
-  created_at : float;
-}
-
 type scheduled_task = {
   id : int;
   chat_id : int;
@@ -121,11 +114,6 @@ let create path =
          created_at REAL NOT NULL\
          )";
         "CREATE INDEX IF NOT EXISTS idx_messages_chat_time ON messages(chat_id, created_at)";
-        "CREATE TABLE IF NOT EXISTS sessions (\
-         chat_id INTEGER PRIMARY KEY,\
-         messages_json TEXT NOT NULL,\
-         updated_at REAL NOT NULL\
-         )";
         "CREATE TABLE IF NOT EXISTS todos (\
          chat_id INTEGER PRIMARY KEY,\
          todo_json TEXT NOT NULL,\
@@ -180,12 +168,6 @@ let create path =
     begin
       match result with
       | Ok () -> 
-          (* Register vector search UDFs *)
-          (match Vector_search.register_udfs opened_db with
-           | Ok () -> ()
-           | Error msg -> Log.warn (fun m -> m "Vector UDF registration failed: %s" msg));
-          (* Initialize vector schema *)
-          Vector_search.init_schema opened_db;
           Ok { db = opened_db; mutex = Mutex.create () }
       | Error err ->
           Sqlite3.db_close opened_db |> ignore;
@@ -214,40 +196,36 @@ let with_lock t f =
   Mutex.lock t.mutex;
   Fun.protect ~finally:(fun () -> Mutex.unlock t.mutex) f
 
-let store_message t ~chat_id ~role ~content =
+let store_message t ~chat_id ~message =
   with_lock t (fun () ->
     with_statement t.db
       "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4)"
       (fun stmt ->
+        let content_json = Llm_types.message_content_to_yojson (message : Llm_types.message).content |> Yojson.Safe.to_string in
         ignore (bind_int stmt 1 chat_id);
-        ignore (bind_text stmt 2 role);
-        ignore (bind_text stmt 3 content);
+        ignore (bind_text stmt 2 message.Llm_types.role);
+        ignore (bind_text stmt 3 content_json);
         ignore (bind_float stmt 4 (timestamp ()));
         step_expect_done t.db stmt))
 
+
 let read_message_row stmt =
-  let chat_id =
-    match Sqlite3.column stmt 0 with
-    | Data.INT i -> Int64.to_int i
-    | _ -> 0
-  in
   let role =
     match Sqlite3.column stmt 1 with
     | Data.TEXT text -> text
     | _ -> ""
   in
-  let content =
+  let content_json =
     match Sqlite3.column stmt 2 with
     | Data.TEXT text -> text
     | _ -> ""
   in
-  let created_at =
-    match Sqlite3.column stmt 3 with
-    | Data.FLOAT value -> value
-    | Data.INT value -> Int64.to_float value
-    | _ -> 0.0
+  let content =
+    match Llm_types.message_content_of_yojson (Yojson.Safe.from_string content_json) with
+    | Ok content -> content
+    | Error _ -> Llm_types.Text_content content_json
   in
-  { chat_id; role; content; created_at }
+  { Llm_types.role; content }
 
 let collect_messages stmt =
   let rec loop acc =
@@ -282,44 +260,10 @@ let get_all_messages t ~chat_id =
         ignore (bind_int stmt 1 chat_id);
         collect_messages stmt))
 
-let save_session t ~chat_id ~messages_json =
-  with_lock t (fun () ->
-    with_statement t.db
-      "INSERT INTO sessions (chat_id, messages_json, updated_at) VALUES (?1, ?2, ?3) \
-       ON CONFLICT(chat_id) DO UPDATE SET messages_json = excluded.messages_json, updated_at = excluded.updated_at"
-      (fun stmt ->
-        ignore (bind_int stmt 1 chat_id);
-        ignore (bind_text stmt 2 messages_json);
-        ignore (bind_float stmt 3 (timestamp ()));
-        step_expect_done t.db stmt))
-
-let load_session t ~chat_id =
-  with_lock t (fun () ->
-    with_statement t.db
-      "SELECT messages_json, updated_at FROM sessions WHERE chat_id = ?1"
-      (fun stmt ->
-        ignore (bind_int stmt 1 chat_id);
-        match Sqlite3.step stmt with
-        | Rc.ROW ->
-            let json =
-              match Sqlite3.column stmt 0 with
-              | Data.TEXT text -> text
-              | _ -> "[]"
-            in
-            let updated_at =
-              match Sqlite3.column stmt 1 with
-              | Data.FLOAT value -> value
-              | Data.INT value -> Int64.to_float value
-              | _ -> 0.0
-            in
-            Ok (Some (json, updated_at))
-        | Rc.DONE -> Ok None
-        | rc -> Error (Printf.sprintf "sqlite load session failed: %s" (Rc.to_string rc))))
-
 let delete_session t ~chat_id =
   with_lock t (fun () ->
     with_statement t.db
-      "DELETE FROM sessions WHERE chat_id = ?1"
+      "DELETE FROM messages WHERE chat_id = ?1"
       (fun stmt ->
         ignore (bind_int stmt 1 chat_id);
         match Sqlite3.step stmt with

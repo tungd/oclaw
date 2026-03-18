@@ -609,15 +609,23 @@ let rec walk_files acc path =
     acc
 
 let markdown_of_messages messages =
+  let format_content = function
+    | Llm_types.Text_content text -> text
+    | Llm_types.Blocks blocks ->
+        List.map (function
+          | Llm_types.Text { text } -> text
+          | Llm_types.Image _ -> "[Image]"
+          | Llm_types.Tool_use { name; input; _ } ->
+              Printf.sprintf "Tool Use: %s\nInput: %s" name (Yojson.Safe.to_string input)
+          | Llm_types.Tool_result { content; _ } ->
+              Printf.sprintf "Tool Result: %s" content
+        ) blocks
+        |> String.concat "\n\n"
+  in
   messages
-  |> List.map (fun (message : Db.stored_message) ->
-         let title =
-           match message.Db.role with
-           | "assistant" -> "Assistant"
-           | "user" -> "User"
-           | role -> String.capitalize_ascii role
-         in
-         "## " ^ title ^ "\n\n" ^ message.Db.content)
+  |> List.map (fun (message : Llm_types.message) ->
+         let title = String.capitalize_ascii message.role in
+         "## " ^ title ^ "\n\n" ^ format_content message.content)
   |> String.concat "\n\n"
 
 let schema properties required =

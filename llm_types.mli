@@ -58,6 +58,7 @@ val tool_definition_to_yojson : tool_definition -> Yojson.Safe.t
 val image_source_to_yojson : image_source -> Yojson.Safe.t
 val content_block_to_yojson : content_block -> Yojson.Safe.t
 val message_content_to_yojson : message_content -> Yojson.Safe.t
+val message_content_of_yojson : Yojson.Safe.t -> (message_content, string) result
 val message_to_yojson : message -> Yojson.Safe.t
 val message_of_yojson : Yojson.Safe.t -> (message, string) result
 val messages_to_yojson : message list -> Yojson.Safe.t

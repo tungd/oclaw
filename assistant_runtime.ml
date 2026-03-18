@@ -26,11 +26,6 @@ let query runtime prompt =
   Agent_engine.process runtime.state ~chat_id:runtime.chat_id prompt
 
 let history runtime =
-  match Db.load_session runtime.state.db ~chat_id:runtime.chat_id with
-  | Ok (Some (json, _)) ->
-      begin
-        match Llm_types.messages_of_yojson (Yojson.Safe.from_string json) with
-        | Ok messages -> messages
-        | Error _ -> []
-      end
+  match Db.get_all_messages runtime.state.db ~chat_id:runtime.chat_id with
+  | Ok messages -> messages
   | _ -> []

@@ -9,6 +9,7 @@ type agent_event =
   | Plan of string list
   | Error of string
   | Done
+  | Tick
 
 type model = {
   messages : (string * string) list;
@@ -17,6 +18,8 @@ type model = {
   streaming_text : string;
   to_agent_chan : string Domainslib.Chan.t;
   from_agent_chan : agent_event Domainslib.Chan.t;
+  spinner_index : int;
+  is_thinking : bool;
 }
 
 type msg =
@@ -24,6 +27,8 @@ type msg =
   | Submit
   | Agent_event of agent_event
   | Quit
+
+let braille_spinner = [| "⠋"; "⠙"; "⠹"; "⠸"; "⠼"; "⠴"; "⠦"; "⠇" |]
 
 let rec poll_agent_events from_agent_chan dispatch =
   let ev = Domainslib.Chan.recv from_agent_chan in
@@ -41,7 +46,10 @@ let init state chat_id persistent () =
       let on_text_delta delta =
         Domainslib.Chan.send from_agent_chan (Delta delta)
       in
-      match Agent_engine.process ~on_text_delta state ~chat_id ~persistent prompt with
+      let on_status status =
+        Domainslib.Chan.send from_agent_chan (Status (status, None))
+      in
+      match Agent_engine.process ~on_text_delta ~on_status state ~chat_id ~persistent prompt with
       | Ok response ->
           Domainslib.Chan.send from_agent_chan (Message (response, Some chat_id));
           Domainslib.Chan.send from_agent_chan Done;
@@ -60,11 +68,19 @@ let init state chat_id persistent () =
     streaming_text = "";
     to_agent_chan;
     from_agent_chan;
+    spinner_index = 0;
+    is_thinking = false;
   } in
   
   let poll_cmd = Cmd.Perform (fun dispatch ->
     let _poll_domain = Domain.spawn (fun () ->
       poll_agent_events from_agent_chan dispatch
+    ) in
+    let _tick_domain = Domain.spawn (fun () ->
+      while true do
+        Unix.sleepf 0.15;
+        dispatch (Agent_event Tick)
+      done
     ) in
     ()
   ) in
@@ -81,23 +97,26 @@ let update msg model =
         Domainslib.Chan.send model.to_agent_chan text;
         ({ model with 
            messages = model.messages @ [("User", text)];
-           input_text = "" 
+           input_text = "";
+           is_thinking = true;
+           status_text = "Thinking..."
          }, Cmd.None)
   | Agent_event ev ->
       (match ev with
        | Status (status, msg) ->
            let status_text = match msg with Some m -> status ^ ": " ^ m | None -> status in
-           ({ model with status_text }, Cmd.None)
+           ({ model with status_text; is_thinking = true }, Cmd.None)
        | Delta text ->
-           ({ model with streaming_text = model.streaming_text ^ text }, Cmd.None)
+           ({ model with streaming_text = model.streaming_text ^ text; is_thinking = false }, Cmd.None)
        | Message (text, _) ->
            ({ model with 
               messages = model.messages @ [("Assistant", text)];
               streaming_text = "";
-              status_text = "Ready"
+              status_text = "Ready";
+              is_thinking = false
             }, Cmd.None)
        | Tool_call name ->
-           ({ model with status_text = "Working: " ^ name }, Cmd.None)
+           ({ model with status_text = "Working: " ^ name; is_thinking = true }, Cmd.None)
        | Tool_result (name, content, _is_error) ->
            ({ model with
               messages = model.messages @ [("Tool " ^ name, content)];
@@ -106,7 +125,7 @@ let update msg model =
            let content = "Plan:\n" ^ String.concat "\n" (List.map (fun s -> "- " ^ s) steps) in
            ({ model with messages = model.messages @ [("Assistant", content)] }, Cmd.None)
        | Error err ->
-           ({ model with messages = model.messages @ [("Error", err)]; status_text = "Error" }, Cmd.None)
+           ({ model with messages = model.messages @ [("Error", err)]; status_text = "Error"; is_thinking = false }, Cmd.None)
        | Done ->
            let model = 
              if model.streaming_text <> "" then
@@ -115,7 +134,12 @@ let update msg model =
                  streaming_text = "" }
              else model
            in
-           ({ model with status_text = "Ready" }, Cmd.None)
+           ({ model with status_text = "Ready"; is_thinking = false }, Cmd.None)
+       | Tick ->
+           if model.is_thinking then
+             ({ model with spinner_index = (model.spinner_index + 1) mod 8 }, Cmd.None)
+           else
+             (model, Cmd.None)
       )
   | Quit -> (model, Cmd.Quit)
 
@@ -137,12 +161,22 @@ let view model =
     else msgs
   in
   
+  let status_icon = 
+    if model.is_thinking then 
+      let icon = braille_spinner.(model.spinner_index) ^ " " in
+      text ~text_style:Ansi.Style.(make ~fg:Ansi.Color.yellow ~bold:true ()) icon
+    else text ""
+  in
+  
   box
     ~flex_direction:Column
     ~flex_grow:1.0
     [
       scroll_box ~flex_grow:1.0 msgs;
-      text ("Status: " ^ model.status_text);
+      box ~flex_direction:Row [
+        status_icon;
+        text ("Status: " ^ model.status_text);
+      ];
       input
         ~value:model.input_text
         ~placeholder:"Type a message... (Press Escape to quit)"

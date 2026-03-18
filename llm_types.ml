@@ -146,27 +146,27 @@ let parse_content_block json =
   | _ ->
       Error "invalid content block"
 
+let message_content_of_yojson json =
+  match json with
+  | `String text -> Ok (Text_content text)
+  | `List items ->
+      let rec collect acc = function
+        | [] -> Ok (Blocks (List.rev acc))
+        | item :: rest ->
+            begin
+              match parse_content_block item with
+              | Ok block -> collect (block :: acc) rest
+              | Error err -> Error err
+            end
+      in
+      collect [] items
+  | _ -> Error "invalid message content"
+
 let message_of_yojson json =
   try
     let role = json |> member "role" |> to_string in
     let content_json = json |> member "content" in
-    let content =
-      match content_json with
-      | `String text -> Ok (Text_content text)
-      | `List items ->
-          let rec collect acc = function
-            | [] -> Ok (Blocks (List.rev acc))
-            | item :: rest ->
-                begin
-                  match parse_content_block item with
-                  | Ok block -> collect (block :: acc) rest
-                  | Error err -> Error err
-                end
-          in
-          collect [] items
-      | _ -> Error "invalid message content"
-    in
-    match content with
+    match message_content_of_yojson content_json with
     | Ok content -> Ok { role; content }
     | Error err -> Error err
   with _ ->

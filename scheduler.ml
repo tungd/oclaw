@@ -48,8 +48,7 @@ let run_task state (task : Db.scheduled_task) =
        ~task_id:task.Db.id
        ~next_run_at
        ~status:next_status
-       ~last_run_at:finished_at);
-  Log.info (fun m -> m "Scheduled task %d completed (success=%b)" task.Db.id success)
+       ~last_run_at:finished_at)
 
 let run_due_tasks state =
   match Db.get_due_scheduled_tasks state.Runtime.db ~now:(Unix.gettimeofday ()) ~limit:8 with
@@ -66,13 +65,10 @@ let rec sleep_until_next_poll stop_flag seconds =
     sleep_until_next_poll stop_flag (seconds -. chunk)
 
 let worker_loop state stop_flag =
-  Log.info (fun m ->
-      m "Scheduler worker started (poll_interval=%ds)" state.Runtime.config.Oclaw_config.Config.scheduler_poll_interval_seconds);
   while not (Atomic.get stop_flag) do
     run_due_tasks state;
     sleep_until_next_poll stop_flag (float_of_int state.Runtime.config.Oclaw_config.Config.scheduler_poll_interval_seconds)
-  done;
-  Log.info (fun m -> m "Scheduler worker stopped")
+  done
 
 let start state =
   if not state.Runtime.config.Oclaw_config.Config.scheduler_enabled then None

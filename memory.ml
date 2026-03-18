@@ -67,17 +67,3 @@ let build_memory_context t chat_id =
     | None -> ()
   end;
   Buffer.contents buffer
-
-(* Vector search integration *)
-let search_similar_memories db ~chat_id ~query ~limit ~threshold =
-  match Vector_search.search_similar db ~chat_id query ~limit ~threshold with
-  | Ok results -> results  (* Already tuples: (id, memory_id, text, similarity) *)
-  | Error _ -> []
-
-let auto_embed_memory db ~chat_id ~memory_id ~content =
-  Vector_search.store_embedding db ~chat_id ~memory_id content
-
-let get_vector_stats db ~chat_id =
-  match Vector_search.get_stats db ~chat_id with
-  | Ok stats -> Some (stats.count, stats.avg_size, stats.created_min, stats.created_max)
-  | Error _ -> None

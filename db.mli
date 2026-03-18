@@ -2,13 +2,6 @@
 
 type t
 
-type stored_message = {
-  chat_id : int;
-  role : string;
-  content : string;
-  created_at : float;
-}
-
 type scheduled_task = {
   id : int;
   chat_id : int;
@@ -35,12 +28,10 @@ type scheduled_task_run = {
 val create : string -> (t, string) result
 val close : t -> unit
 
-val store_message : t -> chat_id:int -> role:string -> content:string -> (unit, string) result
-val get_recent_messages : t -> chat_id:int -> limit:int -> (stored_message list, string) result
-val get_all_messages : t -> chat_id:int -> (stored_message list, string) result
+val store_message : t -> chat_id:int -> message:Llm_types.message -> (unit, string) result
+val get_recent_messages : t -> chat_id:int -> limit:int -> (Llm_types.message list, string) result
+val get_all_messages : t -> chat_id:int -> (Llm_types.message list, string) result
 
-val save_session : t -> chat_id:int -> messages_json:string -> (unit, string) result
-val load_session : t -> chat_id:int -> ((string * float) option, string) result
 val delete_session : t -> chat_id:int -> (bool, string) result
 
 val save_todo : t -> chat_id:int -> todo_json:string -> (unit, string) result
