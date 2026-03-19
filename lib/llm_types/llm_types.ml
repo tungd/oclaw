@@ -179,6 +179,7 @@ let message_content_of_json json =
              | Error err -> Error err)
       in
       collect [] items
+  | `Null -> Ok (Text_content "")
   | _ -> Error (Json.make_error "invalid message content")
 
 let message_content_to_yojson = message_content_to_json

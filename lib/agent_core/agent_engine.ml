@@ -178,14 +178,13 @@ let process ?on_text_delta ?on_status state ~chat_id ?(persistent=false) prompt 
               let response_node_id = Transcript.add_llm_response state.Runtime.transcript ~parent_id:current_node_id ~model ~content:assistant_message_content () in
               Option.iter (fun f -> f "Executing tools...") on_status;
               let tool_results = tool_results_of_response state ~chat_id response in
-              (* Store tool calls and results *)
+              (* Store tool results as children of the assistant message *)
               let last_node_id = ref response_node_id in
               List.iter (fun tool_result ->
                 match tool_result with
                 | Llm.Tool_result { tool_use_id; content; is_error } ->
-                    let tool_call_id = Transcript.add_tool_call state.Runtime.transcript ~parent_id:!last_node_id ~tool_name:"tool" ~input:(`String tool_use_id) in
                     let is_err = Option.value is_error ~default:false in
-                    let result_id = Transcript.add_tool_result state.Runtime.transcript ~parent_id:tool_call_id ~tool_use_id ~content ~is_error:is_err in
+                    let result_id = Transcript.add_tool_result state.Runtime.transcript ~parent_id:!last_node_id ~tool_use_id ~content ~is_error:is_err in
                     last_node_id := result_id
               ) tool_results;
               loop !last_node_id (rounds_remaining - 1)

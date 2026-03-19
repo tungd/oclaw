@@ -248,6 +248,7 @@ let add_tool_result t ~parent_id ~tool_use_id ~content ~is_error =
   let content = Llm_types.Blocks [Llm_types.Tool_result { tool_use_id; content; is_error = Some is_error }] in
   let new_id = next_node_id t in
   let path = Tree.make_child_path ~parent_path:parent.path ~child_id:new_id in
+  (* Tool results are now stored as children of LLMResponse nodes, not ToolCall nodes *)
   ignore (insert_node t ~chat_id:parent.chat_id ~path ~kind:ToolResult ~content ~model:None ~metadata);
   new_id
 

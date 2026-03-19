@@ -166,7 +166,28 @@ let parse_usage json =
 
 let parse_response json =
   try
-    let choice = json |> member "choices" |> to_list |> List.hd in
+    (* Check for error response first *)
+    begin
+      match json |> member "error" with
+      | `Null -> ()
+      | `Assoc error_fields ->
+          let error_msg = 
+            match List.find_opt (fun (k, _) -> k = "message") error_fields with
+            | Some (_, `String msg) -> msg
+            | _ -> Yojson.Safe.to_string json
+          in
+          raise (Failure ("LLM API error: " ^ error_msg))
+      | _ -> ()
+    end;
+    let choices =
+      match json |> member "choices" with
+      | `List choices -> choices
+      | `Null | _ -> []
+    in
+    let choice = match choices with
+      | [] -> raise (Failure ("no choices in response: " ^ Yojson.Safe.to_string json))
+      | hd :: _ -> hd
+    in
     let finish_reason =
       try choice |> member "finish_reason" |> to_string
       with _ -> "stop"
@@ -185,21 +206,20 @@ let parse_response json =
       | _ -> ""
     in
     let tool_uses =
-      try
-        message_json
-        |> member "tool_calls"
-        |> to_list
-        |> List.map (fun item ->
-               let id = item |> member "id" |> to_string in
-               let name = item |> member "function" |> member "name" |> to_string in
-               let args =
-                 item |> member "function" |> member "arguments"
-                 |> to_string
-                 |> Yojson.Safe.from_string
-               in
-               Llm.Response_tool_use { id; name; input = args })
-      with _ ->
-        []
+      match message_json |> member "tool_calls" with
+      | `List tool_calls ->
+          tool_calls
+          |> List.map (fun item ->
+                 let id = item |> member "id" |> to_string in
+                 let name = item |> member "function" |> member "name" |> to_string in
+                 let args =
+                   item |> member "function" |> member "arguments"
+                   |> to_string
+                   |> Yojson.Safe.from_string
+                 in
+                 Llm.Response_tool_use { id; name; input = args })
+      | `Null | _ ->
+          []
     in
     let content =
       (if String.trim text = "" then [] else [ Llm.Response_text { text } ]) @ tool_uses
@@ -274,6 +294,20 @@ let process_stream_event parser raw_event =
       begin
         try
           let json = Yojson.Safe.from_string payload in
+          (* Check for error response in streaming *)
+          begin
+            match json |> member "error" with
+            | `Null -> ()
+            | `Assoc error_fields ->
+                let error_msg = 
+                  match List.find_opt (fun (k, _) -> k = "message") error_fields with
+                  | Some (_, `String msg) -> msg
+                  | _ -> Yojson.Safe.to_string json
+                in
+                Log.err (fun m -> m "LLM API error response: %s" error_msg);
+                raise (Failure ("LLM API error: " ^ error_msg))
+            | _ -> ()
+          end;
           if data_lines = [] then
             match parse_response json with
             | Ok response ->
@@ -300,8 +334,9 @@ let process_stream_event parser raw_event =
               | None -> ()
             end;
             let choices =
-              try json |> member "choices" |> to_list
-              with _ -> []
+              match json |> member "choices" with
+              | `List choices -> choices
+              | `Null | _ -> []
             in
             List.iter
               (fun choice ->
@@ -321,8 +356,9 @@ let process_stream_event parser raw_event =
                   | _ -> ()
                 end;
                 let delta_tool_calls =
-                  try delta |> member "tool_calls" |> to_list
-                  with _ -> []
+                  match delta |> member "tool_calls" with
+                  | `List tool_calls -> tool_calls
+                  | `Null | _ -> []
                 in
                 List.iter
                   (fun tool_json ->
