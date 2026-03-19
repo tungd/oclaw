@@ -6,7 +6,7 @@ val make_child_path : parent_path:string -> child_id:int -> string
 (** Get depth from path (number of segments). *)
 val path_depth : string -> int
 
-(** Get parent path. Returns None for root paths like "/1". *)
+(** Get parent path. Returns None for root paths like "1". *)
 val parent_path : string -> string option
 
 (** Check if path_a is ancestor of path_b. *)

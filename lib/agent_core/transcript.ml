@@ -220,7 +220,7 @@ let add_user_prompt t ~chat_id ?parent_id ~content () =
       new_id
   | None ->
       let new_id = next_node_id t in
-      let path = Printf.sprintf "/%d" new_id in
+      let path = Printf.sprintf "%d" new_id in
       ignore (insert_node t ~chat_id ~path ~kind:UserPrompt ~content:(Llm_types.Text_content content) ~model:None ~metadata);
       new_id
 
@@ -254,7 +254,7 @@ let add_tool_result t ~parent_id ~tool_use_id ~content ~is_error =
 
 let get_children t node_id =
   let node = match get_node t node_id with Some n -> n | None -> failwith "Node not found" in
-  let child_prefix = node.path ^ "/" in
+  let child_prefix = node.path ^ "." in
   let sql = "SELECT id, path, chat_id, kind, content, model, metadata, timestamp FROM transcripts WHERE chat_id = ? AND path LIKE ? ORDER BY path" in
   let stmt = Sqlite3.prepare t.db sql in
   let _ = Sqlite3.bind_int stmt 1 node.chat_id in
@@ -295,7 +295,7 @@ let get_path_to_root t node_id =
   in loop []
 
 let get_roots t ~chat_id =
-  let sql = "SELECT id FROM transcripts WHERE chat_id = ? AND kind = 'user_prompt' AND path LIKE '/%' ORDER BY timestamp" in
+  let sql = "SELECT id FROM transcripts WHERE chat_id = ? AND kind = 'user_prompt' AND path NOT LIKE '%.%' ORDER BY timestamp" in
   let stmt = Sqlite3.prepare t.db sql in
   let _ = Sqlite3.bind_int stmt 1 chat_id in
   let rec loop acc = match Sqlite3.step stmt with
@@ -316,7 +316,7 @@ let get_branch t node_id =
 
 let get_subtree t node_id =
   let node = match get_node t node_id with Some n -> n | None -> failwith "Node not found" in
-  let prefix = node.path ^ "/" in
+  let prefix = node.path ^ "." in
   let sql = "SELECT id, path, chat_id, kind, content, model, metadata, timestamp FROM transcripts WHERE chat_id = ? AND path LIKE ? ORDER BY path" in
   let stmt = Sqlite3.prepare t.db sql in
   let _ = Sqlite3.bind_int stmt 1 node.chat_id in
@@ -349,7 +349,7 @@ let fork_conversation t ~chat_id node_id ?title () =
     let sql = "INSERT INTO transcripts (chat_id, path, kind, content, model, metadata, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)" in
     let stmt = Sqlite3.prepare t.db sql in
     let _ = Sqlite3.bind_int stmt 1 new_chat_id in
-    let temp_path = if new_parent_path = "" then "/0" else Tree.make_child_path ~parent_path:new_parent_path ~child_id:0 in
+    let temp_path = if new_parent_path = "" then "0" else Tree.make_child_path ~parent_path:new_parent_path ~child_id:0 in
     let _ = Sqlite3.bind_text stmt 2 temp_path in
     let _ = Sqlite3.bind_text stmt 3 (node_kind_to_string old_node.kind) in
     let _ = Sqlite3.bind_text stmt 4 content_json in
@@ -360,7 +360,7 @@ let fork_conversation t ~chat_id node_id ?title () =
     | Sqlite3.Rc.DONE ->
         let new_id = Int64.to_int (Sqlite3.last_insert_rowid t.db) in
         let _ = Sqlite3.finalize stmt in
-        let new_path = if new_parent_path = "" then Printf.sprintf "/%d" new_id else Tree.make_child_path ~parent_path:new_parent_path ~child_id:new_id in
+        let new_path = if new_parent_path = "" then Printf.sprintf "%d" new_id else Tree.make_child_path ~parent_path:new_parent_path ~child_id:new_id in
         path_map := (old_node.path, new_path) :: !path_map
     | rc -> let _ = Sqlite3.finalize stmt in failwith (Sqlite3.Rc.to_string rc)
   ) branch;
