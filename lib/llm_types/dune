@@ -1,0 +1,5 @@
+(library
+ (name llm_types)
+ (modules llm_types)
+ (libraries yojson ppx_protocol_conv_json)
+ (preprocess (pps ppx_protocol_conv)))

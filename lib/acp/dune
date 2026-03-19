@@ -1,5 +1,4 @@
 (library
- (public_name acp)
  (name acp)
- (libraries jsonrpc yojson unix logs)
- (flags :standard -w -A))
+ (modules acp)
+ (libraries jsonrpc yojson unix logs))

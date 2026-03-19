@@ -8,7 +8,40 @@ OClaw is a CLI-first OCaml AI assistant with a structured, tool-first runtime:
 - **OCaml 5 powered**: Parallel tool execution using domains
 - **Extensible**: Skills system and adapter-ready runtime seams for future channels
 
-External channels, schedulers, and MCP are not shipped in this repo, but the runtime is structured so they can be added without architectural rewrites.
+## Project Structure
+
+```
+oclaw/
+├── bin/oclaw/          # Main executable entry point
+├── lib/
+│   ├── acp/            # Agent Client Protocol types (standalone, reusable)
+│   ├── agent_core/     # Core agent logic
+│   │   ├── config.ml   # Configuration management
+│   │   ├── db.ml       # SQLite persistence layer
+│   │   ├── transcript.ml  # Tree-structured conversation storage
+│   │   ├── memory.ml   # Memory management
+│   │   ├── runtime.ml  # App state and LLM call interface
+│   │   ├── agent_engine.ml  # Agent loop, tool execution
+│   │   └── assistant_runtime.ml  # High-level assistant API
+│   ├── agent_tools/    # Tool implementations (standalone)
+│   ├── agent_skills/   # Skills system
+│   ├── agent_tui/      # TUI frontend (Mosaic-based)
+│   ├── httpkit/        # HTTP client library
+│   └── llm_provider/   # LLM provider + types
+└── test/               # Test suites
+```
+
+### Library Dependencies
+
+```
+agent_core → agent_tools, agent_skills, agent_db (embedded), llm_provider, httpkit
+agent_tools → llm_types, httpkit (standalone, no core/skills/db deps)
+agent_skills → (standalone)
+agent_tui → agent_core, mosaic
+llm_provider → llm_types, httpkit
+httpkit → (standalone)
+acp → (standalone protocol types)
+```
 
 ## Usage
 
@@ -17,7 +50,7 @@ External channels, schedulers, and MCP are not shipped in this repo, but the run
 Run the interactive TUI with streaming responses:
 
 ```bash
-dune exec ./oclaw.exe
+dune exec ./bin/oclaw/oclaw.exe
 ```
 
 The TUI features:
@@ -31,13 +64,13 @@ The TUI features:
 Run a single prompt with a positional argument:
 
 ```bash
-dune exec ./oclaw.exe -- "Summarize the files in this workspace"
+dune exec ./bin/oclaw/oclaw.exe -- "Summarize the files in this workspace"
 ```
 
 Run a single prompt from stdin:
 
 ```bash
-printf 'Explain the last command output' | dune exec ./oclaw.exe -- --single-shot
+printf 'Explain the last command output' | dune exec ./bin/oclaw/oclaw.exe -- --single-shot
 ```
 
 ### Persistent conversations
@@ -45,7 +78,7 @@ printf 'Explain the last command output' | dune exec ./oclaw.exe -- --single-sho
 Use a persistent conversation ID to maintain history across sessions:
 
 ```bash
-dune exec ./oclaw.exe -- --chat-id 42 --persistent
+dune exec ./bin/oclaw/oclaw.exe -- --chat-id 42 --persistent
 ```
 
 ### ACP mode (Agent Client Protocol)
@@ -53,7 +86,7 @@ dune exec ./oclaw.exe -- --chat-id 42 --persistent
 Run in ACP JSON-RPC mode via stdio for integration with other tools:
 
 ```bash
-dune exec ./oclaw.exe -- --acp
+dune exec ./bin/oclaw/oclaw.exe -- --acp
 ```
 
 ## Configuration
@@ -106,7 +139,7 @@ Runtime state lives under `workspace/` by default:
 
 - **SQLite DB**: `workspace/runtime/oclaw.db`
   - Resumable sessions stored by `chat_id`
-  - Message history persisted per conversation
+  - Message history persisted per conversation (tree-structured)
 - **Skills**: `workspace/skills/`
 
 ## Built-In Tools
@@ -122,17 +155,11 @@ The default tool registry is CLI-focused with structured input/output:
 
 Tools execute in parallel using OCaml 5 domains when multiple tool calls are made in a single response.
 
+The `agent_tools` library is standalone and can be reused independently of the core agent.
+
 ## Skills
 
 Skills are stored in `workspace/skills/` and can be activated via the `activate_skill` workflow. The system prompt automatically includes available skills from the skills directory.
-
-Available skill packs:
-- `git-expert` - Git operations and workflows
-- `ocaml-pro` - OCaml development assistance
-- `python-cli` - Python CLI development
-- `scheduler` - Task scheduling workflows
-- `skill-ops` - Skill management operations
-- `web-research` - Web research workflows
 
 ## Build and Test
 
@@ -150,28 +177,46 @@ dune build
 ### Run tests
 
 ```bash
-# Run individual test suites
-dune exec ./test_config.exe
-dune exec ./test_http_client.exe
-dune exec ./test_tools_registry.exe
-dune exec ./test_llm_provider.exe
-dune exec ./test_schedule_spec.exe
-dune exec ./test_assistant_runtime.exe
+# Run all tests
+dune runtest
+
+# Individual test suites are auto-discovered by dune
 ```
+
+Test coverage:
+- `test_config.ml` - Configuration loading and merging
+- `test_http_client.ml` - HTTP client library
+- `test_tools_registry.ml` - Tool registry and definitions
+- `test_llm_provider.ml` - LLM provider request serialization
+- `test_assistant_runtime.ml` - Full agent loop, persistence, tool execution
 
 ## Architecture
 
-```
-oclaw.ml          # Main entry point, CLI parsing
-├── runtime.ml    # App state creation and LLM call interface
-├── agent_engine.ml  # Agent loop, tool execution, message management
-├── tools.ml      # Tool registry and implementations
-├── llm_provider.ml  # LLM API communication
-├── db.ml         # SQLite persistence layer
-├── skills.ml     # Skills system
-├── tui.ml        # TUI using Mosaic library
-└── lib/acp/      # Agent Client Protocol implementation
-```
+### Core Agent Loop (`lib/agent_core/agent_engine.ml`)
+
+1. User prompt → stored in transcript DB
+2. Build system prompt (includes skills catalog)
+3. Call LLM with message history + tool definitions
+4. If tool calls:
+   - Execute tools in parallel (OCaml domains)
+   - Store tool calls/results in transcript
+   - Loop back to step 3
+5. If text response → store and return
+
+### Persistence (`lib/agent_core/transcript.ml`)
+
+Tree-structured conversation storage with materialized paths:
+- Each message is a node with a path (e.g., "1/2/3")
+- Supports branching/forking conversations
+- Tool calls and results are separate node types
+- SQLite with indexes for fast path queries
+
+### Tool Architecture (`lib/agent_tools/`)
+
+Tools are standalone - no dependency on core agent, skills, or database:
+- Each tool has a JSON schema definition
+- Execution returns structured `tool_result`
+- Registry pattern for tool discovery
 
 ## License
 

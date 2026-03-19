@@ -1,0 +1,5 @@
+(library
+ (name llm_provider)
+ (modules llm_provider)
+ (libraries httpkit llm_types curl iomux yojson logs ppx_protocol_conv_json)
+ (preprocess (pps ppx_protocol_conv)))

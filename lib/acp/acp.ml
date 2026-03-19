@@ -1,6 +1,5 @@
 (** Agent Client Protocol implementation using jsonrpc library. *)
 
-open Yojson.Safe
 
 module Message = struct
   module Method = struct
@@ -26,7 +25,7 @@ module Message = struct
     | Error of { message : string; code : int }
     | Done
 
-  let to_structured ~id t =
+  let to_structured ~id:_ t =
     match t with
     | Initialize { capabilities } ->
         `Assoc [("capabilities", capabilities)]
@@ -65,23 +64,23 @@ module Message = struct
         Jsonrpc.Packet.Request (Jsonrpc.Request.create ~id ~method_:Method.initialize ~params:(`Assoc [("capabilities", capabilities)]) ())
     | Initialized ->
         Jsonrpc.Packet.Notification (Jsonrpc.Notification.create ~method_:Method.initialized ())
-    | Agent_message { content; chat_id } ->
+    | Agent_message _ ->
         let params = to_structured ~id t in
         Jsonrpc.Packet.Request (Jsonrpc.Request.create ~id ~method_:Method.agent_message ~params ())
-    | Agent_plan { steps } ->
+    | Agent_plan _ ->
         let params = to_structured ~id t in
         Jsonrpc.Packet.Notification (Jsonrpc.Notification.create ~method_:Method.agent_plan ~params ())
-    | Agent_delta { content } ->
+    | Agent_delta _ ->
         let params = to_structured ~id t in
         Jsonrpc.Packet.Notification (Jsonrpc.Notification.create ~method_:Method.agent_delta ~params ())
-    | Tool_call { name; arguments } ->
+    | Tool_call _ ->
         let params = to_structured ~id t in
         Jsonrpc.Packet.Request (Jsonrpc.Request.create ~id ~method_:Method.tools_call ~params ())
     | Tool_result { name; content; is_error } ->
         (* Tool results are sent as responses *)
         let result = `Assoc [("name", `String name); ("content", `String content); ("is_error", `Bool is_error)] in
         Jsonrpc.Packet.Response (Jsonrpc.Response.ok id result)
-    | Status { status; message } ->
+    | Status _ ->
         let params = to_structured ~id t in
         Jsonrpc.Packet.Notification (Jsonrpc.Notification.create ~method_:Method.status ~params ())
     | Error { message; code } ->

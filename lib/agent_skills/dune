@@ -1,0 +1,4 @@
+(library
+ (name agent_skills)
+ (modules skills)
+ (libraries httpkit unix))

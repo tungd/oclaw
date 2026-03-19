@@ -9,8 +9,6 @@
     All messages follow the JSON-RPC 2.0 specification using the jsonrpc library.
 *)
 
-open Yojson.Safe
-
 (** {1:acp_messages ACP Message Types} *)
 
 (** ACP Specific Methods and Types *)

@@ -1,0 +1,12 @@
+(executable
+ (public_name oclaw)
+ (name oclaw)
+ (libraries
+  agent_core
+  agent_tools
+  agent_skills
+  agent_tui
+  acp
+  logs
+  logs.fmt
+  unix))

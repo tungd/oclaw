@@ -1,0 +1,13 @@
+(library
+ (name agent_tui)
+ (modules tui)
+ (libraries
+  agent_core
+  agent_tools
+  agent_skills
+  acp
+  logs
+  mosaic
+  domainslib
+  unix
+  yojson))
