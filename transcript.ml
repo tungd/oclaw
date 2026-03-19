@@ -8,6 +8,12 @@ module Json = Protocol_conv_json.Json
 type node_id = int
 type chat_id = int
 
+let node_id_to_yojson n = `Int n
+let node_id_of_yojson = function `Int n -> n | _ -> failwith "Expected int for node_id"
+
+let chat_id_to_yojson n = `Int n
+let chat_id_of_yojson = function `Int n -> n | _ -> failwith "Expected int for chat_id"
+
 type node_kind = UserPrompt | LLMResponse | ToolCall | ToolResult
 
 type node_metadata = {
@@ -15,6 +21,13 @@ type node_metadata = {
   tool_result_status : string option;
   fork_point : bool;
 }
+[@@deriving protocol ~driver:(module Json)]
+
+let node_metadata_to_yojson = node_metadata_to_json
+let node_metadata_of_yojson json =
+  match node_metadata_of_json json with
+  | Ok v -> v
+  | Error e -> failwith (Json.error_to_string_hum e)
 
 type tree_node = {
   id : node_id;
@@ -35,6 +48,25 @@ type conversation_info = {
   timestamp : float;
 }
 
+let conversation_info_to_yojson c =
+  `Assoc [
+    ("id", `Int c.id);
+    ("title", (match c.title with Some s -> `String s | None -> `Null));
+    ("parent_chat_id", (match c.parent_chat_id with Some i -> `Int i | None -> `Null));
+    ("parent_node_id", (match c.parent_node_id with Some i -> `Int i | None -> `Null));
+    ("timestamp", `Float c.timestamp);
+  ]
+
+let conversation_info_of_yojson = function
+  | `Assoc fields ->
+      let id = match List.assoc_opt "id" fields with Some (`Int i) -> i | _ -> failwith "Missing id" in
+      let title = match List.assoc_opt "title" fields with Some (`String s) -> Some s | Some `Null -> None | _ -> None in
+      let parent_chat_id = match List.assoc_opt "parent_chat_id" fields with Some (`Int i) -> Some i | Some `Null -> None | _ -> None in
+      let parent_node_id = match List.assoc_opt "parent_node_id" fields with Some (`Int i) -> Some i | Some `Null -> None | _ -> None in
+      let timestamp = match List.assoc_opt "timestamp" fields with Some (`Float f) -> f | _ -> failwith "Missing timestamp" in
+      { id; title; parent_chat_id; parent_node_id; timestamp }
+  | _ -> failwith "Expected conversation_info object"
+
 type t = { db : Sqlite3.db; data_dir : string }
 
 let node_kind_to_string = function
@@ -46,27 +78,8 @@ let node_kind_of_string = function
   | "tool_call" -> ToolCall | "tool_result" -> ToolResult
   | s -> failwith (Printf.sprintf "Unknown node_kind: %s" s)
 
-let node_metadata_to_json m =
-  `Assoc [
-    ("tool_name", (match m.tool_name with Some s -> `String s | None -> `Null));
-    ("tool_result_status", (match m.tool_result_status with Some s -> `String s | None -> `Null));
-    ("fork_point", `Bool m.fork_point);
-  ]
-
-let node_metadata_of_json = function
-  | `Assoc fields ->
-      let tool_name = match List.assoc_opt "tool_name" fields with Some (`String s) -> Some s | _ -> None in
-      let tool_result_status = match List.assoc_opt "tool_result_status" fields with Some (`String s) -> Some s | _ -> None in
-      let fork_point = match List.assoc_opt "fork_point" fields with Some (`Bool b) -> b | _ -> false in
-      { tool_name; tool_result_status; fork_point }
-  | _ -> { tool_name = None; tool_result_status = None; fork_point = false }
-
-let message_content_to_json c = Llm_types.message_content_to_yojson c
-let message_content_of_json json = Llm_types.message_content_of_yojson json
-let node_metadata_to_yojson = node_metadata_to_json
-let node_metadata_of_yojson = node_metadata_of_json
-let message_content_to_yojson = message_content_to_json
-let message_content_of_yojson = message_content_of_json
+let message_content_to_yojson = Llm_types.message_content_to_yojson
+let message_content_of_yojson = Llm_types.message_content_of_yojson
 
 let init_db db =
   let exec sql = match Sqlite3.exec db sql with
@@ -93,8 +106,8 @@ let next_node_id t =
 let insert_node t ~chat_id ~path ~kind ~content ~model ~metadata =
   let id = next_node_id t in
   let kind_str = node_kind_to_string kind in
-  let content_json = Yojson.Safe.to_string (message_content_to_json content) in
-  let metadata_json = Yojson.Safe.to_string (node_metadata_to_json metadata) in
+  let content_json = Yojson.Safe.to_string (message_content_to_yojson content) in
+  let metadata_json = Yojson.Safe.to_string (node_metadata_to_yojson metadata) in
   let model_opt = Option.value model ~default:"" in
   let timestamp = Unix.gettimeofday () in
   let sql = "INSERT INTO transcripts (id, chat_id, path, kind, content, model, metadata, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)" in
@@ -121,8 +134,8 @@ let row_to_node stmt =
   let model = let m = Sqlite3.column_text stmt 5 in if m = "" then None else Some m in
   let metadata_json = Yojson.Safe.from_string (Sqlite3.column_text stmt 6) in
   let timestamp = Sqlite3.column_double stmt 7 in
-  let content = match message_content_of_json content_json with Ok c -> c | Error e -> failwith e in
-  let metadata = node_metadata_of_json metadata_json in
+  let content = match message_content_of_yojson content_json with Ok c -> c | Error e -> failwith e in
+  let metadata = node_metadata_of_yojson metadata_json in
   { id; path; chat_id; kind; content; model; metadata; timestamp }
 
 let create ~data_dir ~runtime_dir:_ =
@@ -332,8 +345,8 @@ let fork_conversation t ~chat_id node_id ?title () =
   let path_map = ref [] in
   List.iter (fun old_node ->
     let new_parent_path = match Tree.parent_path old_node.path with None -> "" | Some pp -> List.assoc pp !path_map in
-    let content_json = Yojson.Safe.to_string (message_content_to_json old_node.content) in
-    let metadata_json = Yojson.Safe.to_string (node_metadata_to_json old_node.metadata) in
+    let content_json = Yojson.Safe.to_string (message_content_to_yojson old_node.content) in
+    let metadata_json = Yojson.Safe.to_string (node_metadata_to_yojson old_node.metadata) in
     let model_opt = Option.value old_node.model ~default:"" in
     let sql = "INSERT INTO transcripts (chat_id, path, kind, content, model, metadata, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)" in
     let stmt = Sqlite3.prepare t.db sql in
@@ -384,12 +397,7 @@ let export_json t ~chat_id =
       let _ = load_nodes () in
       let _ = Sqlite3.finalize stmt in
       let nodes_json = List.map tree_node_to_yojson (List.rev !nodes_list) in
-      let conv_json = `Assoc [
-        ("id", `Int c.id);
-        ("title", (match c.title with Some s -> `String s | None -> `Null));
-        ("parent_chat_id", (match c.parent_chat_id with Some i -> `Int i | None -> `Null));
-        ("parent_node_id", (match c.parent_node_id with Some i -> `Int i | None -> `Null));
-      ] in
+      let conv_json = conversation_info_to_yojson c in
       Yojson.Safe.to_string (`Assoc [("conversation", conv_json); ("nodes", `List nodes_json)])
 
 let to_linear_messages t ~chat_id = match get_latest_node t ~chat_id with Some node_id -> get_branch t node_id | None -> []

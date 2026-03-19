@@ -26,7 +26,8 @@
 (library
  (name transcript)
  (modules transcript tree)
- (libraries db llm_types yojson unix logs sqlite3 tyxml)
+ (libraries db llm_types yojson unix logs sqlite3 tyxml ppx_protocol_conv_json)
+ (preprocess (pps ppx_protocol_conv))
  (flags :standard -w -A))
 
 (library
