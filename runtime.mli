@@ -12,6 +12,7 @@ type app_state = {
   config : Oclaw_config.Config.config;
   provider_config : Llm_provider.provider_config;
   db : Db.t;
+  transcript : Transcript.t;
   skills : Skills.t;
   tools : Tools.t;
   llm_call : llm_call;
@@ -25,3 +26,5 @@ val create_app_state :
   ?system_prompt_override:string ->
   Oclaw_config.Config.config ->
   (app_state, string) result
+
+val close_app_state : app_state -> unit

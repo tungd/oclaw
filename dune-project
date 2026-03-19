@@ -17,4 +17,5 @@
   (ppx_protocol_conv_yaml (>= 5.2.3))
   yaml
   domainslib
-  mosaic))
+  mosaic
+  (tyxml (>= 4.6.0))))

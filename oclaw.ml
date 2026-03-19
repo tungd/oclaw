@@ -9,6 +9,8 @@ type cli_options = {
   use_acp : bool;
   debug : bool;
   prompt_parts : string list;
+  export_chat : int option;
+  export_output : string option;
 }
 
 let default_options () =
@@ -20,6 +22,8 @@ let default_options () =
     use_acp = false;
     debug = false;
     prompt_parts = [];
+    export_chat = None;
+    export_output = None;
   }
 
 let read_stdin () =
@@ -99,6 +103,8 @@ let () =
     ("--data-dir", Arg.String (fun value -> config_args := !config_args @ ["--data-dir"; value]), "Set the runtime data root");
     ("--max-tool-iterations", Arg.Int (fun value -> config_args := !config_args @ ["--max-tool-iterations"; string_of_int value]), "Set max tool iterations");
     ("--debug", Arg.Unit (fun () -> options := { !options with debug = true }), "Enable debug logging");
+    ("--export", Arg.Int (fun value -> options := { !options with export_chat = Some value }), "<chat_id> Export chat to HTML");
+    ("-o", Arg.String (fun value -> options := { !options with export_output = Some value }), "<path> Output path for export");
   ] in
   Arg.parse spec (fun arg -> options := { !options with prompt_parts = !options.prompt_parts @ [arg] }) "Usage: oclaw [OPTIONS] [prompt]";
   
@@ -121,19 +127,28 @@ let () =
             prerr_endline ("OClaw error: " ^ err);
             exit 1
         | Ok state ->
-            let positional_prompt = String.concat " " !options.prompt_parts in
-            let exit_code =
-              if !options.use_acp then
-                run_acp state !options.chat_id !options.persistent
-              else if !options.single_shot || positional_prompt <> "" then
-                let prompt =
-                  if positional_prompt <> "" then positional_prompt
-                  else read_stdin ()
+            (* Handle export mode *)
+            (match !options.export_chat with
+            | Some chat_id ->
+                let out_path = Option.value ~default:(Printf.sprintf "transcript_%d.html" chat_id) !options.export_output in
+                Transcript.export_html state.Runtime.transcript ~chat_id ~out_path;
+                Printf.printf "Exported to %s\n" out_path;
+                Runtime.close_app_state state;
+                exit 0
+            | None ->
+                let positional_prompt = String.concat " " !options.prompt_parts in
+                let exit_code =
+                  if !options.use_acp then
+                    run_acp state !options.chat_id !options.persistent
+                  else if !options.single_shot || positional_prompt <> "" then
+                    let prompt =
+                      if positional_prompt <> "" then positional_prompt
+                      else read_stdin ()
+                    in
+                    if String.trim prompt = "" then 0 else run_single_shot state !options.chat_id !options.persistent prompt
+                  else
+                    run_tui state !options.chat_id !options.persistent
                 in
-                if String.trim prompt = "" then 0 else run_single_shot state !options.chat_id !options.persistent prompt
-              else
-                run_tui state !options.chat_id !options.persistent
-            in
-            Log.info (fun m -> m "OClaw exiting with code %d" exit_code);
-            exit exit_code
+                Log.info (fun m -> m "OClaw exiting with code %d" exit_code);
+                exit exit_code)
       end

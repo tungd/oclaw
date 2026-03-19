@@ -24,9 +24,9 @@
  (flags :standard -w -A))
 
 (library
- (name memory)
- (modules memory)
- (libraries unix)
+ (name transcript)
+ (modules transcript tree)
+ (libraries db llm_types yojson unix logs sqlite3 tyxml)
  (flags :standard -w -A))
 
 (library
@@ -51,19 +51,19 @@
 (library
  (name tools)
  (modules tools)
- (libraries db http_client llm_types memory schedule_spec skills str unix yojson)
+ (libraries db http_client llm_types transcript schedule_spec skills str unix yojson)
  (flags :standard -w -A))
 
 (library
  (name runtime)
  (modules runtime)
- (libraries db llm_provider memory oclaw_config skills tools unix)
+ (libraries db llm_provider transcript oclaw_config skills tools unix)
  (flags :standard -w -A))
 
 (library
  (name agent_engine)
  (modules agent_engine)
- (libraries db domainslib llm_types memory oclaw_config runtime tools unix yojson logs)
+ (libraries db domainslib llm_types transcript oclaw_config runtime tools unix yojson logs)
  (flags :standard -w -A))
 
 (library
@@ -111,7 +111,7 @@
 (executable
  (name test_assistant_runtime)
  (modules test_assistant_runtime)
- (libraries agent_engine db llm_provider llm_types memory oclaw_config runtime skills tools unix yojson)
+ (libraries agent_engine db llm_provider llm_types transcript oclaw_config runtime skills tools unix yojson)
  (flags :standard -w -A))
 
 (executable

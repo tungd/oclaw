@@ -16,3 +16,5 @@ val create :
 
 val query : t -> string -> (string, string) result
 val history : t -> Llm_types.message list
+val get_active_branch : t -> Llm_types.message list
+val get_current_node_id : t -> int option

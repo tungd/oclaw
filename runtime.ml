@@ -10,6 +10,7 @@ type app_state = {
   config : Oclaw_config.Config.config;
   provider_config : Llm_provider.provider_config;
   db : Db.t;
+  transcript : Transcript.t;
   skills : Skills.t;
   tools : Tools.t;
   llm_call : llm_call;
@@ -40,6 +41,7 @@ let create_app_state ?(llm_call=default_llm_call) ?system_prompt_override config
     match Db.create db_path with
     | Error err -> Error err
     | Ok db ->
+        let transcript = Transcript.create ~data_dir:runtime_dir ~runtime_dir in
         let skills = Skills.create ~skills_dir in
         let tools =
           Tools.create_default_registry
@@ -52,6 +54,7 @@ let create_app_state ?(llm_call=default_llm_call) ?system_prompt_override config
           config;
           provider_config = Oclaw_config.Config.to_llm_provider_config config;
           db;
+          transcript;
           skills;
           tools;
           llm_call;
@@ -59,3 +62,7 @@ let create_app_state ?(llm_call=default_llm_call) ?system_prompt_override config
         }
   with exn ->
     Error (Printexc.to_string exn)
+
+let close_app_state state =
+  Transcript.close state.transcript;
+  Db.close state.db

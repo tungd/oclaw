@@ -28,9 +28,9 @@ let build_system_prompt state ~chat_id:_ =
         default_system_prompt ^ "\n\n# Skills\n\nThe following skills are available. Use `activate_skill` before following a skill-specific workflow.\n\n" ^ skills_catalog
 
 let load_messages state ~chat_id =
-  match Db.get_all_messages state.Runtime.db ~chat_id with
-  | Ok messages -> Ok messages
-  | Error err -> Error err
+  match Transcript.get_latest_node state.Runtime.transcript ~chat_id with
+  | Some node_id -> Ok (Transcript.get_branch state.Runtime.transcript node_id)
+  | None -> Ok []
 
 let response_text response =
   response.Llm.content
@@ -128,65 +128,69 @@ let process ?on_text_delta ?on_status state ~chat_id ?(persistent=false) prompt 
   let prompt = String.trim prompt in
   if prompt = "" then Error "Prompt is empty"
   else
-    let base_messages =
+    let base_messages, parent_id =
       if persistent then
-        match load_messages state ~chat_id with
-        | Error err -> 
-            Log.warn (fun m -> m "Failed to load chat history: %s" err);
-            []
-        | Ok messages -> messages
+        match Transcript.get_latest_node state.Runtime.transcript ~chat_id with
+        | Some node_id ->
+            (Transcript.get_branch state.Runtime.transcript node_id, Some node_id)
+        | None ->
+            ([], None)
       else
-        []
+        ([], None)
     in
-    let user_message = { Llm.role = "user"; content = Llm.Text_content prompt } in
-    match Db.store_message state.Runtime.db ~chat_id ~message:user_message with
-    | Error err -> Error err
-    | Ok () ->
-        let system_prompt = build_system_prompt state ~chat_id in
-        let tool_defs = Tools.definitions state.Runtime.tools in
-        let rec loop messages rounds_remaining =
-          match
-            state.Runtime.llm_call
-              state.Runtime.provider_config
-              ?on_text_delta
-              ~system_prompt
-              messages
-              ~tools:tool_defs
-          with
-          | Error err -> Error err
-          | Ok response ->
-              let has_tool_use =
-                List.exists
-                  (function
-                    | Llm.Response_tool_use _ -> true
-                    | Llm.Response_text _ -> false)
-                  response.Llm.content
-              in
-              if has_tool_use then
-                if rounds_remaining = 0 then Error "Tool-call recursion limit exceeded"
-                else
-                  let assistant_message =
-                    {
-                      Llm.role = "assistant";
-                      content = Llm.Blocks (assistant_blocks_of_response response);
-                    }
-                  in
-                  match Db.store_message state.Runtime.db ~chat_id ~message:assistant_message with
-                  | Error err -> Error err
-                  | Ok () ->
-                      Option.iter (fun f -> f "Executing tools...") on_status;
-                      let tool_results = tool_results_of_response state ~chat_id response in
-                      let tool_results_message = { Llm.role = "user"; content = Llm.Blocks tool_results } in
-                      match Db.store_message state.Runtime.db ~chat_id ~message:tool_results_message with
-                      | Error err -> Error err
-                      | Ok () ->
-                          loop (messages @ [ assistant_message; tool_results_message ]) (rounds_remaining - 1)
-              else
-                let text = String.trim (response_text response) in
-                let final_text = if text = "" then "(empty_reply)" else text in
-                let assistant_message = { Llm.role = "assistant"; content = Llm.Text_content final_text } in
-                match Db.store_message state.Runtime.db ~chat_id ~message:assistant_message with
-                | Error err -> Error err
-                | Ok () -> Ok final_text
-        in
-        loop (base_messages @ [ user_message ]) state.Runtime.config.max_tool_iterations
+    (* Add user prompt to transcript *)
+    let prompt_node_id =
+      match parent_id with
+      | Some pid -> Transcript.add_user_prompt state.Runtime.transcript ~chat_id ~parent_id:pid ~content:prompt ()
+      | None -> Transcript.add_user_prompt state.Runtime.transcript ~chat_id ~content:prompt ()
+    in
+    let system_prompt = build_system_prompt state ~chat_id in
+    let tool_defs = Tools.definitions state.Runtime.tools in
+    let rec loop current_node_id rounds_remaining =
+      let messages = Transcript.get_branch state.Runtime.transcript current_node_id in
+      match
+        state.Runtime.llm_call
+          state.Runtime.provider_config
+          ?on_text_delta
+          ~system_prompt
+          messages
+          ~tools:tool_defs
+      with
+      | Error err -> Error err
+      | Ok response ->
+          let has_tool_use =
+            List.exists
+              (function
+                | Llm.Response_tool_use _ -> true
+                | Llm.Response_text _ -> false)
+              response.Llm.content
+          in
+          if has_tool_use then
+            if rounds_remaining = 0 then Error "Tool-call recursion limit exceeded"
+            else
+              let assistant_message_content = Llm.Blocks (assistant_blocks_of_response response) in
+              (* Get model from provider config *)
+              let model = state.Runtime.provider_config.Llm_provider.model.name in
+              let response_node_id = Transcript.add_llm_response state.Runtime.transcript ~parent_id:current_node_id ~model ~content:assistant_message_content () in
+              Option.iter (fun f -> f "Executing tools...") on_status;
+              let tool_results = tool_results_of_response state ~chat_id response in
+              (* Store tool calls and results *)
+              let last_node_id = ref response_node_id in
+              List.iter (fun tool_result ->
+                match tool_result with
+                | Llm.Tool_result { tool_use_id; content; is_error } ->
+                    let tool_call_id = Transcript.add_tool_call state.Runtime.transcript ~parent_id:!last_node_id ~tool_name:"tool" ~input:(`String tool_use_id) in
+                    let is_err = Option.value is_error ~default:false in
+                    let result_id = Transcript.add_tool_result state.Runtime.transcript ~parent_id:tool_call_id ~tool_use_id ~content ~is_error:is_err in
+                    last_node_id := result_id
+              ) tool_results;
+              loop !last_node_id (rounds_remaining - 1)
+          else
+            let text = String.trim (response_text response) in
+            let final_text = if text = "" then "(empty_reply)" else text in
+            let assistant_message_content = Llm.Text_content final_text in
+            let model = state.Runtime.provider_config.Llm_provider.model.name in
+            ignore (Transcript.add_llm_response state.Runtime.transcript ~parent_id:current_node_id ~model ~content:assistant_message_content ());
+            Ok final_text
+    in
+    loop prompt_node_id state.Runtime.config.max_tool_iterations
