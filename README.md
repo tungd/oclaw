@@ -1,21 +1,32 @@
 # OClaw
 
-OClaw is a CLI-first OCaml assistant with a structured, tool-first runtime:
+OClaw is a CLI-first OCaml AI assistant with a structured, tool-first runtime:
 
-- one binary: `oclaw`
-- two runtime modes: REPL and single-shot
-- one agent loop: structured messages, tool calls, and persistent sessions
-- one default deployment shape: local CLI, with adapter-ready runtime seams for future channels
+- **One binary**: `oclaw`
+- **Three runtime modes**: TUI (default), single-shot, and ACP (Agent Client Protocol)
+- **Agent loop**: Structured messages, tool calls, and persistent sessions via SQLite
+- **OCaml 5 powered**: Parallel tool execution using domains
+- **Extensible**: Skills system and adapter-ready runtime seams for future channels
 
-External channels, schedulers, and ACP/MCP are not shipped in this repo, but the runtime is structured so they can be added without another architectural rewrite.
+External channels, schedulers, and MCP are not shipped in this repo, but the runtime is structured so they can be added without architectural rewrites.
 
 ## Usage
 
-Run the interactive REPL:
+### Interactive TUI (default)
+
+Run the interactive TUI with streaming responses:
 
 ```bash
 dune exec ./oclaw.exe
 ```
+
+The TUI features:
+- Real-time streaming of assistant responses
+- Braille spinner during thinking states
+- Conversation history in the session
+- Press `Escape` to quit
+
+### Single-shot mode
 
 Run a single prompt with a positional argument:
 
@@ -29,110 +40,116 @@ Run a single prompt from stdin:
 printf 'Explain the last command output' | dune exec ./oclaw.exe -- --single-shot
 ```
 
-Use a persistent conversation id:
+### Persistent conversations
+
+Use a persistent conversation ID to maintain history across sessions:
 
 ```bash
-dune exec ./oclaw.exe -- --chat-id 42
+dune exec ./oclaw.exe -- --chat-id 42 --persistent
+```
+
+### ACP mode (Agent Client Protocol)
+
+Run in ACP JSON-RPC mode via stdio for integration with other tools:
+
+```bash
+dune exec ./oclaw.exe -- --acp
 ```
 
 ## Configuration
 
 OClaw is flags-first. Runtime settings can come from:
 
-1. CLI flags
-2. environment variables
+1. CLI flags (highest priority)
+2. Environment variables
 3. `config.yaml` if present
-4. built-in defaults
+4. Built-in defaults
 
-The remaining configuration surface includes:
+### Configuration file
 
-- model/provider settings
-- runtime data directories
-- session/history limits
-- tool sandbox settings
-- web tool limits
-- scheduler polling
-- debug logging
+Example `config.yaml`:
 
-Useful environment variables:
+```yaml
+llm_model: glm-5
+llm_api_key: sk-your-api-key
+llm_api_base: https://api.example.com/v1
+data_dir: workspace
+max_tool_iterations: 256
+debug: false
+```
+
+### Environment variables
 
 - `OCLAW_API_KEY` - LLM API key
 - `OCLAW_API_BASE` - LLM API base URL
 - `OCLAW_MODEL` - Model name to use
-- `OCLAW_TIMEOUT` - HTTP timeout in seconds
 - `OCLAW_DATA_DIR` - Runtime data directory
-- `OCLAW_SKILLS_DIR` - Skills directory
-- `OCLAW_MAX_HISTORY_MESSAGES` - Max messages in history
-- `OCLAW_MAX_TOOL_ITERATIONS` - Max tool iterations per request
-- `OCLAW_WORKSPACE` - Workspace root for tools
-- `OCLAW_ALLOW_READ_PATHS` - Colon-separated paths allowed for reads
-- `OCLAW_ALLOW_WRITE_PATHS` - Colon-separated paths allowed for writes
-- `OCLAW_EXEC_TIMEOUT` - Shell command timeout in seconds
-- `OCLAW_WEB_REQUEST_TIMEOUT` - Web request timeout
-- `OCLAW_WEB_FETCH_MAX_BYTES` - Max bytes to fetch from web
-- `OCLAW_WEB_SEARCH_MAX_RESULTS` - Max web search results
-- `OCLAW_SCHEDULER_ENABLED` - Enable/disable scheduler
-- `OCLAW_SCHEDULER_POLL_INTERVAL` - Scheduler poll interval in seconds
 - `OCLAW_DEBUG` - Enable debug logging
 
-Useful CLI flags:
+### CLI flags
 
-- `--single-shot`
-- `--chat-id`
-- `--config`
-- `--model`
-- `--api-key`
-- `--api-base`
-- `--timeout`
-- `--data-dir`
-- `--skills-dir`
-- `--workspace`
-- `--allow-read-path`
-- `--allow-write-path`
-- `--no-workspace-restriction`
-- `--exec-timeout`
-- `--debug`
+- `--single-shot` - Run one prompt and exit
+- `--persistent` - Enable persistent chat history
+- `--chat-id <int>` - Use this persistent chat/session ID (default: 1)
+- `--config <path>` - Load configuration from YAML file
+- `--acp` - Run in ACP JSON-RPC mode via stdio
+- `--model <name>` - Override the model name
+- `--api-key <key>` - Override the API key
+- `--api-base <url>` - Override the API base URL
+- `--data-dir <path>` - Set the runtime data root
+- `--max-tool-iterations <int>` - Set max tool iterations per request
+- `--debug` - Enable debug logging
 
 ## Runtime State
 
-Runtime state lives under `workspace/runtime/` by default:
+Runtime state lives under `workspace/` by default:
 
-- SQLite DB: `workspace/runtime/oclaw.db`
-- Resumable sessions: stored in SQLite by `chat_id`
-- Todo lists: stored in SQLite by `chat_id`
-- Scheduled tasks and run history: stored in SQLite by `chat_id`
-
-Local skills live under `workspace/skills/`.
+- **SQLite DB**: `workspace/runtime/oclaw.db`
+  - Resumable sessions stored by `chat_id`
+  - Message history persisted per conversation
+- **Skills**: `workspace/skills/`
 
 ## Built-In Tools
 
 The default tool registry is CLI-focused with structured input/output:
 
-- `bash`
-- `read_file`
-- `write_file`
-- `edit_file`
-- `glob`
-- `grep`
-- `web_search`
-- `web_fetch`
-- `todo_read`
-- `todo_write`
-- `activate_skill`
-- `sync_skills`
-- `schedule_task`
-- `list_scheduled_tasks`
-- `pause_scheduled_task`
-- `resume_scheduled_task`
-- `cancel_scheduled_task`
-- `get_task_history`
-- `export_chat`
+| Tool | Description |
+|------|-------------|
+| `bash` | Execute a shell command |
+| `read_file` | Read and return the contents of a file |
+| `write_file` | Write content to a file (atomic writes) |
+| `edit_file` | Edit a file by replacing one exact text block |
+
+Tools execute in parallel using OCaml 5 domains when multiple tool calls are made in a single response.
+
+## Skills
+
+Skills are stored in `workspace/skills/` and can be activated via the `activate_skill` workflow. The system prompt automatically includes available skills from the skills directory.
+
+Available skill packs:
+- `git-expert` - Git operations and workflows
+- `ocaml-pro` - OCaml development assistance
+- `python-cli` - Python CLI development
+- `scheduler` - Task scheduling workflows
+- `skill-ops` - Skill management operations
+- `web-research` - Web research workflows
 
 ## Build and Test
 
+### Requirements
+
+- OCaml 5.0+
+- Dune 3.15+
+
+### Build
+
 ```bash
 dune build
+```
 
+### Run tests
+
+```bash
 # Run individual test suites
 dune exec ./test_config.exe
 dune exec ./test_http_client.exe
@@ -141,3 +158,21 @@ dune exec ./test_llm_provider.exe
 dune exec ./test_schedule_spec.exe
 dune exec ./test_assistant_runtime.exe
 ```
+
+## Architecture
+
+```
+oclaw.ml          # Main entry point, CLI parsing
+├── runtime.ml    # App state creation and LLM call interface
+├── agent_engine.ml  # Agent loop, tool execution, message management
+├── tools.ml      # Tool registry and implementations
+├── llm_provider.ml  # LLM API communication
+├── db.ml         # SQLite persistence layer
+├── skills.ml     # Skills system
+├── tui.ml        # TUI using Mosaic library
+└── lib/acp/      # Agent Client Protocol implementation
+```
+
+## License
+
+MIT
