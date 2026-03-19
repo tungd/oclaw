@@ -6,4 +6,5 @@
   httpkit
   str
   unix
-  yojson))
+  yojson
+  domainslib))

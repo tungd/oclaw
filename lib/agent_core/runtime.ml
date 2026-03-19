@@ -59,4 +59,5 @@ let create_app_state ?(llm_call=default_llm_call) ?system_prompt_override config
 
 let close_app_state state =
   Transcript.close state.transcript;
-  Db.close state.db
+  Db.close state.db;
+  Agent_tools.Tools.close state.tools

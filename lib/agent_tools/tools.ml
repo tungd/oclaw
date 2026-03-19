@@ -13,14 +13,20 @@ type tool_result = {
   error_type : string option;
 }
 
+type tool_exec_fn = pool:Domainslib.Task.pool -> chat_id:int -> Yojson.Safe.t -> tool_result
+
 type tool = {
   definition : Llm_types.tool_definition;
-  execute : chat_id:int -> Yojson.Safe.t -> tool_result;
+  execute : tool_exec_fn;
 }
 
 type t = {
   tools : tool list;
+  pool : Domainslib.Task.pool;
 }
+
+let close registry =
+  Domainslib.Task.teardown_pool registry.pool
 
 let success ?status_code ?duration_ms ?error_type content =
   { content; is_error = false; status_code; bytes = String.length content; duration_ms; error_type }
@@ -61,7 +67,7 @@ let make_tool name description input_schema execute =
       ("required", `List (List.map (fun s -> `String s) (List.map fst input_schema)));
     ];
   } in
-  { definition; execute = fun ~chat_id:_ args -> execute args }
+  { definition; execute = fun ~pool:_ ~chat_id:_ args -> execute args }
 
 let required_string_arg json name =
   match Yojson.Safe.Util.member name json with
@@ -73,32 +79,82 @@ let json_assoc_or_empty = function | `Assoc fields -> `Assoc fields | _ -> `Asso
 let truncate_output output =
   if String.length output > 4096 then String.sub output 0 4096 ^ "\n... (output truncated)" else output
 
-let run_command ~timeout_seconds command =
+let run_command ~pool:_ ~timeout_seconds command =
   let start_time = Unix.gettimeofday () in
-  try
-    let cmd = Printf.sprintf "timeout %d %s 2>&1" timeout_seconds command in
-    let ic = Unix.open_process_in cmd in
-    let output = Stdlib.In_channel.input_all ic in
-    let status = Unix.close_process_in ic in
-    let end_time = Unix.gettimeofday () in
-    let duration_ms = int_of_float ((end_time -. start_time) *. 1000.0) in
-    let exit_code = match status with Unix.WEXITED c -> c | _ -> 1 in
-    Ok (output, exit_code, duration_ms)
-  with exn -> Error (Printexc.to_string exn)
+  let deadline = start_time +. float_of_int timeout_seconds in
+  
+  (* Use open_process_in which is domain-safe *)
+  let cmd = Printf.sprintf "%s 2>&1" command in
+  let ic = Unix.open_process_in cmd in
+  let fd = Unix.descr_of_in_channel ic in
+  
+  (* Create iomux poller for this operation - it's lightweight, no cleanup needed *)
+  let poller = Iomux.Poll.create ~maxfds:1 () in
+  Iomux.Poll.set_index poller 0 fd Iomux.Poll.Flags.(pollin + pollpri);
+  
+  (* Read output using iomux for timeout-aware reading *)
+  let output = Buffer.create 4096 in
+  let timed_out = ref false in
+  
+  (* Read loop with timeout *)
+  begin
+    try
+      while not !timed_out do
+        let remaining_ms = int_of_float ((deadline -. Unix.gettimeofday ()) *. 1000.0) in
+        if remaining_ms <= 0 then
+          timed_out := true
+        else
+          (* Poll with timeout *)
+          let timeout : Iomux.Poll.poll_timeout = Iomux.Poll.Milliseconds (max 0 remaining_ms) in
+          let nready = Iomux.Poll.poll poller 1 timeout in
+          if nready = 0 then
+            (* No events - check if we've exceeded deadline *)
+            if Unix.gettimeofday () >= deadline then
+              timed_out := true
+          else
+            (* Data available, read one line *)
+            let line = input_line ic in
+            Buffer.add_string output line;
+            Buffer.add_char output '\n'
+      done
+    with End_of_file ->
+      (* Process finished *)
+      ()
+  end;
+  
+  (* Get exit status *)
+  let status = Unix.close_process_in ic in
+  let end_time = Unix.gettimeofday () in
+  let duration_ms = int_of_float ((end_time -. start_time) *. 1000.0) in
+  let exit_code = match status with Unix.WEXITED c -> c | _ -> -1 in
+  
+  if !timed_out then
+    Error (Printf.sprintf "Command timed out after %d seconds" timeout_seconds)
+  else
+    Ok (Buffer.contents output, exit_code, duration_ms)
 
 let bash_tool =
-  make_tool "bash" "Execute a shell command."
-    [("command", `Assoc [("type", `String "string")])]
-    (fun args ->
+  {
+    definition = {
+      Llm_types.name = "bash";
+      description = "Execute a shell command.";
+      input_schema = `Assoc [
+        ("type", `String "object");
+        ("properties", `Assoc [("command", `Assoc [("type", `String "string")])]);
+        ("required", `List [`String "command"]);
+      ];
+    };
+    execute = fun ~pool ~chat_id:_ args ->
       match required_string_arg (json_assoc_or_empty args) "command" with
       | Error err -> failure err
       | Ok command ->
-          match run_command ~timeout_seconds:60 command with
+          match run_command ~pool ~timeout_seconds:60 command with
           | Error err -> failure ("Error executing command: " ^ err)
           | Ok (output, exit_code, duration_ms) ->
               let content = Printf.sprintf "Command output:\n%s\nExit status: %d" (truncate_output output) exit_code in
               if exit_code = 0 then success ~status_code:exit_code ~duration_ms content
-              else failure ~status_code:exit_code ~duration_ms ~error_type:"command_failed" content)
+              else failure ~status_code:exit_code ~duration_ms ~error_type:"command_failed" content
+  }
 
 let read_file_tool =
   make_tool "read_file" "Read the contents of a file."
@@ -158,7 +214,8 @@ let edit_file_tool =
                   | Ok () -> success ~status_code:200 "File edited successfully")
 
 let create_default_registry () =
-  { tools = [bash_tool; read_file_tool; write_file_tool; edit_file_tool] }
+  let pool = Domainslib.Task.setup_pool ~num_domains:2 () in
+  { pool; tools = [bash_tool; read_file_tool; write_file_tool; edit_file_tool] }
 
 let definitions _registry = List.map (fun t -> t.definition) [bash_tool; read_file_tool; write_file_tool; edit_file_tool]
 
@@ -166,5 +223,5 @@ let execute registry ~chat_id name input =
   match List.find_opt (fun tool -> tool.definition.Llm_types.name = name) registry.tools with
   | None -> failure ("Tool not found: " ^ name)
   | Some tool ->
-      begin try tool.execute ~chat_id (json_assoc_or_empty input)
+      begin try tool.execute ~pool:registry.pool ~chat_id (json_assoc_or_empty input)
       with exn -> failure (Printf.sprintf "Error executing tool %s: %s" name (Printexc.to_string exn)) end
