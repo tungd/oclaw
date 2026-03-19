@@ -182,11 +182,33 @@ let write_file_tool =
           | Error err -> failure ("Error writing file: " ^ err)
           | Ok () -> success ~status_code:200 (Printf.sprintf "Successfully wrote %d bytes to %s" (String.length content) path))
 
+(** Search for [sub] in [s] starting at [start] using character-by-character comparison.
+    Returns the index of first match, or -1 if not found.
+    This is O(1) in allocations - no intermediate strings created. *)
+let find_sub_no_alloc s sub start =
+  let s_len = String.length s in
+  let sub_len = String.length sub in
+  if sub_len = 0 || start > s_len - sub_len then -1
+  else
+    let rec search i =
+      if i > s_len - sub_len then -1
+      else
+        (* Check if sub matches at position i *)
+        let rec check_match j =
+          if j >= sub_len then true
+          else if String.unsafe_get s (i + j) <> String.unsafe_get sub j then false
+          else check_match (j + 1)
+        in
+        if check_match 0 then i
+        else search (i + 1)
+    in
+    search start
+
 let edit_file_tool =
-  make_tool "edit_file" "Edit a file by replacing one exact text block."
+  make_tool "edit_file" "Edit a file by replacing one exact text block. The old_text must be unique in the file."
     [
       ("path", `Assoc [("type", `String "string"); ("description", `String "Path to the file to edit")]);
-      ("old_text", `Assoc [("type", `String "string"); ("description", `String "Exact text to find and replace")]);
+      ("old_text", `Assoc [("type", `String "string"); ("description", `String "Exact text to find and replace (must be unique in file)")]);
       ("new_text", `Assoc [("type", `String "string"); ("description", `String "New text to replace with")]);
     ]
     (fun args ->
@@ -197,21 +219,23 @@ let edit_file_tool =
           match read_file_full path with
           | Error err -> failure ("Error reading file: " ^ err)
           | Ok content ->
-              let len = String.length old_text in
-              let rec find_sub s sub start =
-                if start > String.length s - String.length sub then -1
-                else if String.sub s start (String.length sub) = sub then start
-                else find_sub s sub (start + 1)
-              in
-              match find_sub content old_text 0 with
+              (* First search: find the initial match *)
+              match find_sub_no_alloc content old_text 0 with
               | -1 -> failure "old_text not found in file"
-              | idx ->
-                  let prefix = String.sub content 0 idx in
-                  let suffix = String.sub content (idx + len) (String.length content - idx - len) in
-                  let new_content = prefix ^ new_text ^ suffix in
-                  match write_file_atomic path new_content with
-                  | Error err -> failure ("Error writing file: " ^ err)
-                  | Ok () -> success ~status_code:200 "File edited successfully")
+              | first_idx ->
+                  (* Second search: check for ambiguity starting from next character *)
+                  match find_sub_no_alloc content old_text (first_idx + 1) with
+                  | second_idx when second_idx >= 0 ->
+                      failure (Printf.sprintf "Ambiguity error: 'old_text' occurs multiple times (at positions %d and %d). Please provide more context." first_idx second_idx)
+                  | _ ->
+                      (* Unique match found - perform replacement *)
+                      let old_len = String.length old_text in
+                      let prefix = String.sub content 0 first_idx in
+                      let suffix = String.sub content (first_idx + old_len) (String.length content - first_idx - old_len) in
+                      let new_content = prefix ^ new_text ^ suffix in
+                      match write_file_atomic path new_content with
+                      | Error err -> failure ("Error writing file: " ^ err)
+                      | Ok () -> success ~status_code:200 "File edited successfully")
 
 let create_default_registry () =
   let pool = Domainslib.Task.setup_pool ~num_domains:2 () in
