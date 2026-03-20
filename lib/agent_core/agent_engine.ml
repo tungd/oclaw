@@ -19,6 +19,15 @@ let default_system_prompt =
       "- For multi-step work, keep the todo list in sync with real progress.";
       "- Prefer editing targeted files over rewriting unrelated code.";
       "- Keep answers concise and directly tied to the request.";
+      "";
+      "# Tool Error Handling";
+      "";
+      "- When a tool fails, read the error message AND the recovery hint carefully.";
+      "- Follow the recovery hint to fix the issue (e.g., verify file exists, check permissions, provide more context).";
+      "- For file operations: use `bash` with `ls` to verify paths before reading/writing.";
+      "- For edit operations: ensure `old_text` is unique by including more surrounding context.";
+      "- For command failures: check the command output for specific errors before retrying.";
+      "- Don't retry the same failing tool call with identical parameters - fix the root cause first.";
     ]
 
 let build_system_prompt state ~chat_id:_ =
@@ -65,9 +74,14 @@ let execute_tool_parallel state ~chat_id (id, name, input) =
       Agent_tools.Tools.execute state.Runtime.tools ~chat_id name input
     with exn ->
       Log.err (fun m -> m "Tool %s execution failed: %s" name (Printexc.to_string exn));
-      Agent_tools.Tools.failure ~error_type:"exception" ("Tool execution exception: " ^ Printexc.to_string exn)
+      let msg = "Tool execution exception: " ^ Printexc.to_string exn in
+      Agent_tools.Tools.failure ~error_type:"exception" ~error_category:Agent_tools.Tools.Other msg
   in
   (id, result)
+
+(** Helper to create failure with explicit error category *)
+let make_failure ?status_code ?duration_ms ?error_type ?error_category msg =
+  Agent_tools.Tools.failure ?status_code ?duration_ms ?error_type ?error_category msg
 
 let tool_results_of_response state ~chat_id response =
   let tool_calls = 
@@ -85,7 +99,8 @@ let tool_results_of_response state ~chat_id response =
             Agent_tools.Tools.execute state.Runtime.tools ~chat_id name input
           with exn ->
             Log.err (fun m -> m "Tool %s execution failed: %s" name (Printexc.to_string exn));
-            Agent_tools.Tools.failure ~error_type:"exception" ("Tool execution exception: " ^ Printexc.to_string exn)
+            let msg = "Tool execution exception: " ^ Printexc.to_string exn in
+            Agent_tools.Tools.failure ~error_type:"exception" ~error_category:Agent_tools.Tools.Other msg
         in
         (id, result)
       ) tool_calls
@@ -113,16 +128,27 @@ let tool_results_of_response state ~chat_id response =
               Agent_tools.Tools.execute state.Runtime.tools ~chat_id name input
             with exn ->
               Log.err (fun m -> m "Tool %s execution failed: %s" name (Printexc.to_string exn));
-              Agent_tools.Tools.failure ~error_type:"exception" ("Tool execution exception: " ^ Printexc.to_string exn)
+              let msg = "Tool execution exception: " ^ Printexc.to_string exn in
+              Agent_tools.Tools.failure ~error_type:"exception" ~error_category:Agent_tools.Tools.Other msg
           in
           (id, result)
         ) tool_calls
   in
   List.map (fun (id, tool_result) ->
+    (* Enhance error messages with recovery hints for the LLM *)
+    let enhanced_content =
+      if tool_result.Agent_tools.Tools.is_error then begin
+        let base = tool_result.Agent_tools.Tools.content in
+        match tool_result.Agent_tools.Tools.recovery_hint with
+        | Some hint -> Printf.sprintf "%s\n\n💡 Recovery hint: %s" base hint
+        | None -> base
+      end else
+        tool_result.Agent_tools.Tools.content
+    in
     Llm.Tool_result {
       tool_use_id = id;
-      content = (tool_result : Agent_tools.Tools.tool_result).content;
-      is_error = if (tool_result : Agent_tools.Tools.tool_result).is_error then Some true else None;
+      content = enhanced_content;
+      is_error = if tool_result.Agent_tools.Tools.is_error then Some true else None;
     }
   ) tool_results
 
