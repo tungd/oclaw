@@ -69,150 +69,329 @@ let default_config : config = {
 }
 
 (* ============================================================================
-   Immutable Configuration Loading Functions
+   Descriptor-Driven Configuration Loading
    ============================================================================ *)
 
-(** Load configuration from a YAML file *)
-let from_file filename =
+type config_source =
+  | File of string
+  | Env
+  | Cli
+
+type config_error = {
+  source : config_source;
+  key : string;
+  value : string option;
+  message : string;
+}
+
+let string_of_source = function
+  | File path -> Printf.sprintf "config file %s" path
+  | Env -> "environment"
+  | Cli -> "CLI"
+
+let string_of_error error =
+  match error.value with
+  | Some value ->
+      Printf.sprintf "%s: invalid %s=%S (%s)"
+        (string_of_source error.source) error.key value error.message
+  | None ->
+      Printf.sprintf "%s: invalid %s (%s)"
+        (string_of_source error.source) error.key error.message
+
+let parse_string value =
+  Ok value
+
+let parse_bool value =
+  match String.lowercase_ascii (String.trim value) with
+  | "1" | "true" | "yes" -> Ok true
+  | "0" | "false" | "no" -> Ok false
+  | _ -> Error "expected one of: true, false, 1, 0, yes, no"
+
+let parse_int value =
+  match int_of_string_opt (String.trim value) with
+  | Some parsed -> Ok parsed
+  | None ->
+      begin
+        match float_of_string_opt (String.trim value) with
+        | Some parsed when Float.equal parsed (Float.round parsed) -> Ok (int_of_float parsed)
+        | _ -> Error "expected an integer"
+      end
+
+let yaml_scalar_to_string = function
+  | `String value -> Ok value
+  | `Float value -> Ok (string_of_float value)
+  | `Bool value -> Ok (string_of_bool value)
+  | `Null -> Ok ""
+  | _ -> Error "expected a scalar value"
+
+module Config_value = struct
+  type arg_kind =
+    | Flag
+    | Value
+
+  type 'a field = {
+    key : string;
+    env : string;
+    arg : string;
+    arg_kind : arg_kind;
+    desc : string;
+    parse : string -> ('a, string) result;
+    set : 'a -> config -> config;
+  }
+
+  type t = Field : 'a field -> t
+
+  let fold_result f init items =
+    let rec loop acc errors = function
+      | [] ->
+          if errors = [] then Ok acc else Error (List.rev errors)
+      | item :: rest ->
+          begin
+            match f acc item with
+            | Ok next -> loop next errors rest
+            | Error err -> loop acc (err :: errors) rest
+          end
+    in
+    loop init [] items
+
+  let update_assoc key value assoc =
+    (key, value) :: List.remove_assoc key assoc
+
+  let find_by_arg args needle =
+    List.find_map
+      (fun (Field field as packed) ->
+        if String.equal field.arg needle then Some packed else None)
+      args
+
+  let has_key fields needle =
+    List.exists
+      (fun (Field field) -> String.equal field.key needle)
+      fields
+
+  let parse_cli_args fields args =
+    let rec loop seen errors remaining =
+      match remaining with
+      | [] -> (seen, List.rev errors)
+      | flag :: rest ->
+          begin
+            match find_by_arg fields flag with
+            | None ->
+                let err = { source = Cli; key = flag; value = None; message = "unknown configuration argument" } in
+                loop seen (err :: errors) rest
+            | Some (Field field) ->
+                begin
+                  match field.arg_kind with
+                  | Flag ->
+                      let seen = update_assoc field.arg "true" seen in
+                      loop seen errors rest
+                  | Value ->
+                      begin
+                        match rest with
+                        | value :: tail ->
+                            let seen = update_assoc field.arg value seen in
+                            loop seen errors tail
+                        | [] ->
+                            let err = { source = Cli; key = field.arg; value = None; message = "missing argument value" } in
+                            loop seen (err :: errors) []
+                      end
+                end
+          end
+    in
+    loop [] [] args
+
+  let parse_yaml_fields fields = function
+    | None -> ([], [])
+    | Some (`O yaml_fields) ->
+        let parse_one seen (key, value) =
+          if not (has_key fields key) then
+            Error { source = File "<config>"; key; value = None; message = "unknown configuration key" }
+          else
+            match yaml_scalar_to_string value with
+            | Ok raw -> Ok (update_assoc key raw seen)
+            | Error message ->
+                Error { source = File "<config>"; key; value = None; message }
+        in
+        begin
+          match fold_result parse_one [] yaml_fields with
+          | Ok values -> (values, [])
+          | Error errors -> ([], errors)
+        end
+    | Some _ ->
+        ([], [{ source = File "<config>"; key = "<config>"; value = None; message = "expected a YAML object at the top level" }])
+
+  let apply_field cli_values yaml_values cfg errors (Field field) =
+    let apply source key raw =
+      match field.parse raw with
+      | Ok parsed -> (field.set parsed cfg, errors)
+      | Error message ->
+          let err = { source; key; value = Some raw; message } in
+          (cfg, err :: errors)
+    in
+    match List.assoc_opt field.arg cli_values with
+    | Some raw -> apply Cli field.arg raw
+    | None ->
+        begin
+          match Sys.getenv_opt field.env with
+          | Some value when String.trim value <> "" -> apply Env field.env value
+          | _ ->
+              begin
+                match List.assoc_opt field.key yaml_values with
+                | Some raw -> apply (File "<config>") field.key raw
+                | None -> (cfg, errors)
+              end
+        end
+
+  let fold yaml argv initial fields =
+    let cli_values, cli_errors = parse_cli_args fields argv in
+    let yaml_values, yaml_errors = parse_yaml_fields fields yaml in
+    let cfg, field_errors =
+      List.fold_left
+        (fun (cfg, errors) field -> apply_field cli_values yaml_values cfg errors field)
+        (initial, [])
+        fields
+    in
+    let errors = List.rev_append field_errors (List.rev_append yaml_errors cli_errors) in
+    if errors = [] then Ok cfg else Error errors
+end
+
+let config_values : Config_value.t list =
+  let open Config_value in
+  [
+    Field {
+      key = "llm_model";
+      env = "OCLAW_MODEL";
+      arg = "--model";
+      arg_kind = Value;
+      desc = "Override the model name";
+      parse = parse_string;
+      set = (fun value (cfg : config) -> { cfg with llm_model = value });
+    };
+    Field {
+      key = "llm_api_key";
+      env = "OCLAW_API_KEY";
+      arg = "--api-key";
+      arg_kind = Value;
+      desc = "Override the API key";
+      parse = parse_string;
+      set = (fun value (cfg : config) -> { cfg with llm_api_key = value });
+    };
+    Field {
+      key = "llm_api_base";
+      env = "OCLAW_API_BASE";
+      arg = "--api-base";
+      arg_kind = Value;
+      desc = "Override the API base URL";
+      parse = parse_string;
+      set = (fun value (cfg : config) -> { cfg with llm_api_base = value });
+    };
+    Field {
+      key = "data_dir";
+      env = "OCLAW_DATA_DIR";
+      arg = "--data-dir";
+      arg_kind = Value;
+      desc = "Set the runtime data root";
+      parse = parse_string;
+      set = (fun value (cfg : config) -> { cfg with data_dir = value });
+    };
+    Field {
+      key = "max_tool_iterations";
+      env = "OCLAW_MAX_TOOL_ITERATIONS";
+      arg = "--max-tool-iterations";
+      arg_kind = Value;
+      desc = "Set max tool iterations";
+      parse = parse_int;
+      set = (fun value (cfg : config) -> { cfg with max_tool_iterations = value });
+    };
+    Field {
+      key = "debug";
+      env = "OCLAW_DEBUG";
+      arg = "--debug";
+      arg_kind = Flag;
+      desc = "Enable debug logging";
+      parse = parse_bool;
+      set = (fun value (cfg : config) -> { cfg with debug = value });
+    };
+    Field {
+      key = "api_retry_enabled";
+      env = "OCLAW_API_RETRY_ENABLED";
+      arg = "--api-retry-enabled";
+      arg_kind = Value;
+      desc = "Enable or disable API retries";
+      parse = parse_bool;
+      set = (fun value (cfg : config) -> { cfg with api_retry_enabled = value });
+    };
+    Field {
+      key = "api_retry_max_retries";
+      env = "OCLAW_API_RETRY_MAX_RETRIES";
+      arg = "--api-retry-max-retries";
+      arg_kind = Value;
+      desc = "Set API retry count";
+      parse = parse_int;
+      set = (fun value (cfg : config) -> { cfg with api_retry_max_retries = value });
+    };
+    Field {
+      key = "api_retry_base_delay_ms";
+      env = "OCLAW_API_RETRY_BASE_DELAY_MS";
+      arg = "--api-retry-base-delay-ms";
+      arg_kind = Value;
+      desc = "Set API retry base delay";
+      parse = parse_int;
+      set = (fun value (cfg : config) -> { cfg with api_retry_base_delay_ms = value });
+    };
+    Field {
+      key = "api_retry_max_delay_ms";
+      env = "OCLAW_API_RETRY_MAX_DELAY_MS";
+      arg = "--api-retry-max-delay-ms";
+      arg_kind = Value;
+      desc = "Set API retry max delay";
+      parse = parse_int;
+      set = (fun value (cfg : config) -> { cfg with api_retry_max_delay_ms = value });
+    };
+  ]
+
+let parse_file_yaml filename =
+  let source = File filename in
   try
     let yaml_content = In_channel.with_open_text filename In_channel.input_all in
     match Yaml_lib.of_string yaml_content with
+    | Ok yaml -> (Some yaml, [])
     | Error (`Msg msg) ->
-        Printf.printf "Error loading config: %s\nUsing default configuration.\n" msg;
-        default_config
-    | Ok yaml_value ->
-        (try config_of_yaml_exn yaml_value
-         with exn ->
-           Printf.printf "Error loading config: %s\nUsing default configuration.\n" (Printexc.to_string exn);
-           default_config)
-  with exn ->
-    Printf.printf "Error loading config: %s\nUsing default configuration.\n" (Printexc.to_string exn);
-    default_config
+        (None, [{ source; key = filename; value = None; message = msg }])
+  with
+  | Sys_error message ->
+      (None, [{ source; key = filename; value = None; message }])
+  | exn ->
+      (None, [{ source; key = filename; value = None; message = Printexc.to_string exn }])
 
-(** Load configuration from environment variables *)
+(** Load configuration from a YAML file. *)
+let from_file filename =
+  let yaml_opt, file_errors = parse_file_yaml filename in
+  match Config_value.fold yaml_opt [] default_config config_values with
+  | Ok config ->
+      if file_errors = [] then Ok config else Error file_errors
+  | Error errors ->
+      Error (file_errors @ errors)
+
+(** Load configuration from environment variables. *)
 let from_env () =
-  let env_string name default =
-    match Sys.getenv_opt name with
-    | Some value when String.trim value <> "" -> value
-    | _ -> default
-  in
-  let env_bool name default =
-    match Sys.getenv_opt name with
-    | Some value ->
-        let value = String.lowercase_ascii (String.trim value) in
-        value = "1" || value = "true" || value = "yes" || (default && value <> "0" && value <> "false" && value <> "no")
-    | None -> default
-  in
-  let env_int name default =
-    match Sys.getenv_opt name with
-    | Some value ->
-        begin
-          match int_of_string_opt (String.trim value) with
-          | Some parsed -> parsed
-          | None -> default
-        end
-    | None -> default
-  in
-  {
-    llm_model = env_string "OCLAW_MODEL" default_config.llm_model;
-    llm_api_key = env_string "OCLAW_API_KEY" default_config.llm_api_key;
-    llm_api_base = env_string "OCLAW_API_BASE" default_config.llm_api_base;
-    data_dir = env_string "OCLAW_DATA_DIR" default_config.data_dir;
-    max_tool_iterations = env_int "OCLAW_MAX_TOOL_ITERATIONS" default_config.max_tool_iterations;
-    debug = env_bool "OCLAW_DEBUG" default_config.debug;
-    api_retry_enabled = env_bool "OCLAW_API_RETRY_ENABLED" default_config.api_retry_enabled;
-    api_retry_max_retries = env_int "OCLAW_API_RETRY_MAX_RETRIES" default_config.api_retry_max_retries;
-    api_retry_base_delay_ms = env_int "OCLAW_API_RETRY_BASE_DELAY_MS" default_config.api_retry_base_delay_ms;
-    api_retry_max_delay_ms = env_int "OCLAW_API_RETRY_MAX_DELAY_MS" default_config.api_retry_max_delay_ms;
-  }
+  Config_value.fold None [] default_config config_values
 
-(** Parse configuration from command-line arguments.
-    Returns a config with only the overridden fields set, others use defaults.
-    
-    Supported arguments:
-    - --model <string>
-    - --api-key <string>
-    - --api-base <string>
-    - --data-dir <string>
-    - --max-tool-iterations <int>
-    - --debug
-    - --api-retry-enabled <bool>
-    - --api-retry-max-retries <int>
-    - --api-retry-base-delay-ms <int>
-    - --api-retry-max-delay-ms <int>
-*)
+(** Parse configuration from command-line arguments. *)
 let from_args args =
-  let rec parse acc remaining =
-    match remaining with
-    | [] -> acc
-    | "--model" :: value :: rest ->
-        parse { acc with llm_model = value } rest
-    | "--api-key" :: value :: rest ->
-        parse { acc with llm_api_key = value } rest
-    | "--api-base" :: value :: rest ->
-        parse { acc with llm_api_base = value } rest
-    | "--data-dir" :: value :: rest ->
-        parse { acc with data_dir = value } rest
-    | "--max-tool-iterations" :: value :: rest ->
-        begin
-          match int_of_string_opt value with
-          | Some v -> parse { acc with max_tool_iterations = v } rest
-          | None -> parse acc rest
-        end
-    | "--debug" :: rest ->
-        parse { acc with debug = true } rest
-    | "--api-retry-enabled" :: value :: rest ->
-        parse { acc with api_retry_enabled = (value = "true" || value = "1") } rest
-    | "--api-retry-max-retries" :: value :: rest ->
-        begin
-          match int_of_string_opt value with
-          | Some v -> parse { acc with api_retry_max_retries = v } rest
-          | None -> parse acc rest
-        end
-    | "--api-retry-base-delay-ms" :: value :: rest ->
-        begin
-          match int_of_string_opt value with
-          | Some v -> parse { acc with api_retry_base_delay_ms = v } rest
-          | None -> parse acc rest
-        end
-    | "--api-retry-max-delay-ms" :: value :: rest ->
-        begin
-          match int_of_string_opt value with
-          | Some v -> parse { acc with api_retry_max_delay_ms = v } rest
-          | None -> parse acc rest
-        end
-    | _ :: rest ->
-        parse acc rest
-  in
-  parse default_config args
-
-(** Merge multiple configurations. Later configs override earlier ones. *)
-let merge configs =
-  let merge_two base override =
-    {
-      llm_model = if override.llm_model <> default_config.llm_model then override.llm_model else base.llm_model;
-      llm_api_key = if override.llm_api_key <> default_config.llm_api_key then override.llm_api_key else base.llm_api_key;
-      llm_api_base = if override.llm_api_base <> default_config.llm_api_base then override.llm_api_base else base.llm_api_base;
-      data_dir = if override.data_dir <> default_config.data_dir then override.data_dir else base.data_dir;
-      max_tool_iterations = if override.max_tool_iterations <> default_config.max_tool_iterations then override.max_tool_iterations else base.max_tool_iterations;
-      debug = base.debug || override.debug;
-      api_retry_enabled = if override.api_retry_enabled <> default_config.api_retry_enabled then override.api_retry_enabled else base.api_retry_enabled;
-      api_retry_max_retries = if override.api_retry_max_retries <> default_config.api_retry_max_retries then override.api_retry_max_retries else base.api_retry_max_retries;
-      api_retry_base_delay_ms = if override.api_retry_base_delay_ms <> default_config.api_retry_base_delay_ms then override.api_retry_base_delay_ms else base.api_retry_base_delay_ms;
-      api_retry_max_delay_ms = if override.api_retry_max_delay_ms <> default_config.api_retry_max_delay_ms then override.api_retry_max_delay_ms else base.api_retry_max_delay_ms;
-    }
-  in
-  List.fold_left merge_two default_config configs
+  Config_value.fold None args default_config config_values
 
 (** Convenience function to load config with standard priority: file < env < args *)
 let load ?config_file ?(cli_args=[]) () =
-  let file_config = match config_file with
-    | Some path when Sys.file_exists path -> from_file path
-    | _ -> default_config
+  let yaml_opt, file_errors =
+    match config_file with
+    | None -> (None, [])
+    | Some path -> parse_file_yaml path
   in
-  let env_config = from_env () in
-  let args_config = from_args cli_args in
-  merge [file_config; env_config; args_config]
+  match Config_value.fold yaml_opt cli_args default_config config_values with
+  | Ok config ->
+      if file_errors = [] then Ok config else Error file_errors
+  | Error errors ->
+      Error (file_errors @ errors)
 
 (* ============================================================================
    Save Configuration
@@ -235,7 +414,7 @@ let create_default filename =
    Validation
    ============================================================================ *)
 
-let validate config =
+let validate (config : config) =
   let errors = ref [] in
   if String.trim config.llm_api_key = "" then
     errors := "LLM API key is required. Set llm_api_key or OCLAW_API_KEY." :: !errors;
@@ -247,10 +426,10 @@ let validate config =
    Helper Functions
    ============================================================================ *)
 
-let runtime_data_dir config =
+let runtime_data_dir (config : config) =
   Filename.concat config.data_dir "runtime"
 
-let skills_data_dir config =
+let skills_data_dir (config : config) =
   Filename.concat config.data_dir "skills"
 
 let llm_timeout _config =
@@ -260,7 +439,7 @@ let llm_timeout _config =
    Conversion to LLM Provider Config
    ============================================================================ *)
 
-let to_llm_provider_config config =
+let to_llm_provider_config (config : config) =
   Llm_provider.{
     api_base = config.llm_api_base;
     api_key = config.llm_api_key;

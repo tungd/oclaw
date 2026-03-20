@@ -73,39 +73,41 @@ let () =
   Arg.parse spec (fun _ -> ()) "Usage: oclaw [OPTIONS]";
   
   (* Load config with priority: file < env < args *)
-  let config = Config.load ?config_file:!options.config_path ~cli_args:!config_args () in
-  
-  (* Setup logging - default to Info level, Debug if --debug flag is set *)
-  let log_level = if !options.debug || config.debug then Logs.Debug else Logs.Info in
-  Logs.set_level (Some log_level);
-  Logs.set_reporter (Logs.reporter ());
-  
-  match Config.validate config with
+  match Config.load ?config_file:!options.config_path ~cli_args:!config_args () with
   | Error errors ->
-      List.iter (fun err -> prerr_endline ("Configuration error: " ^ err)) errors;
+      List.iter (fun err -> prerr_endline ("Configuration error: " ^ Config.string_of_error err)) errors;
       exit 2
   | Ok config ->
-      begin
-        match Agent_core.Runtime.create_app_state config with
-        | Error err ->
-            prerr_endline ("OClaw error: " ^ err);
-            exit 1
-        | Ok state ->
-            (* Handle export mode *)
-            (match !options.export_chat with
-            | Some chat_id ->
-                let out_path = Option.value ~default:(Printf.sprintf "transcript_%d.html" chat_id) !options.export_output in
-                Agent_core.Transcript.export_html state.Agent_core.Runtime.transcript ~chat_id ~out_path;
-                Printf.printf "Exported to %s\n" out_path;
-                Agent_core.Runtime.close_app_state state;
-                exit 0
-            | None ->
-                let exit_code =
-                  if !options.use_acp then
-                    run_acp state !options.chat_id !options.persistent
-                  else
-                    run_tui state !options.chat_id !options.persistent
-                in
-                Log.info (fun m -> m "OClaw exiting with code %d" exit_code);
-                exit exit_code)
-      end
+      (* Setup logging - default to Info level, Debug if --debug flag is set *)
+      let log_level = if !options.debug || config.debug then Logs.Debug else Logs.Info in
+      Logs.set_level (Some log_level);
+      Logs.set_reporter (Logs.reporter ());
+      match Config.validate config with
+      | Error errors ->
+          List.iter (fun err -> prerr_endline ("Configuration error: " ^ err)) errors;
+          exit 2
+      | Ok config ->
+          begin
+            match Agent_core.Runtime.create_app_state config with
+            | Error err ->
+                prerr_endline ("OClaw error: " ^ err);
+                exit 1
+            | Ok state ->
+                (* Handle export mode *)
+                (match !options.export_chat with
+                | Some chat_id ->
+                    let out_path = Option.value ~default:(Printf.sprintf "transcript_%d.html" chat_id) !options.export_output in
+                    Agent_core.Transcript.export_html state.Agent_core.Runtime.transcript ~chat_id ~out_path;
+                    Printf.printf "Exported to %s\n" out_path;
+                    Agent_core.Runtime.close_app_state state;
+                    exit 0
+                | None ->
+                    let exit_code =
+                      if !options.use_acp then
+                        run_acp state !options.chat_id !options.persistent
+                      else
+                        run_tui state !options.chat_id !options.persistent
+                    in
+                    Log.info (fun m -> m "OClaw exiting with code %d" exit_code);
+                    exit exit_code)
+          end
