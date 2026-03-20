@@ -12,7 +12,7 @@ val parent_path : string -> string option
 (** Check if path_a is ancestor of path_b. *)
 val is_ancestor : string -> string -> bool
 
-(** Parse "/1/5/12" into [1; 5; 12]. *)
+(** Parse "1.5.12" into [1; 5; 12]. *)
 val path_to_ids : string -> int list
 
 (** Convert list of IDs to path string. *)

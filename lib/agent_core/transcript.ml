@@ -86,33 +86,25 @@ let init_db db =
   exec "CREATE INDEX IF NOT EXISTS idx_transcripts_path ON transcripts(chat_id, path)";
   exec "CREATE INDEX IF NOT EXISTS idx_conversations_parent ON conversations(parent_chat_id)"
 
-let next_node_id t =
-  let sql = "SELECT COALESCE(MAX(id), 0) + 1 FROM transcripts" in
-  let stmt = Sqlite3.prepare t.db sql in
-  match Sqlite3.step stmt with
-  | Sqlite3.Rc.ROW -> let id = Sqlite3.column_int stmt 0 in let _ = Sqlite3.finalize stmt in id
-  | Sqlite3.Rc.DONE -> let _ = Sqlite3.finalize stmt in 1
-  | rc -> let _ = Sqlite3.finalize stmt in failwith (Printf.sprintf "DB error: %s" (Sqlite3.Rc.to_string rc))
-
 let insert_node t ~chat_id ~path ~kind ~content ~model ~metadata =
-  let id = next_node_id t in
   let kind_str = node_kind_to_string kind in
   let content_json = Yojson.Safe.to_string (message_content_to_yojson content) in
   let metadata_json = Yojson.Safe.to_string (node_metadata_to_yojson metadata) in
   let model_opt = Option.value model ~default:"" in
   let timestamp = Unix.gettimeofday () in
-  let sql = "INSERT INTO transcripts (id, chat_id, path, kind, content, model, metadata, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)" in
+  let sql = "INSERT INTO transcripts (chat_id, path, kind, content, model, metadata, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)" in
   let stmt = Sqlite3.prepare t.db sql in
-  let _ = Sqlite3.bind_int stmt 1 id in
-  let _ = Sqlite3.bind_int stmt 2 chat_id in
-  let _ = Sqlite3.bind_text stmt 3 path in
-  let _ = Sqlite3.bind_text stmt 4 kind_str in
-  let _ = Sqlite3.bind_text stmt 5 content_json in
-  let _ = Sqlite3.bind_text stmt 6 model_opt in
-  let _ = Sqlite3.bind_text stmt 7 metadata_json in
-  let _ = Sqlite3.bind_double stmt 8 timestamp in
+  let _ = Sqlite3.bind_int stmt 1 chat_id in
+  let _ = Sqlite3.bind_text stmt 2 path in
+  let _ = Sqlite3.bind_text stmt 3 kind_str in
+  let _ = Sqlite3.bind_text stmt 4 content_json in
+  let _ = Sqlite3.bind_text stmt 5 model_opt in
+  let _ = Sqlite3.bind_text stmt 6 metadata_json in
+  let _ = Sqlite3.bind_double stmt 7 timestamp in
   match Sqlite3.step stmt with
-  | Sqlite3.Rc.DONE -> let _ = Sqlite3.finalize stmt in id
+  | Sqlite3.Rc.DONE -> 
+    let _ = Sqlite3.finalize stmt in 
+    Int64.to_int (Sqlite3.last_insert_rowid t.db)
   | rc -> let _ = Sqlite3.finalize stmt in failwith (Printf.sprintf "DB error: %s" (Sqlite3.Rc.to_string rc))
 
 let row_to_node stmt =
@@ -200,37 +192,45 @@ let get_node t node_id =
   | Sqlite3.Rc.DONE -> let _ = Sqlite3.finalize stmt in None
   | rc -> let _ = Sqlite3.finalize stmt in failwith (Sqlite3.Rc.to_string rc)
 
+let update_path t node_id new_path =
+  let stmt = Sqlite3.prepare t.db "UPDATE transcripts SET path = ? WHERE id = ?" in
+  let _ = Sqlite3.bind_text stmt 1 new_path in
+  let _ = Sqlite3.bind_int stmt 2 node_id in
+  match Sqlite3.step stmt with
+  | Sqlite3.Rc.DONE -> let _ = Sqlite3.finalize stmt in ()
+  | rc -> let _ = Sqlite3.finalize stmt in failwith (Printf.sprintf "DB error: %s" (Sqlite3.Rc.to_string rc))
+
 let add_user_prompt t ~chat_id ?parent_id ~content () =
   let metadata = { tool_name = None; tool_result_status = None; fork_point = false } in
   match parent_id with
   | Some pid ->
       let parent = match get_node t pid with Some n -> n | None -> failwith "Parent not found" in
       if parent.chat_id <> chat_id then failwith "parent_id must belong to same chat";
-      let new_id = next_node_id t in
-      let path = Tree.make_child_path ~parent_path:parent.path ~child_id:new_id in
-      ignore (insert_node t ~chat_id ~path ~kind:UserPrompt ~content:(Llm_types.Text_content content) ~model:None ~metadata);
+      let new_id = insert_node t ~chat_id ~path:parent.path ~kind:UserPrompt ~content:(Llm_types.Text_content content) ~model:None ~metadata in
+      let final_path = Tree.make_child_path ~parent_path:parent.path ~child_id:new_id in
+      update_path t new_id final_path;
       new_id
   | None ->
-      let new_id = next_node_id t in
-      let path = Printf.sprintf "%d" new_id in
-      ignore (insert_node t ~chat_id ~path ~kind:UserPrompt ~content:(Llm_types.Text_content content) ~model:None ~metadata);
+      let new_id = insert_node t ~chat_id ~path:"" ~kind:UserPrompt ~content:(Llm_types.Text_content content) ~model:None ~metadata in
+      let final_path = Printf.sprintf "%d" new_id in
+      update_path t new_id final_path;
       new_id
 
 let add_llm_response t ~parent_id ?model ~content () =
   let parent = match get_node t parent_id with Some n -> n | None -> failwith "Parent not found" in
   let metadata = { tool_name = None; tool_result_status = None; fork_point = false } in
-  let new_id = next_node_id t in
-  let path = Tree.make_child_path ~parent_path:parent.path ~child_id:new_id in
-  ignore (insert_node t ~chat_id:parent.chat_id ~path ~kind:LLMResponse ~content ~model ~metadata);
+  let new_id = insert_node t ~chat_id:parent.chat_id ~path:parent.path ~kind:LLMResponse ~content ~model ~metadata in
+  let final_path = Tree.make_child_path ~parent_path:parent.path ~child_id:new_id in
+  update_path t new_id final_path;
   new_id
 
 let add_tool_call t ~parent_id ~tool_name ~input =
   let parent = match get_node t parent_id with Some n -> n | None -> failwith "Parent not found" in
   let metadata = { tool_name = Some tool_name; tool_result_status = None; fork_point = false } in
   let content = Llm_types.Blocks [Llm_types.Tool_use { id = ""; name = tool_name; input }] in
-  let new_id = next_node_id t in
-  let path = Tree.make_child_path ~parent_path:parent.path ~child_id:new_id in
-  ignore (insert_node t ~chat_id:parent.chat_id ~path ~kind:ToolCall ~content ~model:None ~metadata);
+  let new_id = insert_node t ~chat_id:parent.chat_id ~path:parent.path ~kind:ToolCall ~content ~model:None ~metadata in
+  let final_path = Tree.make_child_path ~parent_path:parent.path ~child_id:new_id in
+  update_path t new_id final_path;
   new_id
 
 let add_tool_result t ~parent_id ~tool_use_id ~content ~is_error =
@@ -238,10 +238,9 @@ let add_tool_result t ~parent_id ~tool_use_id ~content ~is_error =
   let status = if is_error then Some "error" else Some "success" in
   let metadata = { tool_name = None; tool_result_status = status; fork_point = false } in
   let content = Llm_types.Blocks [Llm_types.Tool_result { tool_use_id; content; is_error = Some is_error }] in
-  let new_id = next_node_id t in
-  let path = Tree.make_child_path ~parent_path:parent.path ~child_id:new_id in
-  (* Tool results are now stored as children of LLMResponse nodes, not ToolCall nodes *)
-  ignore (insert_node t ~chat_id:parent.chat_id ~path ~kind:ToolResult ~content ~model:None ~metadata);
+  let new_id = insert_node t ~chat_id:parent.chat_id ~path:parent.path ~kind:ToolResult ~content ~model:None ~metadata in
+  let final_path = Tree.make_child_path ~parent_path:parent.path ~child_id:new_id in
+  update_path t new_id final_path;
   new_id
 
 let get_children t node_id =
@@ -341,8 +340,7 @@ let fork_conversation t ~chat_id node_id ?title () =
     let sql = "INSERT INTO transcripts (chat_id, path, kind, content, model, metadata, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)" in
     let stmt = Sqlite3.prepare t.db sql in
     let _ = Sqlite3.bind_int stmt 1 new_chat_id in
-    let temp_path = if new_parent_path = "" then "0" else Tree.make_child_path ~parent_path:new_parent_path ~child_id:0 in
-    let _ = Sqlite3.bind_text stmt 2 temp_path in
+    let _ = Sqlite3.bind_text stmt 2 new_parent_path in
     let _ = Sqlite3.bind_text stmt 3 (node_kind_to_string old_node.kind) in
     let _ = Sqlite3.bind_text stmt 4 content_json in
     let _ = Sqlite3.bind_text stmt 5 model_opt in
@@ -353,6 +351,7 @@ let fork_conversation t ~chat_id node_id ?title () =
         let new_id = Int64.to_int (Sqlite3.last_insert_rowid t.db) in
         let _ = Sqlite3.finalize stmt in
         let new_path = if new_parent_path = "" then Printf.sprintf "%d" new_id else Tree.make_child_path ~parent_path:new_parent_path ~child_id:new_id in
+        update_path t new_id new_path;
         path_map := (old_node.path, new_path) :: !path_map
     | rc -> let _ = Sqlite3.finalize stmt in failwith (Sqlite3.Rc.to_string rc)
   ) branch;
