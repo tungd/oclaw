@@ -433,6 +433,30 @@ let finalize_parser parser =
         usage = !(parser.usage);
       }
 
+let error_message_of_body body =
+  let body = String.trim body in
+  if body = "" then
+    None
+  else
+    try
+      let json = Yojson.Safe.from_string body in
+      match json |> member "error" |> member "message" with
+      | `String message when String.trim message <> "" -> Some message
+      | _ -> Some body
+    with _ -> Some body
+
+let retry_error ?http_status message =
+  Retry.{ message; http_status }
+
+let http_error_of_response response body =
+  let status = H1.Status.to_code response.H1.Response.status in
+  let message =
+    match error_message_of_body body with
+    | Some error_body -> Printf.sprintf "HTTP %d: %s" status error_body
+    | None -> Printf.sprintf "HTTP %d" status
+  in
+  retry_error ~http_status:status message
+
 (** Execute the actual HTTP request to LLM API *)
 let send_message_impl provider ?on_text_delta ~system_prompt messages ~tools =
   let url = provider.api_base ^ "/chat/completions" in
@@ -448,8 +472,14 @@ let send_message_impl provider ?on_text_delta ~system_prompt messages ~tools =
   let parser = create_stream_parser ?on_text_delta () in
   match Client.execute_request ~body ~timeout:provider.timeout ~on_write:(fun chunk ->
     ignore (feed_parser parser chunk)) request with
-  | Error err -> Error err
-  | Ok (_response, _body) -> finalize_parser parser
+  | Error err -> Error (retry_error err)
+  | Ok (response, body) ->
+      let status = H1.Status.to_code response.H1.Response.status in
+      if status < 200 || status >= 300 then
+        Error (http_error_of_response response body)
+      else
+        finalize_parser parser
+        |> Result.map_error (fun message -> retry_error ~http_status:status message)
 
 (** Send message with automatic retry on transient failures *)
 let send_message provider ?on_text_delta ~system_prompt messages ~tools =
@@ -462,8 +492,8 @@ let send_message provider ?on_text_delta ~system_prompt messages ~tools =
       Log.info (fun m -> m "LLM API call succeeded");
       Ok response
   | Retry.Failed (error, attempts) ->
-      Log.err (fun m -> m "LLM API call failed after %d attempts: %s" attempts error);
-      Error (Printf.sprintf "LLM API error after %d attempts: %s" attempts error)
+      Log.err (fun m -> m "LLM API call failed after %d attempts: %s" attempts error.message);
+      Error (Printf.sprintf "LLM API error after %d attempts: %s" attempts error.message)
 
 (* Expose Llm_types module for backward compatibility *)
 module Llm_types = struct

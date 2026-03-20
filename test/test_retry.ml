@@ -9,6 +9,9 @@ let fail msg =
 let expect cond msg =
   if not cond then fail msg
 
+let retry_error ?http_status message =
+  Retry.{ message; http_status }
+
 (* ============================================================================
    Error Classification Tests
    ============================================================================ *)
@@ -102,7 +105,7 @@ let test_with_retry_eventual_success () =
   let f () =
     incr attempts;
     if !attempts < 3 then
-      Error "request timeout"  (* Retryable error *)
+      Error (retry_error "request timeout")  (* Retryable error *)
     else
       Ok "success"
   in
@@ -121,13 +124,13 @@ let test_with_retry_max_retries () =
   (* Function that always fails with retryable error *)
   let f () =
     incr attempts;
-    Error "connection timeout"  (* Retryable error *)
+    Error (retry_error "connection timeout")  (* Retryable error *)
   in
   
   match Retry.with_retry ~config f with
   | Retry.Success _ -> fail "Expected failure but got success"
   | Retry.Failed (error, count) ->
-      expect (error = "connection timeout") "should have correct error message";
+      expect (error.message = "connection timeout") "should have correct error message";
       expect (count = 2) "should report 2 retries";
       expect (!attempts = 2) "should attempt 2 times";
   print_endline "  ✓ with_retry_max_retries"
@@ -139,16 +142,34 @@ let test_with_retry_non_retryable () =
   (* Function that fails with non-retryable error *)
   let f () =
     incr attempts;
-    Error "invalid API key"  (* Not a retryable error *)
+    Error (retry_error ~http_status:401 "invalid API key")  (* Not a retryable error *)
   in
   
   match Retry.with_retry ~config f with
   | Retry.Success _ -> fail "Expected failure but got success"
   | Retry.Failed (error, count) ->
-      expect (error = "invalid API key") "should have correct error message";
+      expect (error.message = "invalid API key") "should have correct error message";
+      expect (error.http_status = Some 401) "should preserve HTTP status";
       expect (count = 1) "should fail immediately without retries";
       expect (!attempts = 1) "should only attempt once";
   print_endline "  ✓ with_retry_non_retryable"
+
+let test_with_retry_uses_structured_http_status () =
+  let config = { Retry.default_config with max_retries = 2; base_delay_ms = 10 } in
+  let attempts = ref 0 in
+
+  let f () =
+    incr attempts;
+    Error (retry_error ~http_status:429 "rate limit")
+  in
+
+  match Retry.with_retry ~config f with
+  | Retry.Success _ -> fail "Expected failure but got success"
+  | Retry.Failed (error, count) ->
+      expect (error.http_status = Some 429) "should preserve HTTP status";
+      expect (count = 2) "should retry based on structured HTTP status";
+      expect (!attempts = 2) "should attempt 2 times";
+  print_endline "  ✓ with_retry_uses_structured_http_status"
 
 (* ============================================================================
    Main
@@ -165,4 +186,5 @@ let () =
   test_with_retry_eventual_success ();
   test_with_retry_max_retries ();
   test_with_retry_non_retryable ();
+  test_with_retry_uses_structured_http_status ();
   print_endline "[PASS] all retry tests ✓"

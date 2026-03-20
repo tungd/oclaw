@@ -24,10 +24,16 @@ type retry_config = {
   exponential_base : float;
 }
 
+(** Structured error information for retry decisions *)
+type retry_error = {
+  message : string;
+  http_status : int option;
+}
+
 (** Result of a retry operation *)
 type 'a retry_result =
   | Success of 'a  (** Request succeeded *)
-  | Failed of string * int  (** Failed with error message and attempt count *)
+  | Failed of retry_error * int  (** Failed with error details and attempt count *)
 
 (** Default retry configuration: 3 retries, 1s base delay, 30s max *)
 val default_config : retry_config
@@ -45,10 +51,10 @@ val calculate_delay :
   int
 
 (** Execute a function with retry logic.
-    The function should return a result type ('a, string) result.
+    The function should return a result type ('a, retry_error) result.
     On Error, checks if the error is retryable.
 *)
 val with_retry : 
   config:retry_config -> 
-  (unit -> ('a, string) result) -> 
+  (unit -> ('a, retry_error) result) -> 
   'a retry_result
