@@ -26,36 +26,8 @@ type msg =
 
 let braille_spinner = [| "⠋"; "⠙"; "⠹"; "⠸"; "⠼"; "⠴"; "⠦"; "⠇" |]
 
-let rec poll_agent_events from_agent_chan dispatch =
-  let ev = Domainslib.Chan.recv from_agent_chan in
-  dispatch (Agent_event ev);
-  poll_agent_events from_agent_chan dispatch
-
 let init state chat_id persistent () =
   let to_agent_chan = Domainslib.Chan.make_unbounded () in
-  let from_agent_chan = Domainslib.Chan.make_unbounded () in
-
-  let _agent_domain = Domain.spawn (fun () ->
-    let rec loop () =
-      let prompt = Domainslib.Chan.recv to_agent_chan in
-      Domainslib.Chan.send from_agent_chan (Status ("thinking", None));
-      let on_text_delta delta =
-        Domainslib.Chan.send from_agent_chan (Delta delta)
-      in
-      let on_status status =
-        Domainslib.Chan.send from_agent_chan (Status (status, None))
-      in
-      match Agent_core.Agent_engine.process ~on_text_delta ~on_status state ~chat_id ~persistent prompt with
-      | Ok response ->
-          Domainslib.Chan.send from_agent_chan (Message (response, Some chat_id));
-          Domainslib.Chan.send from_agent_chan Done;
-          loop ()
-      | Error err ->
-          Domainslib.Chan.send from_agent_chan (Error err);
-          loop ()
-    in
-    loop ()
-  ) in
 
   let model = {
     messages = [];
@@ -66,21 +38,32 @@ let init state chat_id persistent () =
     spinner_index = 0;
     is_thinking = false;
   } in
-  
-  let poll_cmd = Cmd.Perform (fun dispatch ->
-    let _poll_domain = Domain.spawn (fun () ->
-      poll_agent_events from_agent_chan dispatch
-    ) in
-    let _tick_domain = Domain.spawn (fun () ->
-      while true do
-        Unix.sleepf 0.15;
-        dispatch (Agent_event Tick)
-      done
-    ) in
-    ()
+
+  (* Single Cmd.perform spawns one thread for the agent processor.
+     No manual domain management, no intermediate channel. *)
+  let agent_cmd = Cmd.perform (fun dispatch ->
+    let rec loop () =
+      let prompt = Domainslib.Chan.recv to_agent_chan in
+      dispatch (Agent_event (Status ("thinking", None)));
+      let on_text_delta delta =
+        dispatch (Agent_event (Delta delta))
+      in
+      let on_status status =
+        dispatch (Agent_event (Status (status, None)))
+      in
+      match Agent_core.Agent_engine.process ~on_text_delta ~on_status state ~chat_id ~persistent prompt with
+      | Ok response ->
+          dispatch (Agent_event (Message (response, Some chat_id)));
+          dispatch (Agent_event Done);
+          loop ()
+      | Error err ->
+          dispatch (Agent_event (Error err));
+          loop ()
+    in
+    loop ()
   ) in
-  
-  (model, poll_cmd)
+
+  (model, agent_cmd)
 
 let update msg model =
   match msg with
@@ -90,7 +73,7 @@ let update msg model =
       else
         let text = model.input_text in
         Domainslib.Chan.send model.to_agent_chan text;
-        ({ model with 
+        ({ model with
            messages = model.messages @ [("User", text)];
            input_text = "";
            is_thinking = true;
@@ -113,9 +96,9 @@ let update msg model =
        | Error err ->
            ({ model with messages = model.messages @ [("Error", err)]; status_text = "Error"; is_thinking = false }, Cmd.None)
        | Done ->
-           let model = 
+           let model =
              if model.streaming_text <> "" then
-               { model with 
+               { model with
                  messages = model.messages @ [("Assistant", model.streaming_text)];
                  streaming_text = "" }
              else model
@@ -141,19 +124,19 @@ let view model =
     text ~text_style:style (role ^ ": " ^ content)
   in
   let msgs = List.map render_msg model.messages in
-  let msgs = 
+  let msgs =
     if model.streaming_text <> "" then
       msgs @ [text ~text_style:Ansi.Style.(make ~fg:Ansi.Color.green ()) ("Assistant: " ^ model.streaming_text)]
     else msgs
   in
-  
-  let status_icon = 
-    if model.is_thinking then 
+
+  let status_icon =
+    if model.is_thinking then
       let icon = braille_spinner.(model.spinner_index) ^ " " in
       text ~text_style:Ansi.Style.(make ~fg:Ansi.Color.yellow ~bold:true ()) icon
     else text ""
   in
-  
+
   box
     ~flex_direction:Column
     ~flex_grow:1.0
@@ -172,12 +155,16 @@ let view model =
     ]
 
 let subscriptions _model =
-  Sub.On_key_all (fun key ->
-    let data = Event.Key.data key in
-    match data.key with
-    | Matrix.Input.Key.Escape -> Some Quit
-    | _ -> None
-  )
+  Sub.batch [
+    (* 150ms spinner tick - handled by Mosaic's event loop, not an OS thread *)
+    Sub.every 0.15 (fun () -> Agent_event Tick);
+    Sub.on_key_all (fun key ->
+      let data = Event.Key.data key in
+      match data.key with
+      | Matrix.Input.Key.Escape -> Some Quit
+      | _ -> None
+    )
+  ]
 
 let run ~state ~chat_id ~persistent =
   let app = {

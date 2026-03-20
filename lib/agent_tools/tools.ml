@@ -164,9 +164,6 @@ let required_string_arg json name =
 
 let json_assoc_or_empty = function | `Assoc fields -> `Assoc fields | _ -> `Assoc []
 
-let truncate_output output =
-  if String.length output > 4096 then String.sub output 0 4096 ^ "\n... (output truncated)" else output
-
 let run_command ~pool ~timeout_seconds command =
   let start_time = Unix.gettimeofday () in
   let deadline = start_time +. float_of_int timeout_seconds in
@@ -241,7 +238,7 @@ let bash_tool =
               let category = if contains_substring ~haystack:(String.lowercase_ascii err) ~needle:"timeout" then CommandTimeout else CommandFailed in
               failure ~error_category:category ("Error executing command: " ^ err)
           | Ok (output, exit_code, duration_ms) ->
-              let content = Printf.sprintf "Command output:\n%s\nExit status: %d" (truncate_output output) exit_code in
+              let content = Printf.sprintf "Command output:\n%s\nExit status: %d" output exit_code in
               if exit_code = 0 then success ~status_code:exit_code ~duration_ms content
               else failure ~status_code:exit_code ~duration_ms ~error_type:"command_failed" ~error_category:CommandFailed content
   }
