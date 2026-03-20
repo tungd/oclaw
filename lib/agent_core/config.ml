@@ -25,6 +25,12 @@ type config = {
   
   (* Debug *)
   debug : bool;
+  
+  (* API Retry Configuration *)
+  api_retry_enabled : bool;
+  api_retry_max_retries : int;
+  api_retry_base_delay_ms : int;
+  api_retry_max_delay_ms : int;
 }
 [@@deriving protocol ~driver:(module Yaml)]
 
@@ -37,6 +43,12 @@ let default_data_dir = "workspace"
 let default_max_tool_iterations = 256
 let default_llm_timeout = 60
 
+(* API Retry defaults *)
+let default_api_retry_enabled = true
+let default_api_retry_max_retries = 3
+let default_api_retry_base_delay_ms = 1000
+let default_api_retry_max_delay_ms = 30000
+
 (* ============================================================================
    Default Configuration
    ============================================================================ *)
@@ -48,6 +60,10 @@ let default_config : config = {
   data_dir = default_data_dir;
   max_tool_iterations = default_max_tool_iterations;
   debug = false;
+  api_retry_enabled = default_api_retry_enabled;
+  api_retry_max_retries = default_api_retry_max_retries;
+  api_retry_base_delay_ms = default_api_retry_base_delay_ms;
+  api_retry_max_delay_ms = default_api_retry_max_delay_ms;
 }
 
 (* ============================================================================
@@ -102,6 +118,10 @@ let from_env () =
     data_dir = env_string "OCLAW_DATA_DIR" default_config.data_dir;
     max_tool_iterations = env_int "OCLAW_MAX_TOOL_ITERATIONS" default_config.max_tool_iterations;
     debug = env_bool "OCLAW_DEBUG" default_config.debug;
+    api_retry_enabled = env_bool "OCLAW_API_RETRY_ENABLED" default_config.api_retry_enabled;
+    api_retry_max_retries = env_int "OCLAW_API_RETRY_MAX_RETRIES" default_config.api_retry_max_retries;
+    api_retry_base_delay_ms = env_int "OCLAW_API_RETRY_BASE_DELAY_MS" default_config.api_retry_base_delay_ms;
+    api_retry_max_delay_ms = env_int "OCLAW_API_RETRY_MAX_DELAY_MS" default_config.api_retry_max_delay_ms;
   }
 
 (** Parse configuration from command-line arguments.
@@ -114,6 +134,10 @@ let from_env () =
     - --data-dir <string>
     - --max-tool-iterations <int>
     - --debug
+    - --api-retry-enabled <bool>
+    - --api-retry-max-retries <int>
+    - --api-retry-base-delay-ms <int>
+    - --api-retry-max-delay-ms <int>
 *)
 let from_args args =
   let rec parse acc remaining =
@@ -135,6 +159,26 @@ let from_args args =
         end
     | "--debug" :: rest ->
         parse { acc with debug = true } rest
+    | "--api-retry-enabled" :: value :: rest ->
+        parse { acc with api_retry_enabled = (value = "true" || value = "1") } rest
+    | "--api-retry-max-retries" :: value :: rest ->
+        begin
+          match int_of_string_opt value with
+          | Some v -> parse { acc with api_retry_max_retries = v } rest
+          | None -> parse acc rest
+        end
+    | "--api-retry-base-delay-ms" :: value :: rest ->
+        begin
+          match int_of_string_opt value with
+          | Some v -> parse { acc with api_retry_base_delay_ms = v } rest
+          | None -> parse acc rest
+        end
+    | "--api-retry-max-delay-ms" :: value :: rest ->
+        begin
+          match int_of_string_opt value with
+          | Some v -> parse { acc with api_retry_max_delay_ms = v } rest
+          | None -> parse acc rest
+        end
     | _ :: rest ->
         parse acc rest
   in
@@ -150,6 +194,10 @@ let merge configs =
       data_dir = if override.data_dir <> default_config.data_dir then override.data_dir else base.data_dir;
       max_tool_iterations = if override.max_tool_iterations <> default_config.max_tool_iterations then override.max_tool_iterations else base.max_tool_iterations;
       debug = base.debug || override.debug;
+      api_retry_enabled = if override.api_retry_enabled <> default_config.api_retry_enabled then override.api_retry_enabled else base.api_retry_enabled;
+      api_retry_max_retries = if override.api_retry_max_retries <> default_config.api_retry_max_retries then override.api_retry_max_retries else base.api_retry_max_retries;
+      api_retry_base_delay_ms = if override.api_retry_base_delay_ms <> default_config.api_retry_base_delay_ms then override.api_retry_base_delay_ms else base.api_retry_base_delay_ms;
+      api_retry_max_delay_ms = if override.api_retry_max_delay_ms <> default_config.api_retry_max_delay_ms then override.api_retry_max_delay_ms else base.api_retry_max_delay_ms;
     }
   in
   List.fold_left merge_two default_config configs

@@ -461,7 +461,8 @@ let finalize_parser parser =
         usage = !(parser.usage);
       }
 
-let send_message provider ?on_text_delta ~system_prompt messages ~tools =
+(** Execute the actual HTTP request to LLM API *)
+let send_message_impl provider ?on_text_delta ~system_prompt messages ~tools =
   let url = provider.api_base ^ "/chat/completions" in
   let headers = [
     ("Content-Type", "application/json");
@@ -477,8 +478,25 @@ let send_message provider ?on_text_delta ~system_prompt messages ~tools =
   | Error err -> Error err
   | Ok () -> finalize_parser parser
 
+(** Send message with automatic retry on transient failures *)
+let send_message provider ?on_text_delta ~system_prompt messages ~tools =
+  (* Wrap the actual API call with retry logic *)
+  let make_request () =
+    send_message_impl provider ?on_text_delta ~system_prompt messages ~tools
+  in
+  match Retry.with_retry ~config:Retry.default_config make_request with
+  | Retry.Success response ->
+      Log.info (fun m -> m "LLM API call succeeded");
+      Ok response
+  | Retry.Failed (error, attempts) ->
+      Log.err (fun m -> m "LLM API call failed after %d attempts: %s" attempts error);
+      Error (Printf.sprintf "LLM API error after %d attempts: %s" attempts error)
+
 (* Expose Llm_types module for backward compatibility *)
 module Llm_types = struct
   include Llm_types
 end
+
+(* Expose Retry module for testing and advanced usage *)
+module Retry = Retry
 

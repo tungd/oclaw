@@ -17,3 +17,7 @@
 (test
  (name test_llm_provider)
  (libraries llm_types llm_provider yojson))
+
+(test
+ (name test_retry)
+ (libraries agent_core llm_provider))

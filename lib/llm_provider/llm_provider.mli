@@ -42,3 +42,22 @@ val send_message :
   Llm_types.message list ->
   tools:Llm_types.tool_definition list ->
   (Llm_types.messages_response, string) result
+
+(** Retry module for automatic API retry on transient failures *)
+module Retry : sig
+  type retry_config = {
+    max_retries : int;
+    base_delay_ms : int;
+    max_delay_ms : int;
+    exponential_base : float;
+  }
+  
+  type 'a retry_result =
+    | Success of 'a
+    | Failed of string * int
+  
+  val default_config : retry_config
+  val is_retryable_error : http_status:int option -> error_body:string -> bool
+  val calculate_delay : config:retry_config -> attempt:int -> int
+  val with_retry : config:retry_config -> (unit -> ('a, string) result) -> 'a retry_result
+end
