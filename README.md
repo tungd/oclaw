@@ -3,7 +3,7 @@
 OClaw is a CLI-first OCaml AI assistant with a structured, tool-first runtime:
 
 - **One binary**: `oclaw`
-- **Three runtime modes**: TUI (default), single-shot, and ACP (Agent Client Protocol)
+- **Two runtime modes**: TUI (default) and ACP (Agent Client Protocol)
 - **Agent loop**: Structured messages, tool calls, and persistent sessions via SQLite
 - **OCaml 5 powered**: Parallel tool execution using domains
 - **Extensible**: Skills system and adapter-ready runtime seams for future channels
@@ -59,20 +59,6 @@ The TUI features:
 - Conversation history in the session
 - Press `Escape` to quit
 
-### Single-shot mode
-
-Run a single prompt with a positional argument:
-
-```bash
-dune exec ./bin/oclaw/oclaw.exe -- "Summarize the files in this workspace"
-```
-
-Run a single prompt from stdin:
-
-```bash
-printf 'Explain the last command output' | dune exec ./bin/oclaw/oclaw.exe -- --single-shot
-```
-
 ### Persistent conversations
 
 Use a persistent conversation ID to maintain history across sessions:
@@ -121,11 +107,10 @@ debug: false
 
 ### CLI flags
 
-- `--single-shot` - Run one prompt and exit
+- `--acp` - Run in ACP JSON-RPC mode via stdio
 - `--persistent` - Enable persistent chat history
 - `--chat-id <int>` - Use this persistent chat/session ID (default: 1)
 - `--config <path>` - Load configuration from YAML file
-- `--acp` - Run in ACP JSON-RPC mode via stdio
 - `--model <name>` - Override the model name
 - `--api-key <key>` - Override the API key
 - `--api-base <url>` - Override the API base URL

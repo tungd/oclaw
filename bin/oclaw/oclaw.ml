@@ -3,12 +3,10 @@ module Log = (val Logs.src_log Logs.default : Logs.LOG)
 
 type cli_options = {
   config_path : string option;
-  single_shot : bool;
   persistent : bool;
   chat_id : int;
   use_acp : bool;
   debug : bool;
-  prompt_parts : string list;
   export_chat : int option;
   export_output : string option;
 }
@@ -16,45 +14,13 @@ type cli_options = {
 let default_options () =
   {
     config_path = None;
-    single_shot = false;
     persistent = false;
     chat_id = 1;
     use_acp = false;
     debug = false;
-    prompt_parts = [];
     export_chat = None;
     export_output = None;
   }
-
-let read_stdin () =
-  let lines = ref [] in
-  try
-    while true do
-      lines := read_line () :: !lines
-    done;
-    assert false
-  with End_of_file ->
-    String.concat "\n" (List.rev !lines)
-
-let run_single_shot state chat_id persistent prompt =
-  let streamed = ref false in
-  let on_text_delta delta =
-    if not !streamed then (
-      streamed := true;
-      print_string "\r\027[K"
-    );
-    print_string delta;
-    flush stdout
-  in
-  match Agent_core.Agent_engine.process ~on_text_delta state ~chat_id ~persistent prompt with
-  | Ok response ->
-      if !streamed then print_newline ()
-      else print_endline response;
-      0
-  | Error err ->
-      if !streamed then print_newline ();
-      prerr_endline ("OClaw error: " ^ err);
-      1
 
 let run_tui state chat_id persistent =
   Agent_tui.Tui.run ~state ~chat_id ~persistent;
@@ -92,7 +58,6 @@ let () =
   let config_args = ref [] in
   let spec = [
     ("--acp", Arg.Unit (fun () -> options := { !options with use_acp = true }), "Run in ACP JSON-RPC mode via stdio");
-    ("--single-shot", Arg.Unit (fun () -> options := { !options with single_shot = true }), "Run one prompt and exit (default: TUI interactive mode)");
     ("--persistent", Arg.Unit (fun () -> options := { !options with persistent = true }), "Enable persistent chat history/memory");
     ("--chat-id", Arg.Int (fun value -> options := { !options with chat_id = value }), "Use this persistent chat/session id (default: 1)");
     ("--config", Arg.String (fun path -> options := { !options with config_path = Some path }), "Load configuration from this YAML file");
@@ -105,7 +70,7 @@ let () =
     ("--export", Arg.Int (fun value -> options := { !options with export_chat = Some value }), "<chat_id> Export chat to HTML");
     ("-o", Arg.String (fun value -> options := { !options with export_output = Some value }), "<path> Output path for export");
   ] in
-  Arg.parse spec (fun arg -> options := { !options with prompt_parts = !options.prompt_parts @ [arg] }) "Usage: oclaw [OPTIONS] [prompt]";
+  Arg.parse spec (fun _ -> ()) "Usage: oclaw [OPTIONS]";
   
   (* Load config with priority: file < env < args *)
   let config = Config.load ?config_file:!options.config_path ~cli_args:!config_args () in
@@ -135,16 +100,9 @@ let () =
                 Agent_core.Runtime.close_app_state state;
                 exit 0
             | None ->
-                let positional_prompt = String.concat " " !options.prompt_parts in
                 let exit_code =
                   if !options.use_acp then
                     run_acp state !options.chat_id !options.persistent
-                  else if !options.single_shot || positional_prompt <> "" then
-                    let prompt =
-                      if positional_prompt <> "" then positional_prompt
-                      else read_stdin ()
-                    in
-                    if String.trim prompt = "" then 0 else run_single_shot state !options.chat_id !options.persistent prompt
                   else
                     run_tui state !options.chat_id !options.persistent
                 in
