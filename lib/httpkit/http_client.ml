@@ -4,6 +4,13 @@ module Log = (val Logs.src_log (Logs.Src.create "http_client") : Logs.LOG)
 
 let default_user_agent = "OpenAI/Go 3.22.0"
 
+type request_options = {
+  request : H1.Request.t;
+  body : string option;
+  timeout : int;
+  on_write : (string -> unit) option;
+}
+
 let has_ci_header name headers =
   let lname = String.lowercase_ascii name in
   List.exists (fun (k, _v) -> String.equal (String.lowercase_ascii k) lname) headers
@@ -16,87 +23,6 @@ let to_curl_headers headers =
   with_default_request_headers headers
   |> List.map (fun (k, v) -> k ^ ": " ^ v)
 
-(* Module for HTTP methods *)
-module HttpMethod = struct
-  type t = GET | POST | PUT | PATCH | DELETE
-  
-  let to_string = function
-    | GET -> "GET"
-    | POST -> "POST" 
-    | PUT -> "PUT"
-    | PATCH -> "PATCH"
-    | DELETE -> "DELETE"
-  
-  let of_string = function
-    | "GET" -> Some GET
-    | "POST" -> Some POST
-    | "PUT" -> Some PUT
-    | "PATCH" -> Some PATCH
-    | "DELETE" -> Some DELETE
-    | _ -> None
-end
-
-(* Module for HTTP requests *)
-module HttpRequest = struct
-  type t = {
-    method_ : HttpMethod.t;
-    url : string;
-    headers : (string * string) list;
-    body : string option;
-    timeout : int;
-    on_write : (string -> unit) option;
-  }
-  
-  let create ~method_ ~url ?(headers=[]) ?body ?(timeout=30) ?on_write () = {
-    method_; url; headers; body; timeout; on_write
-  }
-  
-  let to_curl_handle req =
-    let handle = Curl.init () in
-    Curl.set_url handle req.url;
-    Curl.set_timeout handle req.timeout;
-    
-    (* Set HTTP method *)
-    (match req.method_ with
-     | HttpMethod.GET -> Curl.set_httpget handle true
-     | HttpMethod.POST -> Curl.set_post handle true
-     | HttpMethod.PUT -> Curl.set_upload handle true
-     | HttpMethod.PATCH -> Curl.set_customrequest handle "PATCH"
-     | HttpMethod.DELETE -> Curl.set_customrequest handle "DELETE");
-    
-    (* Set headers *)
-    let headers_list = to_curl_headers req.headers in
-    Curl.set_httpheader handle headers_list;
-    
-    (* Set body for POST/PUT *)
-    (match req.method_, req.body with
-     | (HttpMethod.POST | HttpMethod.PUT | HttpMethod.PATCH), Some body -> Curl.set_postfields handle body
-     | _ -> ());
-    
-    handle
-end
-
-(* Module for HTTP responses *)
-module HttpResponse = struct
-  type t = {
-    status : int;
-    headers : (string * string) list;
-    body : string;
-    error : string option;
-  }
-  
-  let create ~status ~headers ~body ?error () = {
-    status; headers; body; error
-  }
-  
-  let is_success resp =
-    resp.status >= 200 && resp.status < 300
-  
-  let get_header resp key =
-    List.assoc_opt (String.uppercase_ascii key) 
-      (List.map (fun (k, v) -> (String.uppercase_ascii k, v)) resp.headers)
-end
-
 exception Http_error of string
 
 (* Convenience functions for creating requests *)
@@ -108,29 +34,36 @@ let init_curl_handle () =
   handle
 
 let set_request_options handle req =
-  Curl.set_url handle req.HttpRequest.url;
-  
-  (* Set HTTP method *)
-  begin match req.HttpRequest.method_ with
-    | HttpMethod.POST -> Curl.set_post handle true
-    | HttpMethod.PUT -> Curl.set_customrequest handle "PUT"
-    | HttpMethod.PATCH -> Curl.set_customrequest handle "PATCH"
-    | HttpMethod.DELETE -> Curl.set_customrequest handle "DELETE"
-    | HttpMethod.GET -> () (* GET is default *)
+  Curl.set_url handle req.request.H1.Request.target;
+
+  let method_name = H1.Method.to_string req.request.H1.Request.meth in
+  begin
+    if String.equal method_name "GET" then
+      Curl.set_httpget handle true
+    else if String.equal method_name "POST" then
+      Curl.set_post handle true
+    else
+      Curl.set_customrequest handle method_name
   end;
-  
-  (* Set headers *)
-  let headers = to_curl_headers req.HttpRequest.headers in
+
+  let headers = req.request.H1.Request.headers |> H1.Headers.to_list |> to_curl_headers in
   Curl.set_httpheader handle headers;
-  
-  (* Set body for POST/PUT *)
-  begin match req.HttpRequest.method_, req.HttpRequest.body with
-    | (HttpMethod.POST | HttpMethod.PUT | HttpMethod.PATCH), Some body -> Curl.set_postfields handle body
-    | _ -> ()
+
+  begin
+    match req.body with
+    | Some body -> Curl.set_postfields handle body
+    | None -> ()
   end;
-  
-  (* Set timeout *)
-  Curl.set_timeout handle req.HttpRequest.timeout
+
+  Curl.set_timeout handle req.timeout
+
+let response_status_of_code code =
+  H1.Status.of_code code
+
+let response_of_parts ~status ~headers ~body =
+  let response_headers = H1.Headers.of_list headers in
+  let response = H1.Response.create ~headers:response_headers (response_status_of_code status) in
+  (response, body)
 
 let perform_request handle =
   let response_body = Buffer.create 1024 in
@@ -165,8 +98,8 @@ let perform_request handle =
     let code = Curl.get_responsecode handle in
     if code = 0 then 200 else code (* curl returns 0 if no HTTP status was received *)
   in
-  
-  HttpResponse.create ~status:status_code ~headers:(List.rev !response_headers) ~body:(Buffer.contents response_body) ()
+
+  response_of_parts ~status:status_code ~headers:(List.rev !response_headers) ~body:(Buffer.contents response_body)
 
 let cleanup_curl_handle handle =
   Curl.cleanup handle
@@ -177,19 +110,15 @@ type transfer_state = {
   response_headers : (string * string) list ref;
 }
 
-let response_status_of_handle handle =
+let status_code_of_handle handle =
   let code = Curl.get_responsecode handle in
   if code = 0 then 200 else code
 
 let response_of_transfer handle state =
-  HttpResponse.create
-    ~status:(response_status_of_handle handle)
+  response_of_parts
+    ~status:(status_code_of_handle handle)
     ~headers:(List.rev !(state.response_headers))
     ~body:(Buffer.contents state.response_body)
-    ()
-
-let error_response error =
-  HttpResponse.create ~status:0 ~headers:[] ~body:"" ~error ()
 
 let drain_finished multi_handle states active_handles results remaining =
   let rec loop remaining =
@@ -201,8 +130,8 @@ let drain_finished multi_handle states active_handles results remaining =
           | Some state ->
               let response =
                 match result_code with
-                | Curl.CURLE_OK -> response_of_transfer handle state
-                | code -> error_response (Curl.strerror code)
+                | Curl.CURLE_OK -> Ok (response_of_transfer handle state)
+                | code -> Error (Curl.strerror code)
               in
               results.(state.index) <- Some response;
               Hashtbl.remove states handle
@@ -214,26 +143,27 @@ let drain_finished multi_handle states active_handles results remaining =
   in
   loop remaining
 
-let make_request req =
+let execute_request ?body ?(timeout=30) ?on_write request =
+  let req = { request; body; timeout; on_write } in
   let handle = init_curl_handle () in
   set_request_options handle req;
   
   try
     let response = perform_request handle in
     cleanup_curl_handle handle;
-    response
+    Ok response
   with
   | Http_error msg ->
       Log.err (fun m -> m "HTTP Error: %s" msg);
       cleanup_curl_handle handle;
-      HttpResponse.create ~status:0 ~headers:[] ~body:"" ~error:msg ()
+      Error msg
   | exn ->
       Log.err (fun m -> m "HTTP Exception: %s" (Printexc.to_string exn));
       cleanup_curl_handle handle;
-      HttpResponse.create ~status:0 ~headers:[] ~body:"" ~error:(Printexc.to_string exn) ()
+      Error (Printexc.to_string exn)
 
 (* Multi request handling using curl.multi with proper event loop *)
-let perform_multi_requests requests =
+let execute_requests ?(timeout=30) ?on_write requests =
   if requests = [] then []
   else
     let multi_handle = Curl.Multi.create () in
@@ -241,7 +171,9 @@ let perform_multi_requests requests =
     let active_handles = Hashtbl.create (List.length requests) in
     let socket_polls = Hashtbl.create 16 in
     let next_timeout_ms = ref None in
-    let results = Array.make (List.length requests) None in
+    let results : ((H1.Response.t * string, string) result option) array =
+      Array.make (List.length requests) None
+    in
     let register_socket fd poll =
       match poll with
       | Curl.Multi.POLL_REMOVE -> Hashtbl.remove socket_polls fd
@@ -288,13 +220,19 @@ let perform_multi_requests requests =
     in
     try
       List.iteri
-        (fun i req ->
+        (fun i (request, body) ->
+          let req = {
+            request;
+            body;
+            timeout;
+            on_write = Option.map (fun callback -> callback i) on_write;
+          } in
           let handle = init_curl_handle () in
           set_request_options handle req;
           let response_body = Buffer.create 1024 in
           let response_headers = ref [] in
           Curl.set_writefunction handle (fun data ->
-              (match req.HttpRequest.on_write with
+              (match req.on_write with
                | Some cb -> cb data
                | None -> Buffer.add_string response_body data);
               String.length data);
@@ -371,43 +309,9 @@ let perform_multi_requests requests =
       done;
       Hashtbl.clear active_handles;
       Curl.Multi.cleanup multi_handle;
-      Array.to_list results |> List.map (function Some response -> response | None -> error_response "Request failed")
+      Array.to_list results |> List.map (function Some response -> response | None -> Error "Request failed")
     with exn ->
       cleanup_remaining_handles ();
       Curl.Multi.cleanup multi_handle;
       Log.err (fun m -> m "Multi request exception: %s" (Printexc.to_string exn));
       []
-
-(* Simple GET request *)
-let get url headers timeout =
-  let req = HttpRequest.create ~method_:HttpMethod.GET ~url ~headers ~timeout () in
-  make_request req
-
-(* Simple POST request *)
-let post url headers body timeout =
-  let req = HttpRequest.create ~method_:HttpMethod.POST ~url ~headers ~body:body ~timeout () in
-  make_request req
-
-let post_streaming url headers body timeout callback =
-  let req = HttpRequest.create ~method_:HttpMethod.POST ~url ~headers ~body ~timeout ~on_write:callback () in
-  match perform_multi_requests [req] with
-  | [resp] when resp.HttpResponse.error = None -> Ok ()
-  | [resp] -> Error (Option.value ~default:"Streaming request failed" resp.HttpResponse.error)
-  | _ -> Error "Streaming request failed"
-
-let get_streaming url headers timeout callback =
-  let req = HttpRequest.create ~method_:HttpMethod.GET ~url ~headers ~timeout ~on_write:callback () in
-  match perform_multi_requests [req] with
-  | [resp] when resp.HttpResponse.error = None -> Ok ()
-  | [resp] -> Error (Option.value ~default:"Streaming request failed" resp.HttpResponse.error)
-  | _ -> Error "Streaming request failed"
-
-(* Simple PUT request *)
-let put url headers body timeout =
-  let req = HttpRequest.create ~method_:HttpMethod.PUT ~url ~headers ~body:body ~timeout () in
-  make_request req
-
-(* Simple DELETE request *)
-let delete url headers timeout =
-  let req = HttpRequest.create ~method_:HttpMethod.DELETE ~url ~headers ~timeout () in
-  make_request req

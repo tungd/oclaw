@@ -98,20 +98,20 @@ let activate_skill t name =
 
 let sync_skill t ?(repo="vercel-labs/skills") name =
   let url = Printf.sprintf "https://raw.githubusercontent.com/%s/main/skills/%s/SKILL.md" repo name in
-  let response = Http_client.get url [] 30 in
-  match response.error with
-  | Some error -> Error error
-  | None when response.status < 200 || response.status >= 300 ->
+  let request = H1.Request.create `GET url in
+  match Http_client.execute_request ~timeout:30 request with
+  | Error error -> Error error
+  | Ok (response, _body) when H1.Status.to_code response.H1.Response.status < 200 || H1.Status.to_code response.H1.Response.status >= 300 ->
       Error (Printf.sprintf "Failed to download skill '%s' from %s (status %d)"
-               name url response.status)
-  | None ->
+               name url (H1.Status.to_code response.H1.Response.status))
+  | Ok (_response, body) ->
       let target_dir = Filename.concat t.skills_dir name in
       let target_path = Filename.concat target_dir "SKILL.md" in
       begin
         try
           ensure_dir target_dir;
           Stdlib.Out_channel.with_open_bin target_path (fun channel ->
-              output_string channel response.body);
+              output_string channel body);
           Ok (Printf.sprintf "Skill '%s' synced to %s" name target_path)
         with exn ->
           Error (Printexc.to_string exn)

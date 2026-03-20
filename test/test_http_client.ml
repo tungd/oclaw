@@ -2,66 +2,35 @@
 
 module Client = Httpkit.Http_client
 
-let test_http_method_to_string () =
-  let open Client.HttpMethod in
-  assert (to_string GET = "GET");
-  assert (to_string POST = "POST");
-  assert (to_string PUT = "PUT");
-  assert (to_string DELETE = "DELETE");
-  print_endline "  ✓ http_method_to_string"
+let fail msg =
+  Printf.eprintf "[FAIL] %s\n" msg;
+  exit 1
 
-let test_http_method_from_string () =
-  let open Client.HttpMethod in
-  assert (of_string "GET" = Some GET);
-  assert (of_string "POST" = Some POST);
-  assert (of_string "INVALID" = None);
-  assert (of_string "get" = None);  (* case sensitive *)
-  print_endline "  ✓ http_method_from_string"
+let expect cond msg =
+  if not cond then fail msg
 
-let test_request_creation () =
-  let req = Client.HttpRequest.create ~method_:Client.HttpMethod.GET ~url:"http://example.com" () in
-  assert (req.Client.HttpRequest.method_ = Client.HttpMethod.GET);
-  assert (req.Client.HttpRequest.url = "http://example.com");
-  assert (req.Client.HttpRequest.timeout = 30);  (* default *)
-  print_endline "  ✓ request_creation"
+let test_execute_request_missing_host () =
+  let request = H1.Request.create `GET "http://127.0.0.1:9" in
+  match Client.execute_request ~timeout:1 request with
+  | Ok _ -> fail "expected transport failure"
+  | Error _ -> print_endline "  ✓ execute_request_missing_host"
 
-let test_request_with_options () =
-  let headers = [ "Authorization", "Bearer token" ] in
-  let req = Client.HttpRequest.create 
-    ~method_:Client.HttpMethod.POST 
-    ~url:"http://api.example.com/data"
-    ~headers
-    ~body:"{\"key\": \"value\"}"
-    ~timeout:60
-    () in
-  assert (req.Client.HttpRequest.method_ = Client.HttpMethod.POST);
-  assert (List.length req.Client.HttpRequest.headers = 1);
-  assert (req.Client.HttpRequest.body = Some "{\"key\": \"value\"}");
-  assert (req.Client.HttpRequest.timeout = 60);
-  print_endline "  ✓ request_with_options"
+let test_execute_requests_empty () =
+  let results = Client.execute_requests [] in
+  expect (results = []) "empty batch should return empty list";
+  print_endline "  ✓ execute_requests_empty"
 
-let test_response_creation () =
-  let resp = Client.HttpResponse.create ~status:200 ~headers:[ "Content-Type", "application/json" ] ~body:"{}" () in
-  assert (resp.Client.HttpResponse.status = 200);
-  assert (Client.HttpResponse.is_success resp);
-  assert (Client.HttpResponse.get_header resp "Content-Type" = Some "application/json");
-  print_endline "  ✓ response_creation"
-
-let test_response_is_success () =
-  let success_resp = Client.HttpResponse.create ~status:200 ~headers:[] ~body:"" () in
-  let not_found = Client.HttpResponse.create ~status:404 ~headers:[] ~body:"" () in
-  let server_error = Client.HttpResponse.create ~status:500 ~headers:[] ~body:"" () in
-  assert (Client.HttpResponse.is_success success_resp);
-  assert (not (Client.HttpResponse.is_success not_found));
-  assert (not (Client.HttpResponse.is_success server_error));
-  print_endline "  ✓ response_is_success"
+let test_h1_request_construction () =
+  let headers = H1.Headers.of_list [ ("Content-Type", "application/json") ] in
+  let request = H1.Request.create ~headers `POST "http://example.com" in
+  expect (H1.Method.to_string request.H1.Request.meth = "POST") "method should be POST";
+  expect (request.H1.Request.target = "http://example.com") "target should be preserved";
+  expect (H1.Headers.get request.H1.Request.headers "Content-Type" = Some "application/json") "header should be preserved";
+  print_endline "  ✓ h1_request_construction"
 
 let () =
   print_endline "Running HTTP client tests...";
-  test_http_method_to_string ();
-  test_http_method_from_string ();
-  test_request_creation ();
-  test_request_with_options ();
-  test_response_creation ();
-  test_response_is_success ();
+  test_h1_request_construction ();
+  test_execute_requests_empty ();
+  test_execute_request_missing_host ();
   print_endline "[PASS] all http_client tests ✓"

@@ -468,15 +468,16 @@ let send_message_impl provider ?on_text_delta ~system_prompt messages ~tools =
     ("Content-Type", "application/json");
     ("Authorization", "Bearer " ^ provider.api_key);
   ] in
+  let request = H1.Request.create ~headers:(H1.Headers.of_list headers) `POST url in
   let body =
     build_request_json provider ~system_prompt messages ~tools ~stream:true
     |> Yojson.Safe.to_string
   in
   let parser = create_stream_parser ?on_text_delta () in
-  match Http_client.post_streaming url headers body provider.timeout (fun chunk ->
-    ignore (feed_parser parser chunk)) with
+  match Http_client.execute_request ~body ~timeout:provider.timeout ~on_write:(fun chunk ->
+    ignore (feed_parser parser chunk)) request with
   | Error err -> Error err
-  | Ok () -> finalize_parser parser
+  | Ok (_response, _body) -> finalize_parser parser
 
 (** Send message with automatic retry on transient failures *)
 let send_message provider ?on_text_delta ~system_prompt messages ~tools =
@@ -499,4 +500,3 @@ end
 
 (* Expose Retry module for testing and advanced usage *)
 module Retry = Retry
-
