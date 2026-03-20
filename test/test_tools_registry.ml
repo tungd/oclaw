@@ -24,8 +24,6 @@ let () =
   Unix.mkdir user_skills_dir 0o755;
   let skills =
     Agent_skills.Skills.create
-      ~db_path
-      ~project_root:temp_root
       ~project_skills_dir
       ~user_skills_dir
       ~catalog_cache_path:(Filename.concat temp_root "skills-catalog.json")

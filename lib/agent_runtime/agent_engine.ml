@@ -28,7 +28,7 @@ let build_system_prompt state ~chat_id:_ =
   match state.Runtime.system_prompt_override with
   | Some prompt -> prompt
   | None ->
-      let skills_catalog = Agent_skills.Skills.build_skills_catalog state.Runtime.skills in
+      let skills_catalog = Tools.build_skills_catalog state.Runtime.tools in
       if String.trim skills_catalog = "" then
         default_system_prompt
       else

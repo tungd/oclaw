@@ -54,10 +54,15 @@ val create_default_registry :
 val close : t -> unit
 val pool : t -> Domainslib.Task.pool
 val project_root : t -> string
+val project_is_trusted : t -> bool
+val trust_project : ?path:string -> t -> (string, string) result
 
 val definitions : t -> Llm_types.tool_definition list
 val execute : t -> chat_id:int -> string -> Yojson.Safe.t -> tool_result
 val activate_skill : t -> chat_id:int -> string -> tool_result
+val visible_skills : ?include_untrusted:bool -> t -> Agent_skills.Skills.skill_metadata list
+val list_skills_formatted : ?include_untrusted:bool -> t -> string
+val build_skills_catalog : t -> string
 
 val approve_executable : t -> string -> (string, string) result
 val approve_root : t -> scope:approval_scope -> string -> (string, string) result

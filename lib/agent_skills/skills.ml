@@ -24,7 +24,6 @@ type skill_metadata = {
   dir : string;
   body : string;
   scope : scope;
-  trusted : bool;
   resources : string list;
 }
 
@@ -45,8 +44,6 @@ type activation_result = {
 }
 
 type t = {
-  db : Sqlite3.db;
-  project_root : string;
   project_skills_dir : string;
   user_skills_dir : string;
   builtin_skills_dirs : string list;
@@ -75,16 +72,8 @@ let normalize_dir path =
   in
   if Sys.file_exists absolute then Unix.realpath absolute else absolute
 
-let create ~db_path ~project_root ~project_skills_dir ~user_skills_dir ~catalog_cache_path ?(builtin_skills_dirs=[]) () =
-  let db = Sqlite3.db_open db_path in
-  begin
-    match Sqlite3.exec db "CREATE TABLE IF NOT EXISTS trusted_projects (path TEXT PRIMARY KEY, created_at REAL NOT NULL)" with
-    | Sqlite3.Rc.OK -> ()
-    | rc -> failwith (Printf.sprintf "DB error [%s]" (Sqlite3.Rc.to_string rc))
-  end;
+let create ~project_skills_dir ~user_skills_dir ~catalog_cache_path ?(builtin_skills_dirs=[]) () =
   {
-    db;
-    project_root = normalize_dir project_root;
     project_skills_dir = normalize_dir project_skills_dir;
     user_skills_dir = normalize_dir user_skills_dir;
     builtin_skills_dirs = List.map normalize_dir builtin_skills_dirs;
@@ -93,7 +82,7 @@ let create ~db_path ~project_root ~project_skills_dir ~user_skills_dir ~catalog_
   }
 
 let close t =
-  let _ = Sqlite3.db_close t.db in
+  let _ = t in
   ()
 
 let skills_dir t =
@@ -132,42 +121,6 @@ let scope_to_string = function
   | Builtin -> "builtin"
   | User -> "user"
   | Project -> "project"
-
-let sql_exists db sql bind =
-  let stmt = Sqlite3.prepare db sql in
-  bind stmt;
-  let result =
-    match Sqlite3.step stmt with
-    | Sqlite3.Rc.ROW -> true
-    | Sqlite3.Rc.DONE -> false
-    | rc ->
-        let _ = Sqlite3.finalize stmt in
-        failwith (Printf.sprintf "DB error [%s]" (Sqlite3.Rc.to_string rc))
-  in
-  let _ = Sqlite3.finalize stmt in
-  result
-
-let project_is_trusted t =
-  sql_exists t.db "SELECT 1 FROM trusted_projects WHERE path = ? LIMIT 1"
-    (fun stmt ->
-      let _ = Sqlite3.bind_text stmt 1 t.project_root in
-      ())
-
-let trust_project ?path t =
-  let target = normalize_dir (Option.value ~default:t.project_root path) in
-  let stmt =
-    Sqlite3.prepare t.db
-      "INSERT OR REPLACE INTO trusted_projects (path, created_at) VALUES (?, ?)"
-  in
-  let _ = Sqlite3.bind_text stmt 1 target in
-  let _ = Sqlite3.bind_double stmt 2 (Unix.gettimeofday ()) in
-  match Sqlite3.step stmt with
-  | Sqlite3.Rc.DONE ->
-      let _ = Sqlite3.finalize stmt in
-      Ok (Printf.sprintf "Trusted project: %s" target)
-  | rc ->
-      let _ = Sqlite3.finalize stmt in
-      Error (Printf.sprintf "DB error [%s]" (Sqlite3.Rc.to_string rc))
 
 let yaml_assoc = function
   | `O fields -> fields
@@ -308,7 +261,7 @@ let list_skill_resources dir =
   else
     []
 
-let scan_root ~scope ~trusted dir =
+let scan_root ~scope dir =
   if not (Sys.file_exists dir && Sys.is_directory dir) then []
   else
     Sys.readdir dir
@@ -336,7 +289,6 @@ let scan_root ~scope ~trusted dir =
                        dir = skill_dir;
                        body = parsed.body;
                        scope;
-                       trusted;
                        resources = list_skill_resources skill_dir;
                      })
 
@@ -354,16 +306,14 @@ let dedupe_skills (skills : skill_metadata list) =
   |> List.of_seq
   |> List.sort (fun (left : skill_metadata) (right : skill_metadata) -> String.compare left.name right.name)
 
-let discover_skills ?(include_untrusted=false) t : skill_metadata list =
-  let trusted_project = project_is_trusted t in
+let discover_skills t : skill_metadata list =
   let builtin =
     t.builtin_skills_dirs
-    |> List.concat_map (fun dir -> scan_root ~scope:Builtin ~trusted:true dir)
+    |> List.concat_map (fun dir -> scan_root ~scope:Builtin dir)
   in
-  let user = scan_root ~scope:User ~trusted:true t.user_skills_dir in
-  let project = scan_root ~scope:Project ~trusted:trusted_project t.project_skills_dir in
-  let all = dedupe_skills (builtin @ user @ project) in
-  if include_untrusted then all else List.filter (fun (skill : skill_metadata) -> skill.trusted) all
+  let user = scan_root ~scope:User t.user_skills_dir in
+  let project = scan_root ~scope:Project t.project_skills_dir in
+  dedupe_skills (builtin @ user @ project)
 
 let available_skill_names t =
   let skills : skill_metadata list = discover_skills t in
@@ -380,20 +330,16 @@ let build_skills_catalog t =
     in
     "<available_skills>\n" ^ String.concat "\n" lines ^ "\n</available_skills>"
 
-let list_skills_formatted ?(include_untrusted=false) t =
-  let skills : skill_metadata list = discover_skills ~include_untrusted t in
+let list_skills_formatted t =
+  let skills : skill_metadata list = discover_skills t in
   if skills = [] then "No skills available."
   else
     let lines =
       skills
       |> List.map (fun (skill : skill_metadata) ->
-             let trust_note =
-               if skill.trusted then "trusted" else "untrusted"
-             in
-             Printf.sprintf "- %s (%s, %s): %s"
+             Printf.sprintf "- %s (%s): %s"
                skill.name
                (scope_to_string skill.scope)
-               trust_note
                skill.description)
     in
     "Available skills:\n\n" ^ String.concat "\n" lines
@@ -411,14 +357,14 @@ let activate_skill t ~chat_id name =
   match List.find_opt (fun (skill : skill_metadata) -> String.equal skill.name name) skills with
   | None ->
       let all : string list =
-        discover_skills ~include_untrusted:true t
+        discover_skills t
         |> List.map (fun (skill : skill_metadata) -> skill.name)
       in
       let hint =
         if all = [] then " No skills are currently available."
         else " Available skills: " ^ String.concat ", " all
       in
-      Error ("Skill '" ^ name ^ "' not found or is not trusted." ^ hint)
+      Error ("Skill '" ^ name ^ "' not found." ^ hint)
   | Some skill ->
       let table = activated_for_chat t chat_id in
       let already_activated = Hashtbl.mem table skill.name in

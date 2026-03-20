@@ -195,7 +195,8 @@ let init_db db =
     | rc -> failwith (Printf.sprintf "DB error [%s]" (Sqlite3.Rc.to_string rc))
   in
   exec "CREATE TABLE IF NOT EXISTS tool_approvals (scope TEXT NOT NULL, path TEXT NOT NULL, created_at REAL NOT NULL, PRIMARY KEY(scope, path))";
-  exec "CREATE INDEX IF NOT EXISTS idx_tool_approvals_scope ON tool_approvals(scope)"
+  exec "CREATE INDEX IF NOT EXISTS idx_tool_approvals_scope ON tool_approvals(scope)";
+  exec "CREATE TABLE IF NOT EXISTS trusted_projects (path TEXT PRIMARY KEY, created_at REAL NOT NULL)"
 
 let exec_ignore db sql bind =
   let stmt = Sqlite3.prepare db sql in
@@ -223,6 +224,21 @@ let get_all_approved_paths db scope =
   in
   loop []
 
+let get_exact_match_approval db ~scope ~target =
+  let stmt = Sqlite3.prepare db "SELECT 1 FROM tool_approvals WHERE scope = ? AND path = ? LIMIT 1" in
+  let _ = Sqlite3.bind_text stmt 1 (approval_scope_to_string scope) in
+  let _ = Sqlite3.bind_text stmt 2 target in
+  let found =
+    match Sqlite3.step stmt with
+    | Sqlite3.Rc.ROW -> true
+    | Sqlite3.Rc.DONE -> false
+    | rc ->
+        let _ = Sqlite3.finalize stmt in
+        failwith (Printf.sprintf "DB error: %s" (Sqlite3.Rc.to_string rc))
+  in
+  let _ = Sqlite3.finalize stmt in
+  found
+
 let normalize_existing_path path =
   Unix.realpath path
 
@@ -247,6 +263,9 @@ let normalize_lossy_path path =
         ascend parent (name :: suffix)
   in
   ascend absolute []
+
+let normalize_project_path registry path =
+  normalize_lossy_path (Option.value ~default:registry.project_root path)
 
 let scope_for_root_approval = function
   | Read | Write as scope -> scope
@@ -577,11 +596,61 @@ let request_for_install name =
     reason = "Installing this skill is not yet approved.";
   }
 
+let project_is_trusted registry =
+  get_exact_match_approval registry.db ~scope:Install ~target:("__skill_trust__:" ^ registry.project_root)
+
+let trust_project ?path registry =
+  let normalized = normalize_project_path registry path in
+  insert_approval registry ~scope:Install ~path:("__skill_trust__:" ^ normalized);
+  Ok (Printf.sprintf "Trusted project: %s" normalized)
+
+let is_skill_trusted registry (skill : Agent_skills.Skills.skill_metadata) =
+  match skill.scope with
+  | Agent_skills.Skills.Project -> project_is_trusted registry
+  | Agent_skills.Skills.Builtin | Agent_skills.Skills.User -> true
+
+let visible_skills ?(include_untrusted=false) registry =
+  let skills = Agent_skills.Skills.discover_skills registry.skills in
+  if include_untrusted then skills
+  else List.filter (fun skill -> is_skill_trusted registry skill) skills
+
+let skill_names registry =
+  visible_skills registry |> List.map (fun (skill : Agent_skills.Skills.skill_metadata) -> skill.name)
+
+let build_skills_catalog registry =
+  let skills = visible_skills registry in
+  if skills = [] then ""
+  else
+    let lines =
+      skills
+      |> List.map (fun (skill : Agent_skills.Skills.skill_metadata) ->
+             Printf.sprintf "- %s: %s" skill.name skill.description)
+    in
+    "<available_skills>\n" ^ String.concat "\n" lines ^ "\n</available_skills>"
+
+let list_skills_formatted ?(include_untrusted=false) registry =
+  let skills = visible_skills ~include_untrusted registry in
+  if skills = [] then "No skills available."
+  else
+    let lines =
+      skills
+      |> List.map (fun (skill : Agent_skills.Skills.skill_metadata) ->
+             let trust_note = if is_skill_trusted registry skill then "trusted" else "untrusted" in
+             let scope =
+               match skill.scope with
+               | Agent_skills.Skills.Builtin -> "builtin"
+               | Agent_skills.Skills.User -> "user"
+               | Agent_skills.Skills.Project -> "project"
+             in
+             Printf.sprintf "- %s (%s, %s): %s" skill.name scope trust_note skill.description)
+    in
+    "Available skills:\n\n" ^ String.concat "\n" lines
+
 let skill_list_tool =
   make_tool "skill_list" "List discoverable skills with scope and trust status."
     []
     (fun ~registry ~chat_id:_ _args ->
-      success ~status_code:200 (Agent_skills.Skills.list_skills_formatted ~include_untrusted:true registry.skills))
+      success ~status_code:200 (list_skills_formatted ~include_untrusted:true registry))
 
 let skill_search_tool =
   make_tool "skill_search" "Search installed skills and the official remote catalog."
@@ -593,7 +662,7 @@ let skill_search_tool =
       | Error err -> failure ~error_category:InvalidParameters err
       | Ok query ->
           let all_local : Agent_skills.Skills.skill_metadata list =
-            Agent_skills.Skills.discover_skills ~include_untrusted:true registry.skills
+            visible_skills ~include_untrusted:true registry
           in
           let local : Agent_skills.Skills.skill_metadata list =
             List.filter
@@ -614,7 +683,7 @@ let skill_search_tool =
                           | Agent_skills.Skills.Builtin -> "builtin"
                           | Agent_skills.Skills.User -> "user"
                           | Agent_skills.Skills.Project -> "project")
-                         (if skill.trusted then "trusted" else "untrusted")
+                         (if is_skill_trusted registry skill then "trusted" else "untrusted")
                          skill.description)
               in
               let remote_lines =
@@ -651,39 +720,52 @@ let skill_install_tool =
             | Error err -> failure ~error_category:Other err)
 
 let activate_skill registry ~chat_id name =
-  match Agent_skills.Skills.activate_skill registry.skills ~chat_id name with
-  | Error err -> failure ~error_category:Other err
-  | Ok activation ->
-      let allowlist_notes =
-        activation.allowed_tools
-        |> List.filter_map (function
-               | Agent_skills.Skills.Allowed_read ->
-                   let _ = approve_root_internal registry ~scope:Read activation.skill_dir in
-                   None
-               | Agent_skills.Skills.Allowed_write ->
-                   let _ = approve_root_internal registry ~scope:Write activation.skill_dir in
-                   None
-               | Agent_skills.Skills.Allowed_bash command ->
-                   Some (
-                     match approve_executable_internal registry command with
-                     | Ok _ -> Printf.sprintf "Pre-approved executable from allowed-tools: %s" command
-                     | Error _ -> Printf.sprintf "Unsupported or unavailable allowed-tools executable: %s" command)
-               | Agent_skills.Skills.Allowed_other raw ->
-                   Some (Printf.sprintf "Unsupported allowed-tools entry: %s" raw))
+  match List.find_opt (fun (skill : Agent_skills.Skills.skill_metadata) -> String.equal skill.name name) (visible_skills registry) with
+  | None ->
+      let all =
+        visible_skills ~include_untrusted:true registry
+        |> List.map (fun (skill : Agent_skills.Skills.skill_metadata) -> skill.name)
       in
-      let dedupe_note =
-        if activation.already_activated then
-          "\n\nSkill already activated in this chat; returning existing instructions without re-approving."
-        else ""
+      let hint =
+        if all = [] then " No skills are currently available."
+        else " Available skills: " ^ String.concat ", " all
       in
-      let allowlist_block =
-        if allowlist_notes = [] then ""
-        else "\n\n" ^ String.concat "\n" allowlist_notes
-      in
-      success ~status_code:200 (activation.content ^ allowlist_block ^ dedupe_note)
+      let message = "Skill '" ^ name ^ "' not found or is not trusted." ^ hint in
+      failure ~error_category:Other message
+  | Some _ ->
+      match Agent_skills.Skills.activate_skill registry.skills ~chat_id name with
+      | Error err -> failure ~error_category:Other err
+      | Ok activation ->
+          let allowlist_notes =
+            activation.allowed_tools
+            |> List.filter_map (function
+                   | Agent_skills.Skills.Allowed_read ->
+                       let _ = approve_root_internal registry ~scope:Read activation.skill_dir in
+                       None
+                   | Agent_skills.Skills.Allowed_write ->
+                       let _ = approve_root_internal registry ~scope:Write activation.skill_dir in
+                       None
+                   | Agent_skills.Skills.Allowed_bash command ->
+                       Some (
+                         match approve_executable_internal registry command with
+                         | Ok _ -> Printf.sprintf "Pre-approved executable from allowed-tools: %s" command
+                         | Error _ -> Printf.sprintf "Unsupported or unavailable allowed-tools executable: %s" command)
+                   | Agent_skills.Skills.Allowed_other raw ->
+                       Some (Printf.sprintf "Unsupported allowed-tools entry: %s" raw))
+          in
+          let dedupe_note =
+            if activation.already_activated then
+              "\n\nSkill already activated in this chat; returning existing instructions without re-approving."
+            else ""
+          in
+          let allowlist_block =
+            if allowlist_notes = [] then ""
+            else "\n\n" ^ String.concat "\n" allowlist_notes
+          in
+          success ~status_code:200 (activation.content ^ allowlist_block ^ dedupe_note)
 
 let activate_skill_tool registry =
-  let names = Agent_skills.Skills.available_skill_names registry.skills in
+  let names = skill_names registry in
   {
     definition = {
       Llm_types.name = "activate_skill";
@@ -847,7 +929,7 @@ let create_default_registry ~db_path ~project_root ~skills () =
 
 let definitions registry =
   let defs = List.map (fun t -> t.definition) registry.tools in
-  let skill_names = Agent_skills.Skills.available_skill_names registry.skills in
+  let skill_names = skill_names registry in
   if skill_names = [] then defs else defs @ [ (activate_skill_tool registry).definition ]
 
 let execute registry ~chat_id name input =

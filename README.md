@@ -10,7 +10,7 @@ OClaw is a CLI-first AI assistant written in OCaml 5. It ships as a single execu
 
 The codebase is organized as a set of reusable libraries around a small `oclaw` entrypoint.
 
-The supported runtime surface is `agent_runtime`. Skill parsing and discovery remain in `agent_skills`, while tool execution and approvals live inside the runtime.
+The supported runtime surface is `agent_runtime`. Skill parsing and discovery remain in `agent_skills`, while tool execution, skill trust, and activation approvals live inside the runtime.
 
 ## Current Status
 
@@ -39,7 +39,7 @@ oclaw/
 ├── lib/
 │   ├── acp/            # ACP message and stdio transport support
 │   ├── agent_runtime/  # Runtime, transcript store, config, agent loop, and tools
-│   ├── agent_skills/   # Skill discovery, parsing, trust, and install/search data
+│   ├── agent_skills/   # Skill discovery, parsing, and install/search data
 │   ├── agent_tui/      # Mosaic-based TUI frontend
 │   ├── httpkit/        # Minimal HTTP client
 │   ├── llm_provider/   # OpenAI-compatible provider + retry logic
@@ -233,6 +233,7 @@ Trust behavior:
 - Project skills are hidden from the model until the project is trusted
 - User and built-in skills are available without project trust
 - Skills are disclosed progressively: only metadata goes into the system prompt, and full instructions are loaded via `activate_skill`
+- Trust is enforced by `agent_runtime`, not by `agent_skills`
 
 User and agent entrypoints:
 

@@ -22,8 +22,6 @@ let temp_registry () =
   Unix.mkdir user_skills_dir 0o755;
   let skills =
     Agent_skills.Skills.create
-      ~db_path
-      ~project_root:root
       ~project_skills_dir
       ~user_skills_dir
       ~catalog_cache_path:(Filename.concat root "skills-catalog.json")

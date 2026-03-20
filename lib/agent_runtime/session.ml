@@ -23,13 +23,14 @@ let approve_install (app : App.t) name =
   Tools.approve_install (App.internal_state app).Runtime.tools name
 
 let trust_project ?path (app : App.t) =
-  Agent_skills.Skills.trust_project ?path (App.internal_state app).Runtime.skills
+  Tools.trust_project ?path (App.internal_state app).Runtime.tools
 
 let available_skills (app : App.t) =
-  Agent_skills.Skills.available_skill_names (App.internal_state app).Runtime.skills
+  Tools.visible_skills (App.internal_state app).Runtime.tools
+  |> List.map (fun (skill : Agent_skills.Skills.skill_metadata) -> skill.name)
 
 let list_skills ?(include_untrusted=false) (app : App.t) =
-  Agent_skills.Skills.list_skills_formatted ~include_untrusted (App.internal_state app).Runtime.skills
+  Tools.list_skills_formatted ~include_untrusted (App.internal_state app).Runtime.tools
 
 let activate_skill (app : App.t) ~chat_id name =
   let result = Tools.activate_skill (App.internal_state app).Runtime.tools ~chat_id name in

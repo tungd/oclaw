@@ -33,8 +33,6 @@ let create_app_state ?(llm_call=default_llm_call) ?system_prompt_override config
     let transcript = Transcript.create ~db_path:layout.db_path in
     let skills =
       Agent_skills.Skills.create
-        ~db_path:layout.db_path
-        ~project_root:layout.project_root
         ~project_skills_dir:layout.project_skills_dir
         ~user_skills_dir:layout.user_skills_dir
         ~catalog_cache_path:layout.catalog_cache_path

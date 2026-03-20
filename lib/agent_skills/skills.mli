@@ -1,4 +1,4 @@
-(** Agent Skills discovery, parsing, trust, activation, and installation. *)
+(** Agent Skills discovery, parsing, activation payload construction, and installation. *)
 
 type scope =
   | Builtin
@@ -22,7 +22,6 @@ type skill_metadata = {
   dir : string;
   body : string;
   scope : scope;
-  trusted : bool;
   resources : string list;
 }
 
@@ -45,8 +44,6 @@ type activation_result = {
 type t
 
 val create :
-  db_path:string ->
-  project_root:string ->
   project_skills_dir:string ->
   user_skills_dir:string ->
   catalog_cache_path:string ->
@@ -59,15 +56,12 @@ val close : t -> unit
 val skills_dir : t -> string
 val user_skills_dir : t -> string
 
-val discover_skills : ?include_untrusted:bool -> t -> skill_metadata list
+val discover_skills : t -> skill_metadata list
 val available_skill_names : t -> string list
 val build_skills_catalog : t -> string
-val list_skills_formatted : ?include_untrusted:bool -> t -> string
+val list_skills_formatted : t -> string
 
 val activate_skill : t -> chat_id:int -> string -> (activation_result, string) result
-
-val project_is_trusted : t -> bool
-val trust_project : ?path:string -> t -> (string, string) result
 
 val refresh_remote_catalog : t -> (remote_skill list, string) result
 val remote_catalog : t -> (remote_skill list, string) result

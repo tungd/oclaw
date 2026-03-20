@@ -44,8 +44,6 @@ let with_registry f =
   Unix.mkdir user_skills_dir 0o755;
   let skills =
     Skills.create
-      ~db_path
-      ~project_root:root
       ~project_skills_dir
       ~user_skills_dir
       ~catalog_cache_path
@@ -59,28 +57,28 @@ let with_registry f =
     (fun () -> f root skills registry)
 
 let test_project_skill_requires_trust () =
-  with_registry (fun root skills _registry ->
+  with_registry (fun root _skills registry ->
     let skill_dir = Filename.concat root ".agents/skills/demo-skill" in
     write_file (Filename.concat skill_dir "SKILL.md")
       (sample_skill "demo-skill" "Project demo skill" "Use this project skill carefully.");
-    let visible = Skills.discover_skills skills in
+    let visible = Tools.visible_skills registry in
     expect (visible = []) "project skill should be hidden before trust";
-    let visible_all = Skills.discover_skills ~include_untrusted:true skills in
+    let visible_all = Tools.visible_skills ~include_untrusted:true registry in
     expect (List.length visible_all = 1) "project skill should still be discoverable for diagnostics";
-    expect (not (List.hd visible_all).trusted) "project skill should be marked untrusted";
-    match Skills.trust_project skills with
+    expect (String.contains (Tools.list_skills_formatted ~include_untrusted:true registry) 'u') "untrusted skills should be labeled in listings";
+    match Tools.trust_project registry with
     | Error err -> fail err
     | Ok _ ->
-        let trusted = Skills.discover_skills skills in
+        let trusted = Tools.visible_skills registry in
         expect (List.length trusted = 1) "project skill should become available after trust")
 
 let test_activate_skill_tool_and_allowlist () =
-  with_registry (fun root skills registry ->
+  with_registry (fun root _skills registry ->
     let skill_dir = Filename.concat root ".agents/skills/demo-skill" in
     write_file (Filename.concat skill_dir "SKILL.md")
       (sample_skill "demo-skill" "Project demo skill" "Follow the instructions in this skill.");
     begin
-      match Skills.trust_project skills with
+      match Tools.trust_project registry with
       | Ok _ -> ()
       | Error err -> fail err
     end;
@@ -96,12 +94,12 @@ let test_activate_skill_tool_and_allowlist () =
     expect (not read_result.Tools.is_error) "allowed-tools Read should pre-approve the skill directory")
 
 let test_direct_activation_matches_tool_behavior () =
-  with_registry (fun root skills registry ->
+  with_registry (fun root _skills registry ->
     let skill_dir = Filename.concat root ".agents/skills/demo-skill" in
     write_file (Filename.concat skill_dir "SKILL.md")
       (sample_skill "demo-skill" "Project demo skill" "Follow the instructions in this skill.");
     begin
-      match Skills.trust_project skills with
+      match Tools.trust_project registry with
       | Ok _ -> ()
       | Error err -> fail err
     end;
