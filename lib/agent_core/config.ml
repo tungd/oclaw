@@ -1,7 +1,9 @@
-(** YAML-backed configuration for the CLI-first assistant.
-    
-    Simplified configuration with sensible defaults.
-    Most settings are hardcoded; only essential overrides are exposed.
+(** YAML-backed runtime configuration for OClaw.
+
+    The configuration surface is intentionally small: model/provider settings,
+    runtime directories, debug mode, agent iteration limits, and API retry
+    behavior. Values can be supplied from defaults, a YAML file, environment
+    variables, and CLI overrides.
 *)
 
 module Yaml_lib = Yaml
