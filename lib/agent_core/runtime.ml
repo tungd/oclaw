@@ -9,6 +9,8 @@ type llm_call =
 type app_state = {
   config : Config.config;
   provider_config : Llm_provider.provider_config;
+  project_root : string;
+  db_path : string;
   transcript : Transcript.t;
   skills : Agent_skills.Skills.t;
   tools : Agent_tools.Tools.t;
@@ -31,17 +33,23 @@ let ensure_dir path =
   mkdir_p path
 
 let create_app_state ?(llm_call=default_llm_call) ?system_prompt_override config =
-  let runtime_dir = Config.runtime_data_dir config in
-  let skills_dir = Config.skills_data_dir config in
+  let layout = Project_paths.discover ~start_dir:config.Config.data_dir () in
   try
-    ensure_dir runtime_dir;
-    ensure_dir skills_dir;
-    let transcript = Transcript.create ~data_dir:runtime_dir ~runtime_dir in
-    let skills = Agent_skills.Skills.create ~skills_dir in
-    let tools = Agent_tools.Tools.create_default_registry () in
+    ensure_dir layout.agents_dir;
+    ensure_dir layout.skills_dir;
+    let transcript = Transcript.create ~db_path:layout.db_path in
+    let skills = Agent_skills.Skills.create ~skills_dir:layout.skills_dir in
+    let tools =
+      Agent_tools.Tools.create_default_registry
+        ~db_path:layout.db_path
+        ~project_root:layout.project_root
+        ()
+    in
     Ok {
       config;
       provider_config = Config.to_llm_provider_config config;
+      project_root = layout.project_root;
+      db_path = layout.db_path;
       transcript;
       skills;
       tools;

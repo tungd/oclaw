@@ -133,6 +133,11 @@ let test_tool_loop_and_resume () =
   in
   let state = create_state ~llm_call:llm data_dir in
   begin
+    match Agent_tools.Tools.approve_root state.Agent_core.Runtime.tools ~scope:Agent_tools.Tools.Read data_dir with
+    | Ok _ -> ()
+    | Error err -> fail err
+  end;
+  begin
     match Agent_core.Agent_engine.process state ~chat_id:3 "read the note" with
     | Ok "done" -> ()
     | Ok other -> fail ("unexpected tool loop reply: " ^ other)
@@ -152,8 +157,46 @@ let test_tool_loop_and_resume () =
     | Error err -> fail err
   end
 
+let test_project_root_db_and_approval_command () =
+  let root = temp_dir () in
+  let normalized_root = Unix.realpath root in
+  Unix.mkdir (Filename.concat root ".agents") 0o755;
+  let nested = Filename.concat root "src/deep" in
+  Unix.mkdir (Filename.concat root "src") 0o755;
+  Unix.mkdir nested 0o755;
+  let state = create_state nested in
+  expect (state.Agent_core.Runtime.project_root = normalized_root) "runtime should reuse ancestor .agents directory";
+  expect (state.Agent_core.Runtime.db_path = Filename.concat normalized_root ".agents/oclaw.db") "runtime should place db in .agents/oclaw.db";
+  begin
+    match Agent_core.Agent_engine.process ~persistent:true state ~chat_id:9 ("/approve read " ^ nested) with
+    | Ok response ->
+        expect (String.length response > 0) "approval command should return a response"
+    | Error err -> fail err
+  end;
+  let target = Filename.concat nested "approved.txt" in
+  write_file target "approved contents";
+  let calls = ref 0 in
+  let llm _provider ?on_text_delta:_ ~system_prompt:_ messages ~tools:_ =
+    incr calls;
+    let contents = text_messages messages in
+    if !calls = 1 then (
+      expect (List.mem "read approved file" contents) "prompt should be present before tool call";
+      tool_response "read_file" [ ("path", `String target) ]
+    ) else (
+      expect (List.mem "approved contents" contents) "approved tool result should be present";
+      text_response "done"
+    )
+  in
+  let state3 = create_state ~llm_call:llm nested in
+  begin
+    match Agent_core.Agent_engine.process state3 ~chat_id:9 "read approved file" with
+    | Ok reply -> expect (reply = "done") "tool call should succeed after persisted approval"
+    | Error err -> fail err
+  end
+
 let () =
   test_persistent_session ();
   test_session_isolation ();
   test_tool_loop_and_resume ();
+  test_project_root_db_and_approval_command ();
   Printf.printf "[PASS] assistant runtime tests\n"

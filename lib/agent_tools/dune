@@ -4,8 +4,7 @@
  (libraries
  llm_types
   httpkit
-  iomux
-  str
+  sqlite3
   unix
   yojson
   domainslib))

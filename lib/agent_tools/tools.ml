@@ -1,4 +1,4 @@
-(** Minimal CLI tools: read_file, write_file, edit_file, bash. No sandbox restrictions. *)
+(** CLI tools with approval-gated command and filesystem access. *)
 
 type error_category =
   | FileNotFound
@@ -10,7 +10,19 @@ type error_category =
   | CommandTimeout
   | CommandNotFound
   | InvalidParameters
+  | ApprovalRequired
   | Other
+
+type approval_scope =
+  | Read
+  | Write
+  | Execute
+
+type approval_request = {
+  scope : approval_scope;
+  target : string;
+  reason : string;
+}
 
 type tool_result = {
   content : string;
@@ -21,129 +33,158 @@ type tool_result = {
   error_type : string option;
   error_category : error_category option;
   recovery_hint : string option;
-}
-
-type tool_exec_fn = pool:Domainslib.Task.pool -> chat_id:int -> Yojson.Safe.t -> tool_result
-
-type tool = {
-  definition : Llm_types.tool_definition;
-  execute : tool_exec_fn;
+  approval_request : approval_request option;
 }
 
 type t = {
   tools : tool list;
   pool : Domainslib.Task.pool;
+  db : Sqlite3.db;
+  project_root : string;
+}
+
+and tool_exec_fn = registry:t -> chat_id:int -> Yojson.Safe.t -> tool_result
+
+and tool = {
+  definition : Llm_types.tool_definition;
+  execute : tool_exec_fn;
 }
 
 let close registry =
+  let _ = Sqlite3.db_close registry.db in
   Domainslib.Task.teardown_pool registry.pool
 
 let pool registry = registry.pool
+let project_root registry = registry.project_root
 
-(** Check if a string contains a substring *)
-let contains_substring ~haystack ~needle =
-  try
-    let _ = Str.search_forward (Str.regexp_string needle) haystack 0 in
-    true
-  with Not_found -> false
+let trim = String.trim
+let default_bash_timeout_seconds = 60
 
-(** Classify an error message into an error category *)
+let string_starts_with s prefix =
+  let s_len = String.length s in
+  let p_len = String.length prefix in
+  s_len >= p_len && String.sub s 0 p_len = prefix
+
+let string_contains_char s c =
+  let rec loop idx =
+    if idx >= String.length s then false
+    else if String.unsafe_get s idx = c then true
+    else loop (idx + 1)
+  in
+  loop 0
+
+let has_path_prefix ~root ~path =
+  path = root ||
+  let root_len = String.length root in
+  let path_len = String.length path in
+  path_len > root_len &&
+  String.sub path 0 root_len = root &&
+  String.unsafe_get path root_len = '/'
+
+let approval_scope_to_string = function
+  | Read -> "read"
+  | Write -> "write"
+  | Execute -> "exec"
+
+let approval_scope_label = function
+  | Read -> "read root"
+  | Write -> "write root"
+  | Execute -> "executable"
+
 let classify_error ~error_message =
-  let lower = String.lowercase_ascii error_message in
-  (* Check directory missing first - it's more specific *)
-  if (contains_substring ~haystack:lower ~needle:"no such file" || 
-      contains_substring ~haystack:lower ~needle:"no such directory") &&
-     contains_substring ~haystack:lower ~needle:"directory" then
-    DirectoryMissing
-  else if (contains_substring ~haystack:lower ~needle:"no such file" || 
-           contains_substring ~haystack:lower ~needle:"not found" || 
-           contains_substring ~haystack:lower ~needle:"doesn't exist") &&
-          contains_substring ~haystack:lower ~needle:"/" then
-    FileNotFound
-  else if contains_substring ~haystack:lower ~needle:"permission" || 
-          contains_substring ~haystack:lower ~needle:"denied" || 
-          contains_substring ~haystack:lower ~needle:"forbidden" then
-    PermissionDenied
-  else if contains_substring ~haystack:lower ~needle:"not found" && 
-          contains_substring ~haystack:lower ~needle:"old_text" then
-    PatternNotFound
-  else if contains_substring ~haystack:lower ~needle:"ambigu" || 
-          contains_substring ~haystack:lower ~needle:"multiple times" || 
-          contains_substring ~haystack:lower ~needle:"occurs multiple" then
-    AmbiguousMatch
-  else if contains_substring ~haystack:lower ~needle:"timed out" || 
-          contains_substring ~haystack:lower ~needle:"timeout" then
-    CommandTimeout
-  else if contains_substring ~haystack:lower ~needle:"command not found" || 
-          (contains_substring ~haystack:lower ~needle:"not found" && 
-           contains_substring ~haystack:lower ~needle:"command") then
-    CommandNotFound
-  else if contains_substring ~haystack:lower ~needle:"exit" && 
-          contains_substring ~haystack:lower ~needle:"status" then
-    CommandFailed
-  else if contains_substring ~haystack:lower ~needle:"required" || 
-          contains_substring ~haystack:lower ~needle:"invalid" || 
-          contains_substring ~haystack:lower ~needle:"expected" then
-    InvalidParameters
-  else
-    Other
+  if string_starts_with error_message "Invalid parameters:" then InvalidParameters
+  else if string_starts_with error_message "Approval required:" then ApprovalRequired
+  else if string_starts_with error_message "Pattern not found:" then PatternNotFound
+  else if string_starts_with error_message "Ambiguous match:" then AmbiguousMatch
+  else if string_starts_with error_message "Command timed out:" then CommandTimeout
+  else if string_starts_with error_message "Command not found:" then CommandNotFound
+  else if string_starts_with error_message "File not found:" then FileNotFound
+  else if string_starts_with error_message "Directory missing:" then DirectoryMissing
+  else if string_starts_with error_message "Permission denied:" then PermissionDenied
+  else if string_starts_with error_message "Command failed:" then CommandFailed
+  else Other
 
-(** Generate a recovery hint based on error category and message *)
 let recovery_hint_for_error ~category ~error_message:_ =
   match category with
   | FileNotFound ->
-      "Check if the file path is correct. Use `ls` or `bash` to verify the file exists. Consider creating the file if it should not exist yet."
+      "Check the path and confirm the file exists inside an approved read or write root."
   | PermissionDenied ->
-      "Check file permissions with `ls -la`. You may need to use `chmod` or run with different permissions."
+      "Check filesystem permissions for the target path or executable."
   | DirectoryMissing ->
-      "Create the parent directory first using `mkdir -p <directory>` before writing the file."
+      "Create or approve the parent directory before retrying the write."
   | PatternNotFound ->
-      "Verify the text you're searching for exists in the file. Use `read_file` to inspect the current content."
+      "Use `read_file` to confirm the current file contents and provide a unique exact match."
   | AmbiguousMatch ->
-      "Provide more context in `old_text` to make it unique. Include surrounding lines or use more specific text."
+      "Include more surrounding context in `old_text` so the replacement target is unique."
   | CommandTimeout ->
-      "The command took too long. Consider breaking it into smaller steps, adding timeouts, or using a more efficient approach."
+      "Increase `timeout_seconds` if the command is legitimately long-running, or split the task into smaller steps."
   | CommandNotFound ->
-      "Verify the command is installed and in PATH. Try using the full path or install the required tool."
+      "Verify the executable exists and is available in PATH, then approve the resolved executable path."
   | CommandFailed ->
-      "Check the command output for specific error details. Verify arguments, dependencies, and prerequisites."
+      "Inspect the command output and exit status, then correct the arguments or environment before retrying."
   | InvalidParameters ->
-      "Review the required parameters for this tool. Ensure all required fields are provided with correct types."
+      "Review the tool arguments and provide valid values."
+  | ApprovalRequired ->
+      "Approve the requested executable or root path, then retry the tool call."
   | Other ->
-      "Review the error message for specific details. Consider trying an alternative approach."
+      "Inspect the error details and retry with corrected inputs."
 
 let success ?status_code ?duration_ms ?error_type content =
-  { content; is_error = false; status_code; bytes = String.length content; duration_ms; 
-    error_type; error_category = None; recovery_hint = None }
+  {
+    content;
+    is_error = false;
+    status_code;
+    bytes = String.length content;
+    duration_ms;
+    error_type;
+    error_category = None;
+    recovery_hint = None;
+    approval_request = None;
+  }
 
 let failure ?status_code ?duration_ms ?(error_type="tool_error") ?error_category content =
   let category = Option.value error_category ~default:(classify_error ~error_message:content) in
   let hint = Some (recovery_hint_for_error ~category ~error_message:content) in
-  { content; is_error = true; status_code; bytes = String.length content; duration_ms; 
-    error_type = Some error_type; error_category = Some category; recovery_hint = hint }
+  {
+    content;
+    is_error = true;
+    status_code;
+    bytes = String.length content;
+    duration_ms;
+    error_type = Some error_type;
+    error_category = Some category;
+    recovery_hint = hint;
+    approval_request = None;
+  }
 
-let trim = String.trim
+let approval_required request message =
+  let hint = Some (recovery_hint_for_error ~category:ApprovalRequired ~error_message:message) in
+  {
+    content = message;
+    is_error = true;
+    status_code = None;
+    bytes = String.length message;
+    duration_ms = None;
+    error_type = Some "approval_required";
+    error_category = Some ApprovalRequired;
+    recovery_hint = hint;
+    approval_request = Some request;
+  }
 
-let ensure_parent_dir path =
-  let rec mkdir_p dir =
-    if dir = "" || dir = "." || dir = "/" then ()
-    else if Sys.file_exists dir then ()
-    else (mkdir_p (Filename.dirname dir); Unix.mkdir dir 0o755)
-  in
-  mkdir_p (Filename.dirname path)
+let json_assoc_or_empty = function
+  | `Assoc fields -> `Assoc fields
+  | _ -> `Assoc []
 
-let read_file_full path =
-  try Ok (Stdlib.In_channel.with_open_bin path Stdlib.In_channel.input_all)
-  with exn -> Error (Printexc.to_string exn)
+let required_string_arg json name =
+  match Yojson.Safe.Util.member name json with
+  | `String value when trim value <> "" -> Ok value
+  | _ -> Error (Printf.sprintf "Invalid parameters: %s is required" name)
 
-let write_file_atomic path content =
-  try
-    ensure_parent_dir path;
-    let tmp_path = path ^ ".tmp." ^ string_of_int (Unix.getpid ()) in
-    Stdlib.Out_channel.with_open_bin tmp_path (fun ch -> Stdlib.Out_channel.output_string ch content);
-    Unix.rename tmp_path path;
-    Ok ()
-  with exn -> Error (Printexc.to_string exn)
+let optional_int_arg json name =
+  match Yojson.Safe.Util.member name json with
+  | `Null -> Ok None
+  | `Int value -> Ok (Some value)
+  | _ -> Error (Printf.sprintf "Invalid parameters: %s must be an integer" name)
 
 let make_tool name description input_schema execute =
   let definition = {
@@ -155,107 +196,365 @@ let make_tool name description input_schema execute =
       ("required", `List (List.map (fun s -> `String s) (List.map fst input_schema)));
     ];
   } in
-  { definition; execute = fun ~pool:_ ~chat_id:_ args -> execute args }
+  { definition; execute }
 
-let required_string_arg json name =
-  match Yojson.Safe.Util.member name json with
-  | `String value when trim value <> "" -> Ok value
-  | _ -> Error (name ^ " is required")
+let init_db db =
+  let exec sql =
+    match Sqlite3.exec db sql with
+    | Sqlite3.Rc.OK -> ()
+    | rc -> failwith (Printf.sprintf "DB error [%s]" (Sqlite3.Rc.to_string rc))
+  in
+  exec "CREATE TABLE IF NOT EXISTS tool_approvals (scope TEXT NOT NULL, path TEXT NOT NULL, created_at REAL NOT NULL, PRIMARY KEY(scope, path))";
+  exec "CREATE INDEX IF NOT EXISTS idx_tool_approvals_scope ON tool_approvals(scope)"
 
-let json_assoc_or_empty = function | `Assoc fields -> `Assoc fields | _ -> `Assoc []
+let exec_ignore db sql bind =
+  let stmt = Sqlite3.prepare db sql in
+  bind stmt;
+  match Sqlite3.step stmt with
+  | Sqlite3.Rc.DONE ->
+      let _ = Sqlite3.finalize stmt in
+      ()
+  | rc ->
+      let _ = Sqlite3.finalize stmt in
+      failwith (Printf.sprintf "DB error: %s" (Sqlite3.Rc.to_string rc))
 
-let run_command ~pool ~timeout_seconds command =
-  let start_time = Unix.gettimeofday () in
-  let deadline = start_time +. float_of_int timeout_seconds in
-  
-  (* Run the command asynchronously in a domain using the pool *)
-  let future = Domainslib.Task.async pool (fun _ ->
-    (* Use open_process_in which is domain-safe *)
-    let cmd = Printf.sprintf "%s 2>&1" command in
-    let ic = Unix.open_process_in cmd in
-    let fd = Unix.descr_of_in_channel ic in
-    
-    (* Create iomux poller for timeout-aware reading *)
-    let poller = Iomux.Poll.create ~maxfds:1 () in
-    Iomux.Poll.set_index poller 0 fd Iomux.Poll.Flags.(pollin + pollpri);
-    
-    (* Read output with timeout polling *)
-    let output = Buffer.create 4096 in
-    let timed_out = ref false in
-    
-    begin
-      try
-        while not !timed_out do
-          let remaining_ms = int_of_float ((deadline -. Unix.gettimeofday ()) *. 1000.0) in
-          if remaining_ms <= 0 then
-            timed_out := true
-          else
-            let timeout : Iomux.Poll.poll_timeout = Iomux.Poll.Milliseconds (max 0 remaining_ms) in
-            let nready = Iomux.Poll.poll poller 1 timeout in
-            if nready = 0 then
-              if Unix.gettimeofday () >= deadline then timed_out := true
-            else
-              let line = input_line ic in
-              Buffer.add_string output line;
-              Buffer.add_char output '\n'
-        done
-      with End_of_file ->
-        ()
-    end;
-    
-    let status = Unix.close_process_in ic in
-    let end_time = Unix.gettimeofday () in
-    let duration_ms = int_of_float ((end_time -. start_time) *. 1000.0) in
-    let exit_code = match status with Unix.WEXITED c -> c | _ -> -1 in
-    
-    if !timed_out then
-      Error (Printf.sprintf "Command timed out after %d seconds" timeout_seconds)
+let get_all_approved_paths db scope =
+  let stmt = Sqlite3.prepare db "SELECT path FROM tool_approvals WHERE scope = ? ORDER BY path" in
+  let _ = Sqlite3.bind_text stmt 1 (approval_scope_to_string scope) in
+  let rec loop acc =
+    match Sqlite3.step stmt with
+    | Sqlite3.Rc.ROW -> loop (Sqlite3.column_text stmt 0 :: acc)
+    | Sqlite3.Rc.DONE ->
+        let _ = Sqlite3.finalize stmt in
+        List.rev acc
+    | rc ->
+        let _ = Sqlite3.finalize stmt in
+        failwith (Printf.sprintf "DB error: %s" (Sqlite3.Rc.to_string rc))
+  in
+  loop []
+
+let normalize_existing_path path =
+  Unix.realpath path
+
+let normalize_lossy_path path =
+  let absolute =
+    if Filename.is_relative path then
+      Filename.concat (Sys.getcwd ()) path
     else
-      Ok (Buffer.contents output, exit_code, duration_ms)
-  ) in
-  
-  (* Await the result *)
-  Domainslib.Task.await pool future
+      path
+  in
+  let rec ascend current suffix =
+    if Sys.file_exists current then
+      let base = normalize_existing_path current in
+      match suffix with
+      | [] -> base
+      | _ -> List.fold_left Filename.concat base (List.rev suffix)
+    else
+      let parent = Filename.dirname current in
+      if parent = current then absolute
+      else
+        let name = Filename.basename current in
+        ascend parent (name :: suffix)
+  in
+  ascend absolute []
 
-let bash_tool =
+let scope_for_root_approval = function
+  | Read | Write as scope -> scope
+  | Execute -> invalid_arg "root approvals only support read/write"
+
+let normalize_root_path ~scope path =
+  let normalized = normalize_lossy_path path in
+  match scope with
+  | Read | Write ->
+      let candidate =
+        if Sys.file_exists normalized && not (Sys.is_directory normalized) then
+          Filename.dirname normalized
+        else
+          normalized
+      in
+      normalize_lossy_path candidate
+  | Execute -> invalid_arg "root approvals only support read/write"
+
+let approved registry ~scope ~path =
+  let approved_paths = get_all_approved_paths registry.db scope in
+  List.exists (fun root -> has_path_prefix ~root ~path) approved_paths
+
+let insert_approval registry ~scope ~path =
+  exec_ignore registry.db
+    "INSERT OR REPLACE INTO tool_approvals (scope, path, created_at) VALUES (?, ?, ?)"
+    (fun stmt ->
+      let _ = Sqlite3.bind_text stmt 1 (approval_scope_to_string scope) in
+      let _ = Sqlite3.bind_text stmt 2 path in
+      let _ = Sqlite3.bind_double stmt 3 (Unix.gettimeofday ()) in
+      ())
+
+let resolve_executable_path command_name =
+  let is_executable path =
+    try
+      Unix.access path [Unix.X_OK];
+      Sys.file_exists path && not (Sys.is_directory path)
+    with Unix.Unix_error _ -> false
+  in
+  if string_contains_char command_name '/' then
+    let candidate = normalize_lossy_path command_name in
+    if is_executable candidate then Ok candidate
+    else Error (Printf.sprintf "Command not found: %s" command_name)
+  else
+    let path_env = Option.value ~default:"" (Sys.getenv_opt "PATH") in
+    let entries = if path_env = "" then [] else String.split_on_char ':' path_env in
+    match List.find_opt (fun dir -> is_executable (Filename.concat dir command_name)) entries with
+    | Some dir -> Ok (Filename.concat dir command_name)
+    | None -> Error (Printf.sprintf "Command not found: %s" command_name)
+
+let tokenize_command command =
+  let len = String.length command in
+  let buffer = Buffer.create len in
+  let push_token acc =
+    if Buffer.length buffer = 0 then acc
+    else
+      let token = Buffer.contents buffer in
+      Buffer.clear buffer;
+      token :: acc
+  in
+  let rec skip_spaces idx =
+    if idx < len then
+      match String.unsafe_get command idx with
+      | ' ' | '\t' | '\n' | '\r' -> skip_spaces (idx + 1)
+      | _ -> idx
+    else idx
+  in
+  let rec parse idx acc quote =
+    if idx >= len then
+      match quote with
+      | Some _ -> Error "Invalid parameters: unterminated quote in command"
+      | None ->
+          let tokens = List.rev (push_token acc) in
+          if tokens = [] then Error "Invalid parameters: command is required" else Ok tokens
+    else
+      let ch = String.unsafe_get command idx in
+      match quote with
+      | Some q ->
+          if ch = q then parse (idx + 1) acc None
+          else if ch = '\\' && idx + 1 < len && q = '"' then (
+            Buffer.add_char buffer (String.unsafe_get command (idx + 1));
+            parse (idx + 2) acc quote
+          ) else (
+            Buffer.add_char buffer ch;
+            parse (idx + 1) acc quote
+          )
+      | None ->
+          begin
+            match ch with
+            | ' ' | '\t' | '\n' | '\r' ->
+                let acc = push_token acc in
+                parse (skip_spaces (idx + 1)) acc None
+            | '\'' | '"' -> parse (idx + 1) acc (Some ch)
+            | '\\' when idx + 1 < len ->
+                Buffer.add_char buffer (String.unsafe_get command (idx + 1));
+                parse (idx + 2) acc None
+            | _ ->
+                Buffer.add_char buffer ch;
+                parse (idx + 1) acc None
+          end
+  in
+  parse (skip_spaces 0) [] None
+
+let unix_error_result ~op ~path = function
+  | Unix.Unix_error (Unix.ENOENT, _, _) ->
+      begin
+        match op with
+        | `Read | `Edit -> failure ~error_category:FileNotFound (Printf.sprintf "File not found: %s" path)
+        | `Write -> failure ~error_category:DirectoryMissing (Printf.sprintf "Directory missing: %s" (Filename.dirname path))
+        | `Exec -> failure ~error_category:CommandNotFound (Printf.sprintf "Command not found: %s" path)
+      end
+  | Unix.Unix_error ((Unix.EACCES | Unix.EPERM), _, _) ->
+      failure ~error_category:PermissionDenied (Printf.sprintf "Permission denied: %s" path)
+  | exn ->
+      failure ~error_category:Other (Printexc.to_string exn)
+
+let ensure_parent_dir path =
+  let rec mkdir_p dir =
+    if dir = "" || dir = "." || dir = "/" then ()
+    else if Sys.file_exists dir then ()
+    else (
+      mkdir_p (Filename.dirname dir);
+      Unix.mkdir dir 0o755
+    )
+  in
+  mkdir_p (Filename.dirname path)
+
+let read_file_full path =
+  try Ok (Stdlib.In_channel.with_open_bin path Stdlib.In_channel.input_all)
+  with
+  | Unix.Unix_error _ as exn -> Error exn
+  | Sys_error msg when string_starts_with msg "No such file" ->
+      Error (Unix.Unix_error (Unix.ENOENT, "open", path))
+  | Sys_error msg when string_starts_with msg "Permission denied" ->
+      Error (Unix.Unix_error (Unix.EACCES, "open", path))
+  | exn -> Error exn
+
+let write_file_atomic path content =
+  try
+    ensure_parent_dir path;
+    let tmp_path = path ^ ".tmp." ^ string_of_int (Unix.getpid ()) in
+    Stdlib.Out_channel.with_open_bin tmp_path (fun ch -> Stdlib.Out_channel.output_string ch content);
+    Unix.rename tmp_path path;
+    Ok ()
+  with
+  | Unix.Unix_error _ as exn -> Error exn
+  | exn -> Error exn
+
+let find_unique_substring content needle =
+  let needle_len = String.length needle in
+  if needle_len = 0 then Error (failure ~error_category:InvalidParameters "Invalid parameters: old_text must not be empty")
+  else
+    match String.index_from_opt content 0 (String.unsafe_get needle 0) with
+    | None -> Error (failure ~error_category:PatternNotFound "Pattern not found: old_text not found in file")
+    | Some first_start ->
+        let rec find_from idx found =
+          if idx > String.length content - needle_len then found
+          else
+            match String.index_from_opt content idx (String.unsafe_get needle 0) with
+            | None -> found
+            | Some pos ->
+                if pos > String.length content - needle_len then found
+                else if String.sub content pos needle_len = needle then
+                  begin
+                    match found with
+                    | None -> find_from (pos + 1) (Some pos)
+                    | Some first_pos ->
+                        raise (Invalid_argument (Printf.sprintf "%d:%d" first_pos pos))
+                  end
+                else
+                  find_from (pos + 1) found
+        in
+        try
+          match find_from first_start None with
+          | Some pos -> Ok pos
+          | None -> Error (failure ~error_category:PatternNotFound "Pattern not found: old_text not found in file")
+        with
+        | Invalid_argument data when string_contains_char data ':' ->
+            let parts = String.split_on_char ':' data in
+            let first_pos = int_of_string (List.hd parts) in
+            let second_pos = int_of_string (List.hd (List.tl parts)) in
+            Error (failure ~error_category:AmbiguousMatch
+                     (Printf.sprintf "Ambiguous match: old_text occurs multiple times (at positions %d and %d)" first_pos second_pos))
+        | exn -> Error (failure ~error_category:Other (Printexc.to_string exn))
+
+let validate_timeout registry value =
+  let _ = registry in
+  if value <= 0 then
+    Error "Invalid parameters: timeout_seconds must be positive"
+  else
+    Ok value
+
+let run_command ~timeout_seconds ~command ~argv =
+  let start_time = Unix.gettimeofday () in
+  let read_fd, write_fd = Unix.pipe () in
+  Unix.set_nonblock read_fd;
+  let env = Unix.environment () in
+  let argv = Array.of_list argv in
+  let pid =
+    try Unix.create_process_env command argv env Unix.stdin write_fd write_fd
+    with exn ->
+      Unix.close read_fd;
+      Unix.close write_fd;
+      raise exn
+  in
+  Unix.close write_fd;
+  let buffer = Bytes.create 4096 in
+  let output = Buffer.create 4096 in
+  let drain ready =
+    if ready then
+      try
+        let read_bytes = Unix.read read_fd buffer 0 (Bytes.length buffer) in
+        if read_bytes = 0 then false
+        else (
+          Buffer.add_subbytes output buffer 0 read_bytes;
+          true
+        )
+      with
+      | Unix.Unix_error ((Unix.EAGAIN | Unix.EWOULDBLOCK), _, _) -> true
+    else
+      true
+  in
+  let rec loop status_opt =
+    let elapsed = Unix.gettimeofday () -. start_time in
+    if elapsed >= float_of_int timeout_seconds then `Timeout
+    else
+      let ready, _, _ = Unix.select [read_fd] [] [] 0.1 in
+      let keep_reading = drain (ready <> []) in
+      let status_opt =
+        match status_opt with
+        | Some _ -> status_opt
+        | None ->
+            match Unix.waitpid [Unix.WNOHANG] pid with
+            | 0, _ -> None
+            | _, status -> Some status
+      in
+      match status_opt, keep_reading with
+      | Some status, false -> `Done status
+      | _ -> loop status_opt
+  in
+  let result =
+    match loop None with
+    | `Timeout ->
+        let _ = (try Unix.kill pid Sys.sigkill with Unix.Unix_error _ -> ()) in
+        let _ = (try Unix.waitpid [] pid with Unix.Unix_error _ -> (0, Unix.WSIGNALED 0)) in
+        Error (Printf.sprintf "Command timed out: exceeded %d seconds" timeout_seconds)
+    | `Done status ->
+        let duration_ms = int_of_float ((Unix.gettimeofday () -. start_time) *. 1000.0) in
+        let exit_code =
+          match status with
+          | Unix.WEXITED code -> code
+          | Unix.WSIGNALED signal -> 128 + signal
+          | Unix.WSTOPPED signal -> 128 + signal
+        in
+        Ok (Buffer.contents output, exit_code, duration_ms)
+  in
+  Unix.close read_fd;
+  result
+
+let approval_message request =
+  Printf.sprintf
+    "Approval required: %s %s\nApprove with: /approve %s %s"
+    (approval_scope_label request.scope)
+    request.target
+    (approval_scope_to_string request.scope)
+    request.target
+
+let request_for_root scope path =
+  let target = normalize_root_path ~scope path in
   {
-    definition = {
-      Llm_types.name = "bash";
-      description = "Execute a shell command.";
-      input_schema = `Assoc [
-        ("type", `String "object");
-        ("properties", `Assoc [("command", `Assoc [("type", `String "string")])]);
-        ("required", `List [`String "command"]);
-      ];
-    };
-    execute = fun ~pool ~chat_id:_ args ->
-      match required_string_arg (json_assoc_or_empty args) "command" with
-      | Error err -> failure ~error_category:InvalidParameters err
-      | Ok command ->
-          match run_command ~pool ~timeout_seconds:60 command with
-          | Error err -> 
-              (* Check if it's a timeout or other error *)
-              let category = if contains_substring ~haystack:(String.lowercase_ascii err) ~needle:"timeout" then CommandTimeout else CommandFailed in
-              failure ~error_category:category ("Error executing command: " ^ err)
-          | Ok (output, exit_code, duration_ms) ->
-              let content = Printf.sprintf "Command output:\n%s\nExit status: %d" output exit_code in
-              if exit_code = 0 then success ~status_code:exit_code ~duration_ms content
-              else failure ~status_code:exit_code ~duration_ms ~error_type:"command_failed" ~error_category:CommandFailed content
+    scope;
+    target;
+    reason = Printf.sprintf "Access to %s is not yet approved." target;
+  }
+
+let request_for_executable path =
+  {
+    scope = Execute;
+    target = path;
+    reason = "Executable access is not yet approved.";
   }
 
 let read_file_tool =
   make_tool "read_file" "Read the contents of a file."
-    [("path", `Assoc [("type", `String "string"); ("description", `String "Path to the file to read")])]
-    (fun args ->
+    [
+      ("path", `Assoc [("type", `String "string"); ("description", `String "Path to the file to read")]);
+    ]
+    (fun ~registry ~chat_id:_ args ->
       match required_string_arg (json_assoc_or_empty args) "path" with
       | Error err -> failure ~error_category:InvalidParameters err
       | Ok path ->
-          match read_file_full path with
-          | Error err -> 
-              (* Classify the error based on the message *)
-              let category = classify_error ~error_message:err in
-              failure ~error_category:category ("Error reading file: " ^ err)
-          | Ok content -> success ~status_code:200 content)
+          let normalized = normalize_lossy_path path in
+          if not (approved registry ~scope:Read ~path:normalized) then
+            let request = request_for_root Read path in
+            approval_required request (approval_message request)
+          else
+            match read_file_full normalized with
+            | Ok content -> success ~status_code:200 content
+            | Error exn -> unix_error_result ~op:`Read ~path:normalized exn)
 
 let write_file_tool =
   make_tool "write_file" "Write content to a file (atomic writes)."
@@ -263,39 +562,20 @@ let write_file_tool =
       ("path", `Assoc [("type", `String "string"); ("description", `String "Path to the file to write")]);
       ("content", `Assoc [("type", `String "string"); ("description", `String "Content to write")]);
     ]
-    (fun args ->
+    (fun ~registry ~chat_id:_ args ->
       let json = json_assoc_or_empty args in
       match required_string_arg json "path", required_string_arg json "content" with
       | Error err, _ | _, Error err -> failure ~error_category:InvalidParameters err
       | Ok path, Ok content ->
-          match write_file_atomic path content with
-          | Error err -> 
-              (* Classify the error based on the message *)
-              let category = classify_error ~error_message:err in
-              failure ~error_category:category ("Error writing file: " ^ err)
-          | Ok () -> success ~status_code:200 (Printf.sprintf "Successfully wrote %d bytes to %s" (String.length content) path))
-
-(** Search for [sub] in [s] starting at [start] using character-by-character comparison.
-    Returns the index of first match, or -1 if not found.
-    This is O(1) in allocations - no intermediate strings created. *)
-let find_sub_no_alloc s sub start =
-  let s_len = String.length s in
-  let sub_len = String.length sub in
-  if sub_len = 0 || start > s_len - sub_len then -1
-  else
-    let rec search i =
-      if i > s_len - sub_len then -1
-      else
-        (* Check if sub matches at position i *)
-        let rec check_match j =
-          if j >= sub_len then true
-          else if String.unsafe_get s (i + j) <> String.unsafe_get sub j then false
-          else check_match (j + 1)
-        in
-        if check_match 0 then i
-        else search (i + 1)
-    in
-    search start
+          let normalized = normalize_lossy_path path in
+          if not (approved registry ~scope:Write ~path:normalized) then
+            let request = request_for_root Write path in
+            approval_required request (approval_message request)
+          else
+            match write_file_atomic normalized content with
+            | Ok () ->
+                success ~status_code:200 (Printf.sprintf "Successfully wrote %d bytes to %s" (String.length content) normalized)
+            | Error exn -> unix_error_result ~op:`Write ~path:normalized exn)
 
 let edit_file_tool =
   make_tool "edit_file" "Edit a file by replacing one exact text block. The old_text must be unique in the file."
@@ -304,45 +584,122 @@ let edit_file_tool =
       ("old_text", `Assoc [("type", `String "string"); ("description", `String "Exact text to find and replace (must be unique in file)")]);
       ("new_text", `Assoc [("type", `String "string"); ("description", `String "New text to replace with")]);
     ]
-    (fun args ->
+    (fun ~registry ~chat_id:_ args ->
       let json = json_assoc_or_empty args in
       match required_string_arg json "path", required_string_arg json "old_text", required_string_arg json "new_text" with
       | Error err, _, _ | _, Error err, _ | _, _, Error err -> failure ~error_category:InvalidParameters err
       | Ok path, Ok old_text, Ok new_text ->
-          match read_file_full path with
-          | Error err -> 
-              let category = classify_error ~error_message:err in
-              failure ~error_category:category ("Error reading file: " ^ err)
-          | Ok content ->
-              (* First search: find the initial match *)
-              match find_sub_no_alloc content old_text 0 with
-              | -1 -> failure ~error_category:PatternNotFound "old_text not found in file"
-              | first_idx ->
-                  (* Second search: check for ambiguity starting from next character *)
-                  match find_sub_no_alloc content old_text (first_idx + 1) with
-                  | second_idx when second_idx >= 0 ->
-                      failure ~error_category:AmbiguousMatch (Printf.sprintf "Ambiguity error: 'old_text' occurs multiple times (at positions %d and %d). Please provide more context." first_idx second_idx)
-                  | _ ->
-                      (* Unique match found - perform replacement *)
+          let normalized = normalize_lossy_path path in
+          if not (approved registry ~scope:Write ~path:normalized) then
+            let request = request_for_root Write path in
+            approval_required request (approval_message request)
+          else
+            match read_file_full normalized with
+            | Error exn -> unix_error_result ~op:`Edit ~path:normalized exn
+            | Ok content ->
+                begin
+                  match find_unique_substring content old_text with
+                  | Error result -> result
+                  | Ok idx ->
                       let old_len = String.length old_text in
-                      let prefix = String.sub content 0 first_idx in
-                      let suffix = String.sub content (first_idx + old_len) (String.length content - first_idx - old_len) in
+                      let prefix = String.sub content 0 idx in
+                      let suffix = String.sub content (idx + old_len) (String.length content - idx - old_len) in
                       let new_content = prefix ^ new_text ^ suffix in
-                      match write_file_atomic path new_content with
-                      | Error err -> 
-                          let category = classify_error ~error_message:err in
-                          failure ~error_category:category ("Error writing file: " ^ err)
-                      | Ok () -> success ~status_code:200 "File edited successfully")
+                      match write_file_atomic normalized new_content with
+                      | Ok () -> success ~status_code:200 "File edited successfully"
+                      | Error exn -> unix_error_result ~op:`Write ~path:normalized exn
+                end)
 
-let create_default_registry () =
+let bash_tool =
+  {
+    definition = {
+      Llm_types.name = "bash";
+      description = "Execute a command with explicit executable approval.";
+      input_schema = `Assoc [
+        ("type", `String "object");
+        ("properties", `Assoc [
+          ("command", `Assoc [("type", `String "string")]);
+          ("timeout_seconds", `Assoc [("type", `String "integer")]);
+        ]);
+        ("required", `List [`String "command"]);
+      ];
+    };
+    execute = (fun ~registry ~chat_id:_ args ->
+      let json = json_assoc_or_empty args in
+      match required_string_arg json "command", optional_int_arg json "timeout_seconds" with
+      | Error err, _ | _, Error err -> failure ~error_category:InvalidParameters err
+      | Ok command, Ok timeout_arg ->
+          begin
+            match tokenize_command command with
+            | Error err -> failure ~error_category:InvalidParameters err
+            | Ok argv ->
+                let timeout_value = Option.value timeout_arg ~default:default_bash_timeout_seconds in
+                begin
+                  match validate_timeout registry timeout_value with
+                  | Error err -> failure ~error_category:InvalidParameters err
+                  | Ok timeout_seconds ->
+                      begin
+                        match resolve_executable_path (List.hd argv) with
+                        | Error err -> failure ~error_category:CommandNotFound err
+                        | Ok executable ->
+                            if not (approved registry ~scope:Execute ~path:executable) then
+                              let request = request_for_executable executable in
+                              approval_required request (approval_message request)
+                            else
+                              begin
+                                match run_command ~timeout_seconds ~command:executable ~argv:(executable :: List.tl argv) with
+                                | Error err ->
+                                    let category =
+                                      if classify_error ~error_message:err = CommandTimeout then CommandTimeout else CommandFailed
+                                    in
+                                    failure ~error_category:category err
+                                | Ok (output, exit_code, duration_ms) ->
+                                    let content = Printf.sprintf "Command output:\n%s\nExit status: %d" output exit_code in
+                                    if exit_code = 0 then
+                                      success ~status_code:exit_code ~duration_ms content
+                                    else
+                                      failure ~status_code:exit_code ~duration_ms ~error_type:"command_failed" ~error_category:CommandFailed
+                                        (Printf.sprintf "Command failed: %s" content)
+                              end
+                      end
+                end
+          end);
+  }
+
+let create_default_registry ~db_path ~project_root () =
+  let db = Sqlite3.db_open db_path in
+  init_db db;
   let pool = Domainslib.Task.setup_pool ~num_domains:2 () in
-  { pool; tools = [bash_tool; read_file_tool; write_file_tool; edit_file_tool] }
+  {
+    db;
+    pool;
+    project_root;
+    tools = [bash_tool; read_file_tool; write_file_tool; edit_file_tool];
+  }
 
-let definitions _registry = List.map (fun t -> t.definition) [bash_tool; read_file_tool; write_file_tool; edit_file_tool]
+let definitions registry =
+  List.map (fun t -> t.definition) registry.tools
 
 let execute registry ~chat_id name input =
   match List.find_opt (fun tool -> tool.definition.Llm_types.name = name) registry.tools with
   | None -> failure ("Tool not found: " ^ name)
   | Some tool ->
-      begin try tool.execute ~pool:registry.pool ~chat_id (json_assoc_or_empty input)
-      with exn -> failure (Printf.sprintf "Error executing tool %s: %s" name (Printexc.to_string exn)) end
+      begin
+        try tool.execute ~registry ~chat_id (json_assoc_or_empty input)
+        with
+        | Unix.Unix_error _ as exn -> unix_error_result ~op:`Exec ~path:name exn
+        | exn -> failure (Printf.sprintf "Tool execution exception: %s" (Printexc.to_string exn))
+      end
+
+let approve_executable registry executable =
+  match resolve_executable_path executable with
+  | Error err -> Error err
+  | Ok resolved ->
+      insert_approval registry ~scope:Execute ~path:resolved;
+      Ok (Printf.sprintf "Approved executable: %s" resolved)
+
+let approve_root registry ~scope path =
+  let scope = scope_for_root_approval scope in
+  let normalized = normalize_root_path ~scope path in
+  insert_approval registry ~scope ~path:normalized;
+  Ok (Printf.sprintf "Approved %s: %s" (approval_scope_label scope) normalized)

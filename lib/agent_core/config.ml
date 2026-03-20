@@ -24,7 +24,7 @@ type config = {
   
   (* Agent Limits *)
   max_tool_iterations : int;
-  
+
   (* Debug *)
   debug : bool;
   
@@ -44,7 +44,6 @@ let default_llm_api_base = "https://coding-intl.dashscope.aliyuncs.com/v1"
 let default_data_dir = "workspace"
 let default_max_tool_iterations = 256
 let default_llm_timeout = 60
-
 (* API Retry defaults *)
 let default_api_retry_enabled = true
 let default_api_retry_max_retries = 3

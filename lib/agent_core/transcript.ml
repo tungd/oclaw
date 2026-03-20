@@ -120,8 +120,7 @@ let row_to_node stmt =
   let metadata = node_metadata_of_yojson metadata_json in
   { id; path; chat_id; kind; content; model; metadata; timestamp }
 
-let create ~data_dir ~runtime_dir:_ =
-  let db_path = Filename.concat data_dir "transcript.db" in
+let create ~db_path =
   let db = Sqlite3.db_open db_path in
   init_db db;
   { db }

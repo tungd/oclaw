@@ -9,6 +9,8 @@ type llm_call =
 type app_state = {
   config : Config.config;
   provider_config : Llm_provider.provider_config;
+  project_root : string;
+  db_path : string;
   transcript : Transcript.t;
   skills : Agent_skills.Skills.t;
   tools : Agent_tools.Tools.t;

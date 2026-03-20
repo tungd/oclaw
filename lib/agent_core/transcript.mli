@@ -46,7 +46,7 @@ val conversation_info_of_yojson : Yojson.Safe.t -> conversation_info
 type t
 
 (** Lifecycle *)
-val create : data_dir:string -> runtime_dir:string -> t
+val create : db_path:string -> t
 val close : t -> unit
 
 (** Conversation Management *)
