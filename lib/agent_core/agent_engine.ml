@@ -68,11 +68,6 @@ let assistant_blocks_of_response response =
          | Llm.Response_tool_use { id; name; input } ->
              Some (Llm.Tool_use { id; name; input }))
 
-let string_starts_with s prefix =
-  let s_len = String.length s in
-  let p_len = String.length prefix in
-  s_len >= p_len && String.sub s 0 p_len = prefix
-
 let make_text_response state ~parent_id text =
   let final_text = if String.trim text = "" then "(empty_reply)" else text in
   let assistant_message_content = Llm.Text_content final_text in
@@ -81,7 +76,7 @@ let make_text_response state ~parent_id text =
   Ok final_text
 
 let maybe_handle_approval_command state ~chat_id ?parent_id prompt =
-  if not (string_starts_with prompt "/approve ") then
+  if not (String.starts_with ~prefix:"/approve " prompt) then
     None
   else
     let usage = "Usage: /approve <exec|read|write> <path>" in

@@ -57,21 +57,7 @@ let close registry =
 let pool registry = registry.pool
 let project_root registry = registry.project_root
 
-let trim = String.trim
 let default_bash_timeout_seconds = 60
-
-let string_starts_with s prefix =
-  let s_len = String.length s in
-  let p_len = String.length prefix in
-  s_len >= p_len && String.sub s 0 p_len = prefix
-
-let string_contains_char s c =
-  let rec loop idx =
-    if idx >= String.length s then false
-    else if String.unsafe_get s idx = c then true
-    else loop (idx + 1)
-  in
-  loop 0
 
 let has_path_prefix ~root ~path =
   path = root ||
@@ -92,16 +78,16 @@ let approval_scope_label = function
   | Execute -> "executable"
 
 let classify_error ~error_message =
-  if string_starts_with error_message "Invalid parameters:" then InvalidParameters
-  else if string_starts_with error_message "Approval required:" then ApprovalRequired
-  else if string_starts_with error_message "Pattern not found:" then PatternNotFound
-  else if string_starts_with error_message "Ambiguous match:" then AmbiguousMatch
-  else if string_starts_with error_message "Command timed out:" then CommandTimeout
-  else if string_starts_with error_message "Command not found:" then CommandNotFound
-  else if string_starts_with error_message "File not found:" then FileNotFound
-  else if string_starts_with error_message "Directory missing:" then DirectoryMissing
-  else if string_starts_with error_message "Permission denied:" then PermissionDenied
-  else if string_starts_with error_message "Command failed:" then CommandFailed
+  if String.starts_with ~prefix:"Invalid parameters:" error_message then InvalidParameters
+  else if String.starts_with ~prefix:"Approval required:" error_message then ApprovalRequired
+  else if String.starts_with ~prefix:"Pattern not found:" error_message then PatternNotFound
+  else if String.starts_with ~prefix:"Ambiguous match:" error_message then AmbiguousMatch
+  else if String.starts_with ~prefix:"Command timed out:" error_message then CommandTimeout
+  else if String.starts_with ~prefix:"Command not found:" error_message then CommandNotFound
+  else if String.starts_with ~prefix:"File not found:" error_message then FileNotFound
+  else if String.starts_with ~prefix:"Directory missing:" error_message then DirectoryMissing
+  else if String.starts_with ~prefix:"Permission denied:" error_message then PermissionDenied
+  else if String.starts_with ~prefix:"Command failed:" error_message then CommandFailed
   else Other
 
 let recovery_hint_for_error ~category ~error_message:_ =
@@ -177,7 +163,7 @@ let json_assoc_or_empty = function
 
 let required_string_arg json name =
   match Yojson.Safe.Util.member name json with
-  | `String value when trim value <> "" -> Ok value
+  | `String value when String.trim value <> "" -> Ok value
   | _ -> Error (Printf.sprintf "Invalid parameters: %s is required" name)
 
 let optional_int_arg json name =
@@ -295,7 +281,7 @@ let resolve_executable_path command_name =
       Sys.file_exists path && not (Sys.is_directory path)
     with Unix.Unix_error _ -> false
   in
-  if string_contains_char command_name '/' then
+  if String.contains command_name '/' then
     let candidate = normalize_lossy_path command_name in
     if is_executable candidate then Ok candidate
     else Error (Printf.sprintf "Command not found: %s" command_name)
@@ -387,9 +373,9 @@ let read_file_full path =
   try Ok (Stdlib.In_channel.with_open_bin path Stdlib.In_channel.input_all)
   with
   | Unix.Unix_error _ as exn -> Error exn
-  | Sys_error msg when string_starts_with msg "No such file" ->
+  | Sys_error msg when String.starts_with ~prefix:"No such file" msg ->
       Error (Unix.Unix_error (Unix.ENOENT, "open", path))
-  | Sys_error msg when string_starts_with msg "Permission denied" ->
+  | Sys_error msg when String.starts_with ~prefix:"Permission denied" msg ->
       Error (Unix.Unix_error (Unix.EACCES, "open", path))
   | exn -> Error exn
 
@@ -433,7 +419,7 @@ let find_unique_substring content needle =
           | Some pos -> Ok pos
           | None -> Error (failure ~error_category:PatternNotFound "Pattern not found: old_text not found in file")
         with
-        | Invalid_argument data when string_contains_char data ':' ->
+        | Invalid_argument data when String.contains data ':' ->
             let parts = String.split_on_char ':' data in
             let first_pos = int_of_string (List.hd parts) in
             let second_pos = int_of_string (List.hd (List.tl parts)) in
