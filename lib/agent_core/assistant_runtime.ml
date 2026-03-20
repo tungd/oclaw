@@ -14,7 +14,7 @@ let create ?llm_call ?system_prompt ?(chat_id=1) ?data_dir ~provider_config () =
   let config =
     {
       Config.default_config with
-      llm_model = provider_config.Llm_provider.model.name;
+      llm_model = provider_config.Llm_provider.model_name;
       llm_api_key = provider_config.api_key;
       llm_api_base = provider_config.api_base;
       data_dir = Option.value ~default:"workspace" data_dir;

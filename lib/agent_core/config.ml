@@ -261,19 +261,10 @@ let llm_timeout _config =
    ============================================================================ *)
 
 let to_llm_provider_config config =
-  let model = {
-    Llm_provider.id = config.llm_model;
-    name = config.llm_model;
-    reasoning = false;
-    input_types = [ "text" ];
-    cost = (0.0, 0.0, 0.0, 0.0);
-    context_window = 1000000;
-    max_tokens = 4096;
-  } in
   Llm_provider.{
     api_base = config.llm_api_base;
     api_key = config.llm_api_key;
-    model;
+    model_name = config.llm_model;
     max_tokens = 4096;
     timeout = default_llm_timeout;
   }

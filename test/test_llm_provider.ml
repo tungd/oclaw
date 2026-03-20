@@ -9,15 +9,7 @@ let provider =
   {
     Llm_provider.api_base = "http://example.invalid";
     api_key = "test";
-    model = {
-      Llm_provider.id = "test-model";
-      name = "test-model";
-      reasoning = false;
-      input_types = [ "text" ];
-      cost = (0.0, 0.0, 0.0, 0.0);
-      context_window = 16384;
-      max_tokens = 256;
-    };
+    model_name = "test-model";
     max_tokens = 256;
     timeout = 1;
   }

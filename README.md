@@ -235,7 +235,7 @@ The core loop in [`lib/agent_core/agent_engine.ml`](/Users/tung/Projects/std23/o
 
 ### Provider Layer
 
-The provider code in [`lib/llm_provider/llm_provider.ml`](/Users/tung/Projects/std23/oclaw/lib/llm_provider/llm_provider.ml) currently targets OpenAI-compatible chat-completions APIs and supports:
+The provider code in [`lib/llm_provider/llm_provider.ml`](/Users/tung/Projects/std23/oclaw/lib/llm_provider/llm_provider.ml) is an OpenAI-compatible transport adapter over the shared `Llm_types` AST and supports:
 
 - Standard request serialization
 - Streaming response parsing

@@ -1,4 +1,4 @@
-(** LLM provider for structured messages via OpenAI-compatible chat completions. *)
+(** OpenAI-compatible transport adapter over shared LLM message/tool types. *)
 
 open Httpkit
 open Yojson.Safe.Util
@@ -6,40 +6,12 @@ open Yojson.Safe.Util
 module Llm = Llm_types
 module Log = (val Logs.src_log (Logs.Src.create "llm_provider") : Logs.LOG)
 
-type llm_model = {
-  id : string;
-  name : string;
-  reasoning : bool;
-  input_types : string list;
-  cost : float * float * float * float;
-  context_window : int;
-  max_tokens : int;
-}
-
 type provider_config = {
   api_base : string;
   api_key : string;
-  model : llm_model;
+  model_name : string;
   max_tokens : int;
   timeout : int;
-}
-
-let qwen35_plus_model = {
-  id = "qwen3.5-plus";
-  name = "qwen3.5-plus";
-  reasoning = false;
-  input_types = [ "text"; "image" ];
-  cost = (0.0, 0.0, 0.0, 0.0);
-  context_window = 1_000_000;
-  max_tokens = 65_536;
-}
-
-let create_dashscope_provider ?(max_tokens=4096) () = {
-  api_base = "https://coding-intl.dashscope.aliyuncs.com/v1";
-  api_key = "";
-  model = qwen35_plus_model;
-  max_tokens;
-  timeout = 60;
 }
 
 let tool_definitions_to_json tools =
@@ -147,7 +119,7 @@ let build_request_json provider ~system_prompt messages ~tools ~stream =
     :: List.concat_map flatten_message messages
   in
   `Assoc [
-    ("model", `String provider.model.name);
+    ("model", `String provider.model_name);
     ("messages", `List request_messages);
     ("max_tokens", `Int provider.max_tokens);
     ("tools", tool_definitions_to_json tools);

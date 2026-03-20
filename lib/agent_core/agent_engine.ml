@@ -190,7 +190,7 @@ let process ?on_text_delta ?on_status state ~chat_id ?(persistent=false) prompt 
             else
               let assistant_message_content = Llm.Blocks (assistant_blocks_of_response response) in
               (* Get model from provider config *)
-              let model = state.provider_config.Llm_provider.model.name in
+              let model = state.provider_config.Llm_provider.model_name in
               let response_node_id = Transcript.add_llm_response state.Runtime.transcript ~parent_id:current_node_id ~model ~content:assistant_message_content () in
               Option.iter (fun f -> f "Executing tools...") on_status;
               let tool_results = tool_results_of_response state ~chat_id response in
@@ -209,7 +209,7 @@ let process ?on_text_delta ?on_status state ~chat_id ?(persistent=false) prompt 
             let text = String.trim (response_text response) in
             let final_text = if text = "" then "(empty_reply)" else text in
             let assistant_message_content = Llm.Text_content final_text in
-            let model = state.provider_config.Llm_provider.model.name in
+            let model = state.provider_config.Llm_provider.model_name in
             ignore (Transcript.add_llm_response state.Runtime.transcript ~parent_id:current_node_id ~model ~content:assistant_message_content ());
             Ok final_text
     in

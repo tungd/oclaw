@@ -1,25 +1,12 @@
-(** LLM provider for structured tool-use messages on top of OpenAI-compatible APIs. *)
-
-type llm_model = {
-  id : string;
-  name : string;
-  reasoning : bool;
-  input_types : string list;
-  cost : float * float * float * float;
-  context_window : int;
-  max_tokens : int;
-}
+(** OpenAI-compatible transport adapter over shared LLM message/tool types. *)
 
 type provider_config = {
   api_base : string;
   api_key : string;
-  model : llm_model;
+  model_name : string;
   max_tokens : int;
   timeout : int;
 }
-
-val qwen35_plus_model : llm_model
-val create_dashscope_provider : ?max_tokens:int -> unit -> provider_config
 
 val build_request_json :
   provider_config ->
