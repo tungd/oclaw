@@ -446,7 +446,7 @@ let send_message_impl provider ?on_text_delta ~system_prompt messages ~tools =
     |> Yojson.Safe.to_string
   in
   let parser = create_stream_parser ?on_text_delta () in
-  match Http_client.execute_request ~body ~timeout:provider.timeout ~on_write:(fun chunk ->
+  match Client.execute_request ~body ~timeout:provider.timeout ~on_write:(fun chunk ->
     ignore (feed_parser parser chunk)) request with
   | Error err -> Error err
   | Ok (_response, _body) -> finalize_parser parser

@@ -2,8 +2,9 @@
  (name agent_tools)
  (modules tools)
  (libraries
-  llm_types
+ llm_types
   httpkit
+  iomux
   str
   unix
   yojson

@@ -1,4 +1,4 @@
 (library
  (name httpkit)
- (modules http_client)
- (libraries curl h1 iomux logs))
+ (modules client)
+ (libraries curl h1 logs))

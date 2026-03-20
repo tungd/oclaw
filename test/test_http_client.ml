@@ -1,6 +1,6 @@
 (** Tests for HTTP client module. *)
 
-module Client = Httpkit.Http_client
+module Client = Httpkit.Client
 
 let fail msg =
   Printf.eprintf "[FAIL] %s\n" msg;
@@ -15,11 +15,6 @@ let test_execute_request_missing_host () =
   | Ok _ -> fail "expected transport failure"
   | Error _ -> print_endline "  ✓ execute_request_missing_host"
 
-let test_execute_requests_empty () =
-  let results = Client.execute_requests [] in
-  expect (results = []) "empty batch should return empty list";
-  print_endline "  ✓ execute_requests_empty"
-
 let test_h1_request_construction () =
   let headers = H1.Headers.of_list [ ("Content-Type", "application/json") ] in
   let request = H1.Request.create ~headers `POST "http://example.com" in
@@ -31,6 +26,5 @@ let test_h1_request_construction () =
 let () =
   print_endline "Running HTTP client tests...";
   test_h1_request_construction ();
-  test_execute_requests_empty ();
   test_execute_request_missing_host ();
   print_endline "[PASS] all http_client tests ✓"

@@ -99,7 +99,7 @@ let activate_skill t name =
 let sync_skill t ?(repo="vercel-labs/skills") name =
   let url = Printf.sprintf "https://raw.githubusercontent.com/%s/main/skills/%s/SKILL.md" repo name in
   let request = H1.Request.create `GET url in
-  match Http_client.execute_request ~timeout:30 request with
+  match Client.execute_request ~timeout:30 request with
   | Error error -> Error error
   | Ok (response, _body) when H1.Status.to_code response.H1.Response.status < 200 || H1.Status.to_code response.H1.Response.status >= 300 ->
       Error (Printf.sprintf "Failed to download skill '%s' from %s (status %d)"
