@@ -36,8 +36,6 @@ let default_llm_api_base = "https://coding-intl.dashscope.aliyuncs.com/v1"
 let default_data_dir = "workspace"
 let default_max_tool_iterations = 256
 let default_llm_timeout = 60
-let scheduler_poll_interval_seconds = 60
-let scheduler_enabled = true
 
 (* ============================================================================
    Default Configuration
@@ -207,12 +205,6 @@ let skills_data_dir config =
 
 let llm_timeout _config =
   default_llm_timeout
-
-let scheduler_interval _config =
-  scheduler_poll_interval_seconds
-
-let is_scheduler_enabled _config =
-  scheduler_enabled
 
 (* ============================================================================
    Conversion to LLM Provider Config

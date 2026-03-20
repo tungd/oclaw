@@ -9,7 +9,6 @@ type llm_call =
 type app_state = {
   config : Config.config;
   provider_config : Llm_provider.provider_config;
-  db : Db.t;
   transcript : Transcript.t;
   skills : Agent_skills.Skills.t;
   tools : Agent_tools.Tools.t;
@@ -37,27 +36,21 @@ let create_app_state ?(llm_call=default_llm_call) ?system_prompt_override config
   try
     ensure_dir runtime_dir;
     ensure_dir skills_dir;
-    let db_path = Filename.concat runtime_dir "oclaw.db" in
-    match Db.create db_path with
-    | Error err -> Error err
-    | Ok db ->
-        let transcript = Transcript.create ~data_dir:runtime_dir ~runtime_dir in
-        let skills = Agent_skills.Skills.create ~skills_dir in
-        let tools = Agent_tools.Tools.create_default_registry () in
-        Ok {
-          config;
-          provider_config = Config.to_llm_provider_config config;
-          db;
-          transcript;
-          skills;
-          tools;
-          llm_call;
-          system_prompt_override;
-        }
+    let transcript = Transcript.create ~data_dir:runtime_dir ~runtime_dir in
+    let skills = Agent_skills.Skills.create ~skills_dir in
+    let tools = Agent_tools.Tools.create_default_registry () in
+    Ok {
+      config;
+      provider_config = Config.to_llm_provider_config config;
+      transcript;
+      skills;
+      tools;
+      llm_call;
+      system_prompt_override;
+    }
   with exn ->
     Error (Printexc.to_string exn)
 
 let close_app_state state =
   Transcript.close state.transcript;
-  Db.close state.db;
   Agent_tools.Tools.close state.tools
