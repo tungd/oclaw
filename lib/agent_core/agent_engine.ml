@@ -1,9 +1,3 @@
-[@@@warning "-33"]
-[@@@warning "-32"]
-[@@@warning "-27"]
-[@@@warning "-8"]
-open Yojson.Safe
-
 module Llm = Llm_types
 module Log = (val Logs.src_log (Logs.Src.create "agent_engine") : Logs.LOG)
 
@@ -40,11 +34,6 @@ let build_system_prompt state ~chat_id:_ =
       else
         default_system_prompt ^ "\n\n# Skills\n\nThe following skills are available. Use `activate_skill` before following a skill-specific workflow.\n\n" ^ skills_catalog
 
-let load_messages state ~chat_id =
-  match Transcript.get_latest_node state.Runtime.transcript ~chat_id with
-  | Some node_id -> Ok (Transcript.get_branch state.Runtime.transcript node_id)
-  | None -> Ok []
-
 let response_text response =
   response.Llm.content
   |> List.filter_map (function
@@ -62,12 +51,6 @@ let assistant_blocks_of_response response =
          | Llm.Response_tool_use { id; name; input } ->
              Some (Llm.Tool_use { id; name; input }))
 
-let get_num_worker_domains () =
-  try
-    let n = Domain.recommended_domain_count () in
-    if n > 1 then min (n - 1) 4 else 1
-  with _ -> 2
-
 let execute_tool_parallel state ~chat_id (id, name, input) =
   let result : Agent_tools.Tools.tool_result =
     try
@@ -78,10 +61,6 @@ let execute_tool_parallel state ~chat_id (id, name, input) =
       Agent_tools.Tools.failure ~error_type:"exception" ~error_category:Agent_tools.Tools.Other msg
   in
   (id, result)
-
-(** Helper to create failure with explicit error category *)
-let make_failure ?status_code ?duration_ms ?error_type ?error_category msg =
-  Agent_tools.Tools.failure ?status_code ?duration_ms ?error_type ?error_category msg
 
 let tool_results_of_response state ~chat_id response =
   let tool_calls = 
@@ -156,15 +135,13 @@ let process ?on_text_delta ?on_status state ~chat_id ?(persistent=false) prompt 
   let prompt = String.trim prompt in
   if prompt = "" then Error "Prompt is empty"
   else
-    let base_messages, parent_id =
+    let parent_id =
       if persistent then
         match Transcript.get_latest_node state.Runtime.transcript ~chat_id with
-        | Some node_id ->
-            (Transcript.get_branch state.Runtime.transcript node_id, Some node_id)
-        | None ->
-            ([], None)
+        | Some node_id -> Some node_id
+        | None -> None
       else
-        ([], None)
+        None
     in
     (* Add user prompt to transcript *)
     let prompt_node_id =
@@ -210,6 +187,7 @@ let process ?on_text_delta ?on_status state ~chat_id ?(persistent=false) prompt 
                     let is_err = Option.value is_error ~default:false in
                     let result_id = Transcript.add_tool_result state.Runtime.transcript ~parent_id:!last_node_id ~tool_use_id ~content ~is_error:is_err in
                     last_node_id := result_id
+                | _ -> () (* Other content blocks should not appear in tool results *)
               ) tool_results;
               loop !last_node_id (rounds_remaining - 1)
           else

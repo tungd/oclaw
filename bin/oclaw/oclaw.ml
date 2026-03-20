@@ -1,4 +1,3 @@
-[@@@warning "-21"]
 module Config = Agent_core.Config
 module Log = (val Logs.src_log Logs.default : Logs.LOG)
 
@@ -63,7 +62,7 @@ let run_tui state chat_id persistent =
 
 let run_acp state chat_id persistent =
   let frontend = Acp.Stdio_frontend.create () in
-  let rec loop () =
+  let rec loop () : int =
     match Acp.Stdio_frontend.recv frontend with
     | None -> loop ()
     | Some packet ->
@@ -82,12 +81,11 @@ let run_acp state chat_id persistent =
                   Acp.Stdio_frontend.send frontend (Acp.Message.to_jsonrpc ~id (Acp.Message.Agent_message { content = response; chat_id = Some chat_id }));
                   Acp.Stdio_frontend.send frontend (Acp.Message.to_jsonrpc (Acp.Message.Done));
               | Error err ->
-                  Acp.Stdio_frontend.send frontend (Acp.Message.to_jsonrpc ~id (Acp.Message.Error { message = err; code = 0 })))
-             ; loop ()
+                  Acp.Stdio_frontend.send frontend (Acp.Message.to_jsonrpc ~id (Acp.Message.Error { message = err; code = 0 })));
+             loop ()
          | _ -> loop ())
   in
-  loop ();
-  0
+  loop ()
 
 let () =
   let options = ref (default_options ()) in

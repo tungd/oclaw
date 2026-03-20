@@ -1,12 +1,10 @@
-[@@@warning "-69"]  (* Suppress unused field warnings - fields are used in record construction *)
-
 type t = {
   state : Runtime.app_state;
   chat_id : int;
   (* The linear sequence of messages from root to current leaf *)
-  mutable active_branch : Llm_types.message list;
+  active_branch : Llm_types.message list;
   (* The ID of the current leaf node in the tree *)
-  mutable current_node_id : int option;
+  current_node_id : int option;
 }
 
 type llm_call =

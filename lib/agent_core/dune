@@ -1,11 +1,11 @@
 (rule
  (targets transcript_css.ml)
- (action (progn
-          (run ocaml-crunch -m plain -o %{targets} ./transcript_css))))
+ (deps (source_tree transcript_css))
+ (action (run ocaml-crunch -m plain -o %{targets} transcript_css)))
 
 (library
  (name agent_core)
- (modules config transcript tree memory runtime agent_engine assistant_runtime transcript_css)
+ (modules config transcript tree runtime agent_engine assistant_runtime transcript_css)
  (libraries
   llm_types
   llm_provider

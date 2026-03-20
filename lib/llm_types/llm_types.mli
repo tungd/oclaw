@@ -55,13 +55,20 @@ type messages_response = {
 }
 
 val tool_definition_to_yojson : tool_definition -> Yojson.Safe.t
+val tool_definition_of_yojson : Yojson.Safe.t -> (tool_definition, string) result
 val image_source_to_yojson : image_source -> Yojson.Safe.t
+val image_source_of_yojson : Yojson.Safe.t -> (image_source, string) result
 val content_block_to_yojson : content_block -> Yojson.Safe.t
+val content_block_of_yojson : Yojson.Safe.t -> (content_block, string) result
 val message_content_to_yojson : message_content -> Yojson.Safe.t
 val message_content_of_yojson : Yojson.Safe.t -> (message_content, string) result
 val message_to_yojson : message -> Yojson.Safe.t
 val message_of_yojson : Yojson.Safe.t -> (message, string) result
 val messages_to_yojson : message list -> Yojson.Safe.t
 val messages_of_yojson : Yojson.Safe.t -> (message list, string) result
+val usage_to_yojson : usage -> Yojson.Safe.t
+val usage_of_yojson : Yojson.Safe.t -> (usage, string) result
 val response_content_block_to_yojson : response_content_block -> Yojson.Safe.t
+val response_content_block_of_yojson : Yojson.Safe.t -> (response_content_block, string) result
 val messages_response_to_yojson : messages_response -> Yojson.Safe.t
+val messages_response_of_yojson : Yojson.Safe.t -> (messages_response, string) result

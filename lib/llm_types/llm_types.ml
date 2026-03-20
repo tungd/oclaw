@@ -1,5 +1,3 @@
-[@@@warning "-32"]  (* Suppress unused value warnings for generated serialization functions *)
-
 open Yojson.Safe
 module Json = Protocol_conv_json.Json
 

@@ -1,9 +1,5 @@
 (** Minimal CLI tools: read_file, write_file, edit_file, bash. No sandbox restrictions. *)
 
-[@@@warning "-69"]
-[@@@warning "-32"]
-[@@@warning "-27"]
-
 type error_category =
   | FileNotFound
   | PermissionDenied
@@ -93,7 +89,7 @@ let classify_error ~error_message =
     Other
 
 (** Generate a recovery hint based on error category and message *)
-let recovery_hint_for_error ~category ~error_message =
+let recovery_hint_for_error ~category ~error_message:_ =
   match category with
   | FileNotFound ->
       "Check if the file path is correct. Use `ls` or `bash` to verify the file exists. Consider creating the file if it should not exist yet."

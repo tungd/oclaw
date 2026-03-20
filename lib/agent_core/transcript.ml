@@ -1,18 +1,10 @@
 (** Tree-structured conversation storage with materialized paths. *)
-[@@@warning "-69"]
-[@@@warning "-32"]
 
 open Sqlite3
 module Json = Protocol_conv_json.Json
 
 type node_id = int
 type chat_id = int
-
-let node_id_to_yojson n = `Int n
-let node_id_of_yojson = function `Int n -> n | _ -> failwith "Expected int for node_id"
-
-let chat_id_to_yojson n = `Int n
-let chat_id_of_yojson = function `Int n -> n | _ -> failwith "Expected int for chat_id"
 
 type node_kind = UserPrompt | LLMResponse | ToolCall | ToolResult
 
@@ -67,7 +59,7 @@ let conversation_info_of_yojson = function
       { id; title; parent_chat_id; parent_node_id; timestamp }
   | _ -> failwith "Expected conversation_info object"
 
-type t = { db : Sqlite3.db; data_dir : string }
+type t = { db : Sqlite3.db }
 
 let node_kind_to_string = function
   | UserPrompt -> "user_prompt" | LLMResponse -> "llm_response"
@@ -140,7 +132,7 @@ let create ~data_dir ~runtime_dir:_ =
   let db_path = Filename.concat data_dir "transcript.db" in
   let db = Sqlite3.db_open db_path in
   init_db db;
-  { db; data_dir }
+  { db }
 
 let close t = let _ = Sqlite3.db_close t.db in ()
 

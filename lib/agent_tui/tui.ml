@@ -1,14 +1,9 @@
-[@@@warning "-37"]
-[@@@warning "-69"]
 open Mosaic
 
 type agent_event =
   | Status of string * string option
   | Delta of string
   | Message of string * int option
-  | Tool_call of string
-  | Tool_result of string * string * bool
-  | Plan of string list
   | Error of string
   | Done
   | Tick
@@ -19,7 +14,6 @@ type model = {
   status_text : string;
   streaming_text : string;
   to_agent_chan : string Domainslib.Chan.t;
-  from_agent_chan : agent_event Domainslib.Chan.t;
   spinner_index : int;
   is_thinking : bool;
 }
@@ -40,7 +34,7 @@ let rec poll_agent_events from_agent_chan dispatch =
 let init state chat_id persistent () =
   let to_agent_chan = Domainslib.Chan.make_unbounded () in
   let from_agent_chan = Domainslib.Chan.make_unbounded () in
-  
+
   let _agent_domain = Domain.spawn (fun () ->
     let rec loop () =
       let prompt = Domainslib.Chan.recv to_agent_chan in
@@ -69,7 +63,6 @@ let init state chat_id persistent () =
     status_text = "Ready";
     streaming_text = "";
     to_agent_chan;
-    from_agent_chan;
     spinner_index = 0;
     is_thinking = false;
   } in
@@ -111,21 +104,12 @@ let update msg model =
        | Delta text ->
            ({ model with streaming_text = model.streaming_text ^ text; is_thinking = false }, Cmd.None)
        | Message (text, _) ->
-           ({ model with 
+           ({ model with
               messages = model.messages @ [("Assistant", text)];
               streaming_text = "";
               status_text = "Ready";
               is_thinking = false
             }, Cmd.None)
-       | Tool_call name ->
-           ({ model with status_text = "Working: " ^ name; is_thinking = true }, Cmd.None)
-       | Tool_result (name, content, _is_error) ->
-           ({ model with
-              messages = model.messages @ [("Tool " ^ name, content)];
-            }, Cmd.None)
-       | Plan steps ->
-           let content = "Plan:\n" ^ String.concat "\n" (List.map (fun s -> "- " ^ s) steps) in
-           ({ model with messages = model.messages @ [("Assistant", content)] }, Cmd.None)
        | Error err ->
            ({ model with messages = model.messages @ [("Error", err)]; status_text = "Error"; is_thinking = false }, Cmd.None)
        | Done ->
