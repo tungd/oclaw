@@ -261,7 +261,13 @@ let normalize_root_path ~scope path =
       normalize_lossy_path candidate
   | Execute -> invalid_arg "root approvals only support read/write"
 
+let project_root_approved registry ~scope ~path =
+  match scope with
+  | Read | Write -> has_path_prefix ~root:registry.project_root ~path
+  | Execute -> false
+
 let approved registry ~scope ~path =
+  project_root_approved registry ~scope ~path ||
   let approved_paths = get_all_approved_paths registry.db scope in
   List.exists (fun root -> has_path_prefix ~root ~path) approved_paths
 
@@ -438,15 +444,18 @@ let run_command ~timeout_seconds ~command ~argv =
   let start_time = Unix.gettimeofday () in
   let read_fd, write_fd = Unix.pipe () in
   Unix.set_nonblock read_fd;
+  let stdin_fd = Unix.openfile "/dev/null" [Unix.O_RDONLY] 0 in
   let env = Unix.environment () in
   let argv = Array.of_list argv in
   let pid =
-    try Unix.create_process_env command argv env Unix.stdin write_fd write_fd
+    try Unix.create_process_env command argv env stdin_fd write_fd write_fd
     with exn ->
+      Unix.close stdin_fd;
       Unix.close read_fd;
       Unix.close write_fd;
       raise exn
   in
+  Unix.close stdin_fd;
   Unix.close write_fd;
   let buffer = Bytes.create 4096 in
   let output = Buffer.create 4096 in
@@ -659,7 +668,7 @@ let create_default_registry ~db_path ~project_root () =
   {
     db;
     pool;
-    project_root;
+    project_root = normalize_root_path ~scope:Read project_root;
     tools = [bash_tool; read_file_tool; write_file_tool; edit_file_tool];
   }
 

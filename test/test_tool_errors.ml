@@ -41,18 +41,18 @@ let test_read_file_requires_approval () =
   let file_path = Filename.concat root "note.txt" in
   write_file file_path "hello" ;
   let result = Tools.execute registry ~chat_id:1 "read_file" (`Assoc [("path", `String file_path)]) in
-  expect result.Tools.is_error "read_file should fail before approval";
-  expect (result.Tools.error_category = Some Tools.ApprovalRequired) "read_file should request approval";
-  expect (result.Tools.approval_request <> None) "approval request details should be present";
+  expect (not result.Tools.is_error) "read_file should succeed inside project_root without extra approval";
+  expect (result.Tools.content = "hello") "read_file should return file contents";
   Tools.close registry;
-  print_endline "  ✓ read_file_requires_approval"
+  print_endline "  ✓ read_file_allowed_in_project_root"
 
 let test_read_file_succeeds_after_approval () =
-  let root, registry = temp_registry () in
-  let nested = Filename.concat root "docs/note.txt" in
+  let _root, registry = temp_registry () in
+  let approved_root = temp_dir () in
+  let nested = Filename.concat approved_root "docs/note.txt" in
   write_file nested "approved read" ;
   begin
-    match Tools.approve_root registry ~scope:Tools.Read root with
+    match Tools.approve_root registry ~scope:Tools.Read approved_root with
     | Ok _ -> ()
     | Error err -> fail err
   end;
@@ -62,22 +62,35 @@ let test_read_file_succeeds_after_approval () =
   Tools.close registry;
   print_endline "  ✓ read_file_succeeds_after_approval"
 
-let test_write_requires_separate_write_approval () =
+let test_write_allowed_in_project_root () =
+  let root, registry = temp_registry () in
+  let file_path = Filename.concat root "write.txt" in
+  let result =
+    Tools.execute registry ~chat_id:1 "write_file"
+      (`Assoc [("path", `String file_path); ("content", `String "text")])
+  in
+  expect (not result.Tools.is_error) "write_file should succeed inside project_root without extra approval";
+  expect (Sys.file_exists file_path) "write_file should create the target file";
+  Tools.close registry;
+  print_endline "  ✓ write_allowed_in_project_root"
+
+let test_write_requires_separate_write_approval_outside_project_root () =
   let root, registry = temp_registry () in
   begin
     match Tools.approve_root registry ~scope:Tools.Read root with
     | Ok _ -> ()
     | Error err -> fail err
   end;
-  let file_path = Filename.concat root "write.txt" in
+  let outside_root = temp_dir () in
+  let file_path = Filename.concat outside_root "write.txt" in
   let result =
     Tools.execute registry ~chat_id:1 "write_file"
       (`Assoc [("path", `String file_path); ("content", `String "text")])
   in
-  expect result.Tools.is_error "write_file should fail without write approval";
-  expect (result.Tools.error_category = Some Tools.ApprovalRequired) "write_file should require write approval";
+  expect result.Tools.is_error "write_file should fail outside project_root without write approval";
+  expect (result.Tools.error_category = Some Tools.ApprovalRequired) "write_file should require write approval outside project_root";
   Tools.close registry;
-  print_endline "  ✓ write_requires_separate_write_approval"
+  print_endline "  ✓ write_requires_separate_write_approval_outside_project_root"
 
 let test_edit_pattern_errors_are_structured () =
   let root, registry = temp_registry () in
@@ -145,7 +158,8 @@ let () =
   print_endline "Running tool approval and error tests...";
   test_read_file_requires_approval ();
   test_read_file_succeeds_after_approval ();
-  test_write_requires_separate_write_approval ();
+  test_write_allowed_in_project_root ();
+  test_write_requires_separate_write_approval_outside_project_root ();
   test_edit_pattern_errors_are_structured ();
   test_bash_timeout_validation ();
   test_bash_requires_executable_approval ();
