@@ -41,6 +41,23 @@ let response_text response =
          | Llm.Response_tool_use _ -> None)
   |> String.concat ""
 
+(** Truncate large tool outputs for LLM context. Full content preserved in transcript. *)
+let truncate_for_llm ?(max_len=8192) output =
+  if String.length output > max_len then
+    String.sub output 0 max_len ^ Printf.sprintf "\n... (output truncated, %d bytes total - see transcript for full output)" (String.length output)
+  else output
+
+(** Truncate large content blocks in messages for LLM context. *)
+let truncate_message_content = function
+  | Llm.Text_content s -> Llm.Text_content (truncate_for_llm s)
+  | Llm.Blocks blocks ->
+      Llm.Blocks (List.map (function
+        | Llm.Text { text } -> Llm.Text { text = truncate_for_llm text }
+        | Llm.Image _ as img -> img
+        | Llm.Tool_use tu -> Llm.Tool_use tu  (* tool input isn't typically huge *)
+        | Llm.Tool_result tr -> Llm.Tool_result { tr with content = truncate_for_llm tr.content }
+      ) blocks)
+
 let assistant_blocks_of_response response =
   response.Llm.content
   |> List.filter_map (function
@@ -87,18 +104,14 @@ let tool_results_of_response state ~chat_id response =
       (* Use the shared pool from the tools registry *)
       let pool = Agent_tools.Tools.pool state.Runtime.tools in
       try
-        let results =
-          Domainslib.Task.run pool (fun _ ->
-              let futures =
-                List.map
-                  (fun tool_call ->
-                    Domainslib.Task.async pool (fun _ ->
-                        execute_tool_parallel state ~chat_id tool_call))
-                  tool_calls
-              in
-              List.map (Domainslib.Task.await pool) futures)
+        let futures =
+          List.map
+            (fun tool_call ->
+              Domainslib.Task.async pool (fun _ ->
+                  execute_tool_parallel state ~chat_id tool_call))
+            tool_calls
         in
-        results
+        List.map (Domainslib.Task.await pool) futures
       with exn ->
         Log.err (fun m -> m "Parallel tool execution infrastructure failed: %s" (Printexc.to_string exn));
         List.map (fun (id, name, input) ->
@@ -153,6 +166,8 @@ let process ?on_text_delta ?on_status state ~chat_id ?(persistent=false) prompt 
     let tool_defs = Agent_tools.Tools.definitions state.Runtime.tools in
     let rec loop current_node_id rounds_remaining =
       let messages = Transcript.get_branch state.Runtime.transcript current_node_id in
+      (* Truncate large tool outputs for LLM context - full content preserved in transcript *)
+      let messages = List.map (fun (m : Llm.message) -> { m with content = truncate_message_content m.content }) messages in
       match
         state.llm_call
           state.provider_config
