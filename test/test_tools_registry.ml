@@ -36,7 +36,10 @@ let () =
       ~skills
       ()
   in
-  let actual_tools = Agent_runtime.Tools.definitions registry |> List.map (fun tool -> tool.Llm_types.name) in
+  let actual_tools =
+    Agent_runtime.Tools.definitions registry
+    |> List.map (fun (tool : Llm_types.tool_definition) -> tool.name)
+  in
   expect (actual_tools = expected_tools) "default tool registry does not match expected surface";
   Agent_runtime.Tools.close registry;
   Agent_skills.Skills.close skills;

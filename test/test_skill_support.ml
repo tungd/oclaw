@@ -82,7 +82,10 @@ let test_activate_skill_tool_and_allowlist () =
       | Ok _ -> ()
       | Error err -> fail err
     end;
-    let tool_names = Tools.definitions registry |> List.map (fun tool -> tool.Llm_types.name) in
+    let tool_names =
+      Tools.definitions registry
+      |> List.map (fun (tool : Llm_types.tool_definition) -> tool.name)
+    in
     expect (List.mem "activate_skill" tool_names) "activate_skill tool should be exposed when skills are available";
     let result = Tools.execute registry ~chat_id:7 "activate_skill" (`Assoc [("name", `String "demo-skill")]) in
     expect (not result.Tools.is_error) "activate_skill should succeed for trusted skill";
