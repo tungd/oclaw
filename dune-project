@@ -9,6 +9,7 @@
  (depends
   (ocaml (>= 5.0))
   (dune (>= 3.15))
+  crunch
   domainslib
   sqlite3
   (h1 (>= 1.0.0))

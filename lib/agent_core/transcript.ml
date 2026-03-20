@@ -438,26 +438,9 @@ let rec render_node t node =
   ]
 
 let css_style =
-  style [txt {|
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; padding: 20px; line-height: 1.6; }
-    h1 { margin-bottom: 20px; color: #333; font-size: 24px; }
-    .tree { max-width: 1200px; margin: 0 auto; }
-    .tree-node { background: white; border-radius: 8px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); overflow: hidden; }
-    .node-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: #f8f9fa; border-bottom: 1px solid #eee; font-size: 13px; }
-    .kind-icon { font-size: 16px; }
-    .kind-label { font-weight: 600; color: #555; }
-    .model-badge { background: #e3f2fd; color: #1976d2; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 500; }
-    .timestamp { margin-left: auto; color: #999; font-size: 11px; }
-    .node-content { padding: 14px; }
-    .node-content pre { white-space: pre-wrap; word-wrap: break-word; font-family: 'SF Mono', Monaco, monospace; font-size: 13px; color: #333; max-height: 400px; overflow-y: auto; }
-    .children { padding: 0 14px 14px 14px; border-top: 1px solid #f0f0f0; margin-top: 10px; padding-top: 10px; }
-    .user-prompt .node-header { background: #e8f5e9; }
-    .llm-response .node-header { background: #e3f2fd; }
-    .tool-call .node-header { background: #fff3e0; }
-    .tool-result .node-header { background: #f3e5f5; }
-    .fork-marker .node-header { border-left: 3px solid #ffc107; }
-  |}]
+  match Transcript_css.read "transcript.css" with
+  | Some css -> style [txt css]
+  | None -> failwith "transcript.css not found in crunch data"
 
 let export_html t ~chat_id ~out_path =
   let conv = get_conversation t chat_id in
