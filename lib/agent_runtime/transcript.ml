@@ -1,7 +1,6 @@
 (** Tree-structured conversation storage with materialized paths. *)
 
 open Sqlite3
-module Json = Protocol_conv_json.Json
 
 type node_id = int
 type chat_id = int
@@ -13,13 +12,29 @@ type node_metadata = {
   tool_result_status : string option;
   fork_point : bool;
 }
-[@@deriving protocol ~driver:(module Json)]
+[@@deriving to_yojson]
 
-let node_metadata_to_yojson = node_metadata_to_json
-let node_metadata_of_yojson json =
-  match node_metadata_of_json json with
-  | Ok v -> v
-  | Error e -> failwith (Json.error_to_string_hum e)
+let node_metadata_of_yojson = function
+  | `Assoc fields ->
+      let tool_name =
+        match List.assoc_opt "tool_name" fields with
+        | Some (`String s) -> Some s
+        | Some `Null | None -> None
+        | _ -> None
+      in
+      let tool_result_status =
+        match List.assoc_opt "tool_result_status" fields with
+        | Some (`String s) -> Some s
+        | Some `Null | None -> None
+        | _ -> None
+      in
+      let fork_point =
+        match List.assoc_opt "fork_point" fields with
+        | Some (`Bool b) -> b
+        | _ -> false
+      in
+      { tool_name; tool_result_status; fork_point }
+  | _ -> failwith "Expected node_metadata object"
 
 type tree_node = {
   id : node_id;

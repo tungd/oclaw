@@ -1,5 +1,9 @@
 (** Structured LLM message and tool types for agent workflows. *)
 
+type text_block = {
+  text : string;
+}
+
 type tool_definition = {
   name : string;
   description : string;
@@ -12,19 +16,27 @@ type image_source = {
   data : string;
 }
 
+type image_block = {
+  source : image_source;
+}
+
+type tool_use_block = {
+  id : string;
+  name : string;
+  input : Yojson.Safe.t;
+}
+
+type tool_result_block = {
+  tool_use_id : string;
+  content : string;
+  is_error : bool option;
+}
+
 type content_block =
-  | Text of { text : string }
-  | Image of { source : image_source }
-  | Tool_use of {
-      id : string;
-      name : string;
-      input : Yojson.Safe.t;
-    }
-  | Tool_result of {
-      tool_use_id : string;
-      content : string;
-      is_error : bool option;
-    }
+  | Text of text_block
+  | Image of image_block
+  | Tool_use of tool_use_block
+  | Tool_result of tool_result_block
 
 type message_content =
   | Text_content of string
@@ -40,13 +52,19 @@ type usage = {
   output_tokens : int;
 }
 
+type response_text_block = {
+  text : string;
+}
+
+type response_tool_use_block = {
+  id : string;
+  name : string;
+  input : Yojson.Safe.t;
+}
+
 type response_content_block =
-  | Response_text of { text : string }
-  | Response_tool_use of {
-      id : string;
-      name : string;
-      input : Yojson.Safe.t;
-    }
+  | Response_text of response_text_block
+  | Response_tool_use of response_tool_use_block
 
 type messages_response = {
   content : response_content_block list;

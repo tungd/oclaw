@@ -1,5 +1,4 @@
 (library
  (name llm_provider)
  (modules llm_provider retry)
- (libraries h1 httpkit llm_types curl iomux yojson logs ppx_protocol_conv_json str)
- (preprocess (pps ppx_protocol_conv)))
+ (libraries h1 httpkit llm_types curl iomux yojson logs str))

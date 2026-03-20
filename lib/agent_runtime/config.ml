@@ -7,7 +7,6 @@
 *)
 
 module Yaml_lib = Yaml
-module Yaml = Protocol_conv_yaml.Yaml
 
 (* ============================================================================
    Configuration Type
@@ -34,7 +33,7 @@ type config = {
   api_retry_base_delay_ms : int;
   api_retry_max_delay_ms : int;
 }
-[@@deriving protocol ~driver:(module Yaml)]
+[@@deriving yaml]
 
 (* ============================================================================
    Hardcoded Constants

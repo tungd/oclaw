@@ -10,15 +10,14 @@
  (libraries
   agent_skills
   httpkit
-  sqlite3
+ sqlite3
   unix
   logs
   yojson
   tyxml
-  ppx_protocol_conv_json
- ppx_protocol_conv_yaml
+  ppx_deriving_yojson.runtime
   yaml
   domainslib
   llm_types
   llm_provider)
- (preprocess (pps ppx_protocol_conv)))
+ (preprocess (pps ppx_deriving_yojson ppx_deriving_yaml)))

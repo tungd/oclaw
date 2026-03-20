@@ -14,13 +14,9 @@
 
 (** Retry configuration *)
 type retry_config = {
-  (** Maximum number of retry attempts *)
   max_retries : int;
-  (** Base delay in milliseconds for exponential backoff *)
   base_delay_ms : int;
-  (** Maximum delay cap in milliseconds *)
   max_delay_ms : int;
-  (** Exponential base (2.0 = double delay each attempt) *)
   exponential_base : float;
 }
 
@@ -32,8 +28,8 @@ type retry_error = {
 
 (** Result of a retry operation *)
 type 'a retry_result =
-  | Success of 'a  (** Request succeeded *)
-  | Failed of retry_error * int  (** Failed with error details and attempt count *)
+  | Success of 'a
+  | Failed of retry_error * int
 
 (** Default retry configuration: 3 retries, 1s base delay, 30s max *)
 val default_config : retry_config

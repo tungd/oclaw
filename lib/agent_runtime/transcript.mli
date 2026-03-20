@@ -1,7 +1,5 @@
 (** Tree-structured conversation storage with materialized paths. *)
 
-module Json = Protocol_conv_json.Json
-
 type node_id = int
 type chat_id = int
 
@@ -16,7 +14,7 @@ type node_metadata = {
   tool_result_status : string option;
   fork_point : bool;
 }
-[@@deriving protocol ~driver:(module Json)]
+[@@deriving to_yojson]
 
 type tree_node = private {
   id : node_id;
