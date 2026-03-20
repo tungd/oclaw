@@ -16,6 +16,7 @@ val failure : ?status_code:int -> ?duration_ms:int -> ?error_type:string -> stri
 
 val create_default_registry : unit -> t
 val close : t -> unit
+val pool : t -> Domainslib.Task.pool
 
 val definitions : t -> Llm_types.tool_definition list
 val execute : t -> chat_id:int -> string -> Yojson.Safe.t -> tool_result

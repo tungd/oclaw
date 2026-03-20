@@ -28,6 +28,8 @@ type t = {
 let close registry =
   Domainslib.Task.teardown_pool registry.pool
 
+let pool registry = registry.pool
+
 let success ?status_code ?duration_ms ?error_type content =
   { content; is_error = false; status_code; bytes = String.length content; duration_ms; error_type }
 
@@ -79,59 +81,58 @@ let json_assoc_or_empty = function | `Assoc fields -> `Assoc fields | _ -> `Asso
 let truncate_output output =
   if String.length output > 4096 then String.sub output 0 4096 ^ "\n... (output truncated)" else output
 
-let run_command ~pool:_ ~timeout_seconds command =
+let run_command ~pool ~timeout_seconds command =
   let start_time = Unix.gettimeofday () in
   let deadline = start_time +. float_of_int timeout_seconds in
   
-  (* Use open_process_in which is domain-safe *)
-  let cmd = Printf.sprintf "%s 2>&1" command in
-  let ic = Unix.open_process_in cmd in
-  let fd = Unix.descr_of_in_channel ic in
-  
-  (* Create iomux poller for this operation - it's lightweight, no cleanup needed *)
-  let poller = Iomux.Poll.create ~maxfds:1 () in
-  Iomux.Poll.set_index poller 0 fd Iomux.Poll.Flags.(pollin + pollpri);
-  
-  (* Read output using iomux for timeout-aware reading *)
-  let output = Buffer.create 4096 in
-  let timed_out = ref false in
-  
-  (* Read loop with timeout *)
-  begin
-    try
-      while not !timed_out do
-        let remaining_ms = int_of_float ((deadline -. Unix.gettimeofday ()) *. 1000.0) in
-        if remaining_ms <= 0 then
-          timed_out := true
-        else
-          (* Poll with timeout *)
-          let timeout : Iomux.Poll.poll_timeout = Iomux.Poll.Milliseconds (max 0 remaining_ms) in
-          let nready = Iomux.Poll.poll poller 1 timeout in
-          if nready = 0 then
-            (* No events - check if we've exceeded deadline *)
-            if Unix.gettimeofday () >= deadline then
-              timed_out := true
+  (* Run the command asynchronously in a domain using the pool *)
+  let future = Domainslib.Task.async pool (fun _ ->
+    (* Use open_process_in which is domain-safe *)
+    let cmd = Printf.sprintf "%s 2>&1" command in
+    let ic = Unix.open_process_in cmd in
+    let fd = Unix.descr_of_in_channel ic in
+    
+    (* Create iomux poller for timeout-aware reading *)
+    let poller = Iomux.Poll.create ~maxfds:1 () in
+    Iomux.Poll.set_index poller 0 fd Iomux.Poll.Flags.(pollin + pollpri);
+    
+    (* Read output with timeout polling *)
+    let output = Buffer.create 4096 in
+    let timed_out = ref false in
+    
+    begin
+      try
+        while not !timed_out do
+          let remaining_ms = int_of_float ((deadline -. Unix.gettimeofday ()) *. 1000.0) in
+          if remaining_ms <= 0 then
+            timed_out := true
           else
-            (* Data available, read one line *)
-            let line = input_line ic in
-            Buffer.add_string output line;
-            Buffer.add_char output '\n'
-      done
-    with End_of_file ->
-      (* Process finished *)
-      ()
-  end;
+            let timeout : Iomux.Poll.poll_timeout = Iomux.Poll.Milliseconds (max 0 remaining_ms) in
+            let nready = Iomux.Poll.poll poller 1 timeout in
+            if nready = 0 then
+              if Unix.gettimeofday () >= deadline then timed_out := true
+            else
+              let line = input_line ic in
+              Buffer.add_string output line;
+              Buffer.add_char output '\n'
+        done
+      with End_of_file ->
+        ()
+    end;
+    
+    let status = Unix.close_process_in ic in
+    let end_time = Unix.gettimeofday () in
+    let duration_ms = int_of_float ((end_time -. start_time) *. 1000.0) in
+    let exit_code = match status with Unix.WEXITED c -> c | _ -> -1 in
+    
+    if !timed_out then
+      Error (Printf.sprintf "Command timed out after %d seconds" timeout_seconds)
+    else
+      Ok (Buffer.contents output, exit_code, duration_ms)
+  ) in
   
-  (* Get exit status *)
-  let status = Unix.close_process_in ic in
-  let end_time = Unix.gettimeofday () in
-  let duration_ms = int_of_float ((end_time -. start_time) *. 1000.0) in
-  let exit_code = match status with Unix.WEXITED c -> c | _ -> -1 in
-  
-  if !timed_out then
-    Error (Printf.sprintf "Command timed out after %d seconds" timeout_seconds)
-  else
-    Ok (Buffer.contents output, exit_code, duration_ms)
+  (* Await the result *)
+  Domainslib.Task.await pool future
 
 let bash_tool =
   {

@@ -90,8 +90,8 @@ let tool_results_of_response state ~chat_id response =
         (id, result)
       ) tool_calls
     else
-      let num_workers = get_num_worker_domains () in
-      let pool = Domainslib.Task.setup_pool ~num_domains:num_workers () in
+      (* Use the shared pool from the tools registry *)
+      let pool = Agent_tools.Tools.pool state.Runtime.tools in
       try
         let results =
           Domainslib.Task.run pool (fun _ ->
@@ -104,11 +104,9 @@ let tool_results_of_response state ~chat_id response =
               in
               List.map (Domainslib.Task.await pool) futures)
         in
-        Domainslib.Task.teardown_pool pool;
         results
       with exn ->
         Log.err (fun m -> m "Parallel tool execution infrastructure failed: %s" (Printexc.to_string exn));
-        Domainslib.Task.teardown_pool pool;
         List.map (fun (id, name, input) ->
           let result : Agent_tools.Tools.tool_result =
             try
