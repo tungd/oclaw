@@ -3,7 +3,10 @@ type layout = {
   project_root : string;
   agents_dir : string;
   db_path : string;
-  skills_dir : string;
+  project_skills_dir : string;
+  user_agents_dir : string;
+  user_skills_dir : string;
+  catalog_cache_path : string;
 }
 
 let is_directory path =
@@ -20,6 +23,14 @@ let ensure_dir path =
     )
   in
   mkdir_p path
+
+let can_prepare_dir path =
+  try
+    ensure_dir path;
+    true
+  with
+  | Unix.Unix_error _ -> false
+  | Sys_error _ -> false
 
 let normalize_dir path =
   let absolute =
@@ -50,6 +61,7 @@ let find_existing_agents_root ~start_dir =
 
 let discover ?start_dir () =
   let start_dir = normalize_dir (Option.value ~default:(Sys.getcwd ()) start_dir) in
+  let home = normalize_dir (Sys.getenv "HOME") in
   let project_root =
     match find_existing_agents_root ~start_dir with
     | Some root -> root
@@ -57,12 +69,27 @@ let discover ?start_dir () =
   in
   let agents_dir = Filename.concat project_root ".agents" in
   ensure_dir agents_dir;
-  let skills_dir = Filename.concat agents_dir "skills" in
-  ensure_dir skills_dir;
+  let project_skills_dir = Filename.concat agents_dir "skills" in
+  ensure_dir project_skills_dir;
+  let preferred_user_agents_dir = Filename.concat home ".oclaw" in
+  let preferred_user_skills_dir = Filename.concat preferred_user_agents_dir "skills" in
+  let fallback_user_agents_dir = Filename.concat agents_dir "user" in
+  let user_agents_dir =
+    if can_prepare_dir preferred_user_skills_dir then preferred_user_agents_dir
+    else (
+      ensure_dir fallback_user_agents_dir;
+      fallback_user_agents_dir
+    )
+  in
+  let user_skills_dir = Filename.concat user_agents_dir "skills" in
+  ensure_dir user_skills_dir;
   {
     start_dir;
     project_root;
     agents_dir;
     db_path = Filename.concat agents_dir "oclaw.db";
-    skills_dir;
+    project_skills_dir;
+    user_agents_dir;
+    user_skills_dir;
+    catalog_cache_path = Filename.concat user_agents_dir "skills-catalog.json";
   }

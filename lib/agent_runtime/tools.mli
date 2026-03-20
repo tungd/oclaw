@@ -17,6 +17,7 @@ type approval_scope =
   | Read
   | Write
   | Execute
+  | Install
 
 type approval_request = {
   scope : approval_scope;
@@ -46,6 +47,7 @@ val recovery_hint_for_error : category:error_category -> error_message:string ->
 val create_default_registry :
   db_path:string ->
   project_root:string ->
+  skills:Agent_skills.Skills.t ->
   unit ->
   t
 
@@ -55,6 +57,8 @@ val project_root : t -> string
 
 val definitions : t -> Llm_types.tool_definition list
 val execute : t -> chat_id:int -> string -> Yojson.Safe.t -> tool_result
+val activate_skill : t -> chat_id:int -> string -> tool_result
 
 val approve_executable : t -> string -> (string, string) result
 val approve_root : t -> scope:approval_scope -> string -> (string, string) result
+val approve_install : t -> string -> (string, string) result

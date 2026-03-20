@@ -17,6 +17,7 @@ type approval_scope =
   | Read
   | Write
   | Execute
+  | Install
 
 type approval_request = {
   scope : approval_scope;
@@ -41,6 +42,7 @@ type t = {
   pool : Domainslib.Task.pool;
   db : Sqlite3.db;
   project_root : string;
+  skills : Agent_skills.Skills.t;
 }
 
 and tool_exec_fn = registry:t -> chat_id:int -> Yojson.Safe.t -> tool_result
@@ -71,11 +73,13 @@ let approval_scope_to_string = function
   | Read -> "read"
   | Write -> "write"
   | Execute -> "exec"
+  | Install -> "install"
 
 let approval_scope_label = function
   | Read -> "read root"
   | Write -> "write root"
   | Execute -> "executable"
+  | Install -> "skill install"
 
 let classify_error ~error_message =
   if String.starts_with ~prefix:"Invalid parameters:" error_message then InvalidParameters
@@ -111,7 +115,7 @@ let recovery_hint_for_error ~category ~error_message:_ =
   | InvalidParameters ->
       "Review the tool arguments and provide valid values."
   | ApprovalRequired ->
-      "Approve the requested executable or root path, then retry the tool call."
+      "Approve the requested executable, root path, or install target, then retry the tool call."
   | Other ->
       "Inspect the error details and retry with corrected inputs."
 
@@ -246,7 +250,7 @@ let normalize_lossy_path path =
 
 let scope_for_root_approval = function
   | Read | Write as scope -> scope
-  | Execute -> invalid_arg "root approvals only support read/write"
+  | Execute | Install -> invalid_arg "root approvals only support read/write"
 
 let normalize_root_path ~scope path =
   let normalized = normalize_lossy_path path in
@@ -259,17 +263,20 @@ let normalize_root_path ~scope path =
           normalized
       in
       normalize_lossy_path candidate
-  | Execute -> invalid_arg "root approvals only support read/write"
+  | Execute | Install -> invalid_arg "root approvals only support read/write"
 
 let project_root_approved registry ~scope ~path =
   match scope with
   | Read | Write -> has_path_prefix ~root:registry.project_root ~path
-  | Execute -> false
+  | Execute | Install -> false
 
 let approved registry ~scope ~path =
   project_root_approved registry ~scope ~path ||
   let approved_paths = get_all_approved_paths registry.db scope in
-  List.exists (fun root -> has_path_prefix ~root ~path) approved_paths
+  match scope with
+  | Install -> List.exists (fun value -> String.equal value path) approved_paths
+  | Read | Write | Execute ->
+      List.exists (fun root -> has_path_prefix ~root ~path) approved_paths
 
 let insert_approval registry ~scope ~path =
   exec_ignore registry.db
@@ -279,6 +286,15 @@ let insert_approval registry ~scope ~path =
       let _ = Sqlite3.bind_text stmt 2 path in
       let _ = Sqlite3.bind_double stmt 3 (Unix.gettimeofday ()) in
       ())
+
+let approve_root_internal registry ~scope path =
+  let scope = scope_for_root_approval scope in
+  let normalized = normalize_root_path ~scope path in
+  insert_approval registry ~scope ~path:normalized;
+  normalized
+
+let approve_install_internal registry name =
+  insert_approval registry ~scope:Install ~path:name
 
 let resolve_executable_path command_name =
   let is_executable path =
@@ -297,6 +313,13 @@ let resolve_executable_path command_name =
     match List.find_opt (fun dir -> is_executable (Filename.concat dir command_name)) entries with
     | Some dir -> Ok (Filename.concat dir command_name)
     | None -> Error (Printf.sprintf "Command not found: %s" command_name)
+
+let approve_executable_internal registry executable =
+  match resolve_executable_path executable with
+  | Error err -> Error err
+  | Ok resolved ->
+      insert_approval registry ~scope:Execute ~path:resolved;
+      Ok resolved
 
 let tokenize_command command =
   let len = String.length command in
@@ -350,6 +373,20 @@ let tokenize_command command =
           end
   in
   parse (skip_spaces 0) [] None
+
+let string_contains_ci haystack needle =
+  let haystack = String.lowercase_ascii haystack in
+  let needle = String.lowercase_ascii needle in
+  let hay_len = String.length haystack in
+  let needle_len = String.length needle in
+  if needle_len = 0 then true
+  else
+    let rec loop idx =
+      if idx > hay_len - needle_len then false
+      else if String.sub haystack idx needle_len = needle then true
+      else loop (idx + 1)
+    in
+    loop 0
 
 let unix_error_result ~op ~path = function
   | Unix.Unix_error (Unix.ENOENT, _, _) ->
@@ -533,6 +570,141 @@ let request_for_executable path =
     reason = "Executable access is not yet approved.";
   }
 
+let request_for_install name =
+  {
+    scope = Install;
+    target = name;
+    reason = "Installing this skill is not yet approved.";
+  }
+
+let skill_list_tool =
+  make_tool "skill_list" "List discoverable skills with scope and trust status."
+    []
+    (fun ~registry ~chat_id:_ _args ->
+      success ~status_code:200 (Agent_skills.Skills.list_skills_formatted ~include_untrusted:true registry.skills))
+
+let skill_search_tool =
+  make_tool "skill_search" "Search installed skills and the official remote catalog."
+    [
+      ("query", `Assoc [("type", `String "string"); ("description", `String "Search text for skill name or description")]);
+    ]
+    (fun ~registry ~chat_id:_ args ->
+      match required_string_arg (json_assoc_or_empty args) "query" with
+      | Error err -> failure ~error_category:InvalidParameters err
+      | Ok query ->
+          let all_local : Agent_skills.Skills.skill_metadata list =
+            Agent_skills.Skills.discover_skills ~include_untrusted:true registry.skills
+          in
+          let local : Agent_skills.Skills.skill_metadata list =
+            List.filter
+              (fun (skill : Agent_skills.Skills.skill_metadata) ->
+                string_contains_ci skill.Agent_skills.Skills.name query
+                || string_contains_ci skill.description query)
+              all_local
+          in
+          match Agent_skills.Skills.search_remote_catalog registry.skills ~query with
+          | Error err -> failure ~error_category:Other err
+          | Ok remote ->
+              let local_lines =
+                local
+                |> List.map (fun (skill : Agent_skills.Skills.skill_metadata) ->
+                       Printf.sprintf "- %s (installed, %s, %s): %s"
+                         skill.name
+                         (match skill.scope with
+                          | Agent_skills.Skills.Builtin -> "builtin"
+                          | Agent_skills.Skills.User -> "user"
+                          | Agent_skills.Skills.Project -> "project")
+                         (if skill.trusted then "trusted" else "untrusted")
+                         skill.description)
+              in
+              let remote_lines =
+                remote
+                |> List.map (fun (skill : Agent_skills.Skills.remote_skill) ->
+                       Printf.sprintf "- %s (remote %s@%s): %s"
+                         skill.name
+                         skill.repo
+                         skill.git_ref
+                         skill.description)
+              in
+              let blocks =
+                (if local_lines = [] then [] else ["Local matches:\n" ^ String.concat "\n" local_lines])
+                @ (if remote_lines = [] then [] else ["Remote matches:\n" ^ String.concat "\n" remote_lines])
+              in
+              if blocks = [] then success ~status_code:200 "No matching skills found."
+              else success ~status_code:200 (String.concat "\n\n" blocks))
+
+let skill_install_tool =
+  make_tool "skill_install" "Install a skill from the official remote catalog. Approval is required."
+    [
+      ("name", `Assoc [("type", `String "string"); ("description", `String "Skill name to install")]);
+    ]
+    (fun ~registry ~chat_id:_ args ->
+      match required_string_arg (json_assoc_or_empty args) "name" with
+      | Error err -> failure ~error_category:InvalidParameters err
+      | Ok name ->
+          if not (approved registry ~scope:Install ~path:name) then
+            let request = request_for_install name in
+            approval_required request (approval_message request)
+          else
+            match Agent_skills.Skills.install_remote_skill registry.skills ~name with
+            | Ok message -> success ~status_code:200 message
+            | Error err -> failure ~error_category:Other err)
+
+let activate_skill registry ~chat_id name =
+  match Agent_skills.Skills.activate_skill registry.skills ~chat_id name with
+  | Error err -> failure ~error_category:Other err
+  | Ok activation ->
+      let allowlist_notes =
+        activation.allowed_tools
+        |> List.filter_map (function
+               | Agent_skills.Skills.Allowed_read ->
+                   let _ = approve_root_internal registry ~scope:Read activation.skill_dir in
+                   None
+               | Agent_skills.Skills.Allowed_write ->
+                   let _ = approve_root_internal registry ~scope:Write activation.skill_dir in
+                   None
+               | Agent_skills.Skills.Allowed_bash command ->
+                   Some (
+                     match approve_executable_internal registry command with
+                     | Ok _ -> Printf.sprintf "Pre-approved executable from allowed-tools: %s" command
+                     | Error _ -> Printf.sprintf "Unsupported or unavailable allowed-tools executable: %s" command)
+               | Agent_skills.Skills.Allowed_other raw ->
+                   Some (Printf.sprintf "Unsupported allowed-tools entry: %s" raw))
+      in
+      let dedupe_note =
+        if activation.already_activated then
+          "\n\nSkill already activated in this chat; returning existing instructions without re-approving."
+        else ""
+      in
+      let allowlist_block =
+        if allowlist_notes = [] then ""
+        else "\n\n" ^ String.concat "\n" allowlist_notes
+      in
+      success ~status_code:200 (activation.content ^ allowlist_block ^ dedupe_note)
+
+let activate_skill_tool registry =
+  let names = Agent_skills.Skills.available_skill_names registry.skills in
+  {
+    definition = {
+      Llm_types.name = "activate_skill";
+      description = "Activate a trusted skill and load its instructions into context.";
+      input_schema = `Assoc [
+        ("type", `String "object");
+        ("properties", `Assoc [
+          ("name", `Assoc [
+            ("type", `String "string");
+            ("enum", `List (List.map (fun name -> `String name) names));
+          ]);
+        ]);
+        ("required", `List [`String "name"]);
+      ];
+    };
+    execute = (fun ~registry ~chat_id args ->
+      match required_string_arg (json_assoc_or_empty args) "name" with
+      | Error err -> failure ~error_category:InvalidParameters err
+      | Ok name -> activate_skill registry ~chat_id name);
+  }
+
 let read_file_tool =
   make_tool "read_file" "Read the contents of a file."
     [
@@ -661,7 +833,7 @@ let bash_tool =
           end);
   }
 
-let create_default_registry ~db_path ~project_root () =
+let create_default_registry ~db_path ~project_root ~skills () =
   let db = Sqlite3.db_open db_path in
   init_db db;
   let pool = Domainslib.Task.setup_pool ~num_domains:2 () in
@@ -669,14 +841,21 @@ let create_default_registry ~db_path ~project_root () =
     db;
     pool;
     project_root = normalize_root_path ~scope:Read project_root;
-    tools = [bash_tool; read_file_tool; write_file_tool; edit_file_tool];
+    skills;
+    tools = [bash_tool; read_file_tool; write_file_tool; edit_file_tool; skill_list_tool; skill_search_tool; skill_install_tool];
   }
 
 let definitions registry =
-  List.map (fun t -> t.definition) registry.tools
+  let defs = List.map (fun t -> t.definition) registry.tools in
+  let skill_names = Agent_skills.Skills.available_skill_names registry.skills in
+  if skill_names = [] then defs else defs @ [ (activate_skill_tool registry).definition ]
 
 let execute registry ~chat_id name input =
-  match List.find_opt (fun tool -> tool.definition.Llm_types.name = name) registry.tools with
+  let tool_opt =
+    if String.equal name "activate_skill" then Some (activate_skill_tool registry)
+    else List.find_opt (fun tool -> tool.definition.Llm_types.name = name) registry.tools
+  in
+  match tool_opt with
   | None -> failure ("Tool not found: " ^ name)
   | Some tool ->
       begin
@@ -687,14 +866,15 @@ let execute registry ~chat_id name input =
       end
 
 let approve_executable registry executable =
-  match resolve_executable_path executable with
+  match approve_executable_internal registry executable with
   | Error err -> Error err
-  | Ok resolved ->
-      insert_approval registry ~scope:Execute ~path:resolved;
-      Ok (Printf.sprintf "Approved executable: %s" resolved)
+  | Ok resolved -> Ok (Printf.sprintf "Approved executable: %s" resolved)
 
 let approve_root registry ~scope path =
   let scope = scope_for_root_approval scope in
-  let normalized = normalize_root_path ~scope path in
-  insert_approval registry ~scope ~path:normalized;
+  let normalized = approve_root_internal registry ~scope path in
   Ok (Printf.sprintf "Approved %s: %s" (approval_scope_label scope) normalized)
+
+let approve_install registry name =
+  approve_install_internal registry name;
+  Ok (Printf.sprintf "Approved %s: %s" (approval_scope_label Install) name)

@@ -45,7 +45,7 @@ let tool_response name args =
 
 let make_config data_dir =
   {
-    Agent_core.Config.default_config with
+    Agent_runtime.Config.default_config with
     llm_api_key = "test-key";
     llm_api_base = "http://example.invalid";
     llm_model = "test-model";
@@ -54,7 +54,7 @@ let make_config data_dir =
   }
 
 let create_state ?llm_call data_dir =
-  match Agent_core.Runtime.create_app_state ?llm_call (make_config data_dir) with
+  match Agent_runtime.App.create ?llm_call (make_config data_dir) with
   | Ok state -> state
   | Error err -> fail err
 
@@ -82,7 +82,7 @@ let test_persistent_session () =
   in
   let state1 = create_state ~llm_call:first_llm data_dir in
   begin
-    match Agent_core.Agent_engine.process state1 ~chat_id:7 "first prompt" with
+    match Agent_runtime.Session.process state1 ~chat_id:7 "first prompt" with
     | Ok "first answer" -> ()
     | Ok other -> fail ("unexpected first reply: " ^ other)
     | Error err -> fail err
@@ -96,7 +96,7 @@ let test_persistent_session () =
   in
   let state2 = create_state ~llm_call:second_llm data_dir in
   begin
-    match Agent_core.Agent_engine.process ~persistent:true state2 ~chat_id:7 "second prompt" with
+    match Agent_runtime.Session.process ~persistent:true state2 ~chat_id:7 "second prompt" with
     | Ok "second answer" -> ()
     | Ok other -> fail ("unexpected second reply: " ^ other)
     | Error err -> fail err
@@ -108,14 +108,14 @@ let test_session_isolation () =
     text_response "chat one answer"
   in
   let state1 = create_state ~llm_call:first_llm data_dir in
-  ignore (Agent_core.Agent_engine.process state1 ~chat_id:1 "chat one prompt");
+  ignore (Agent_runtime.Session.process state1 ~chat_id:1 "chat one prompt");
   let second_llm _provider ?on_text_delta:_ ~system_prompt:_ messages ~tools:_ =
     let contents = text_messages messages in
     expect (not (List.mem "chat one prompt" contents)) "chat history leaked across chat ids";
     text_response "chat two answer"
   in
   let state2 = create_state ~llm_call:second_llm data_dir in
-  ignore (Agent_core.Agent_engine.process state2 ~chat_id:2 "chat two prompt")
+  ignore (Agent_runtime.Session.process state2 ~chat_id:2 "chat two prompt")
 
 let test_tool_loop_and_resume () =
   let data_dir = temp_dir () in
@@ -133,12 +133,12 @@ let test_tool_loop_and_resume () =
   in
   let state = create_state ~llm_call:llm data_dir in
   begin
-    match Agent_tools.Tools.approve_root state.Agent_core.Runtime.tools ~scope:Agent_tools.Tools.Read data_dir with
+    match Agent_runtime.Session.approve_read state data_dir with
     | Ok _ -> ()
     | Error err -> fail err
   end;
   begin
-    match Agent_core.Agent_engine.process state ~chat_id:3 "read the note" with
+    match Agent_runtime.Session.process state ~chat_id:3 "read the note" with
     | Ok "done" -> ()
     | Ok other -> fail ("unexpected tool loop reply: " ^ other)
     | Error err -> fail err
@@ -151,7 +151,7 @@ let test_tool_loop_and_resume () =
   in
   let state2 = create_state ~llm_call:resumed data_dir in
   begin
-    match Agent_core.Agent_engine.process ~persistent:true state2 ~chat_id:3 "follow up" with
+    match Agent_runtime.Session.process ~persistent:true state2 ~chat_id:3 "follow up" with
     | Ok "second turn" -> ()
     | Ok other -> fail ("unexpected resumed reply: " ^ other)
     | Error err -> fail err
@@ -165,10 +165,10 @@ let test_project_root_db_and_approval_command () =
   Unix.mkdir (Filename.concat root "src") 0o755;
   Unix.mkdir nested 0o755;
   let state = create_state nested in
-  expect (state.Agent_core.Runtime.project_root = normalized_root) "runtime should reuse ancestor .agents directory";
-  expect (state.Agent_core.Runtime.db_path = Filename.concat normalized_root ".agents/oclaw.db") "runtime should place db in .agents/oclaw.db";
+  expect (Agent_runtime.App.project_root state = normalized_root) "runtime should reuse ancestor .agents directory";
+  expect (Agent_runtime.App.db_path state = Filename.concat normalized_root ".agents/oclaw.db") "runtime should place db in .agents/oclaw.db";
   begin
-    match Agent_core.Agent_engine.process ~persistent:true state ~chat_id:9 ("/approve read " ^ nested) with
+    match Agent_runtime.Session.process ~persistent:true state ~chat_id:9 ("/approve read " ^ nested) with
     | Ok response ->
         expect (String.length response > 0) "approval command should return a response"
     | Error err -> fail err
@@ -189,7 +189,7 @@ let test_project_root_db_and_approval_command () =
   in
   let state3 = create_state ~llm_call:llm nested in
   begin
-    match Agent_core.Agent_engine.process state3 ~chat_id:9 "read approved file" with
+    match Agent_runtime.Session.process state3 ~chat_id:9 "read approved file" with
     | Ok reply -> expect (reply = "done") "tool call should succeed after persisted approval"
     | Error err -> fail err
   end

@@ -51,7 +51,7 @@ let init state chat_id persistent () =
       let on_status status =
         dispatch (Agent_event (Status (status, None)))
       in
-      match Agent_core.Agent_engine.process ~on_text_delta ~on_status state ~chat_id ~persistent prompt with
+      match Agent_runtime.Session.process ~on_text_delta ~on_status state ~chat_id ~persistent prompt with
       | Ok response ->
           dispatch (Agent_event (Message (response, Some chat_id)));
           dispatch (Agent_event Done);

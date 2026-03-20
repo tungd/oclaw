@@ -2,9 +2,7 @@
  (public_name oclaw)
  (name oclaw)
  (libraries
-  agent_core
-  agent_tools
-  agent_skills
+  agent_runtime
   agent_tui
   acp
   logs

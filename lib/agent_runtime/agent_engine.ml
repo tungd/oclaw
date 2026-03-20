@@ -32,7 +32,7 @@ let build_system_prompt state ~chat_id:_ =
       if String.trim skills_catalog = "" then
         default_system_prompt
       else
-        default_system_prompt ^ "\n\n# Skills\n\nThe following skills are available. Use `activate_skill` before following a skill-specific workflow.\n\n" ^ skills_catalog
+        default_system_prompt ^ "\n\n# Skills\n\nThe following skills are available. Use `activate_skill` before following a skill-specific workflow. Users can also explicitly activate a skill with `/skill <name>` or `$skill-name`.\n\n" ^ skills_catalog
 
 let response_text response =
   response.Llm.content
@@ -75,11 +75,15 @@ let make_text_response state ~parent_id text =
   ignore (Transcript.add_llm_response state.Runtime.transcript ~parent_id ~model ~content:assistant_message_content ());
   Ok final_text
 
+let activate_skill_response state ~chat_id ~parent_id name =
+  let result = Tools.activate_skill state.Runtime.tools ~chat_id name in
+  make_text_response state ~parent_id result.Tools.content
+
 let maybe_handle_approval_command state ~chat_id ?parent_id prompt =
   if not (String.starts_with ~prefix:"/approve " prompt) then
     None
   else
-    let usage = "Usage: /approve <exec|read|write> <path>" in
+    let usage = "Usage: /approve <exec|read|write|install> <path-or-name>" in
     let rest = String.trim (String.sub prompt 9 (String.length prompt - 9)) in
     let scope, target =
       match String.index_opt rest ' ' with
@@ -92,9 +96,10 @@ let maybe_handle_approval_command state ~chat_id ?parent_id prompt =
         Error usage
       else
         match scope with
-        | "exec" -> Agent_tools.Tools.approve_executable state.Runtime.tools target
-        | "read" -> Agent_tools.Tools.approve_root state.Runtime.tools ~scope:Agent_tools.Tools.Read target
-        | "write" -> Agent_tools.Tools.approve_root state.Runtime.tools ~scope:Agent_tools.Tools.Write target
+        | "exec" -> Tools.approve_executable state.Runtime.tools target
+        | "read" -> Tools.approve_root state.Runtime.tools ~scope:Tools.Read target
+        | "write" -> Tools.approve_root state.Runtime.tools ~scope:Tools.Write target
+        | "install" -> Tools.approve_install state.Runtime.tools target
         | _ -> Error usage
     in
     let prompt_node_id =
@@ -109,14 +114,35 @@ let maybe_handle_approval_command state ~chat_id ?parent_id prompt =
     in
     Some (make_text_response state ~parent_id:prompt_node_id text)
 
+let maybe_handle_skill_command state ~chat_id ?parent_id prompt =
+  let trimmed = String.trim prompt in
+  let skill_name =
+    if String.starts_with ~prefix:"/skill " trimmed then
+      Some (String.trim (String.sub trimmed 7 (String.length trimmed - 7)))
+    else if String.length trimmed > 1 && String.unsafe_get trimmed 0 = '$' then
+      Some (String.trim (String.sub trimmed 1 (String.length trimmed - 1)))
+    else
+      None
+  in
+  match skill_name with
+  | None -> None
+  | Some "" -> Some (Error "Usage: /skill <name>")
+  | Some name ->
+      let prompt_node_id =
+        match parent_id with
+        | Some pid -> Transcript.add_user_prompt state.Runtime.transcript ~chat_id ~parent_id:pid ~content:prompt ()
+        | None -> Transcript.add_user_prompt state.Runtime.transcript ~chat_id ~content:prompt ()
+      in
+      Some (activate_skill_response state ~chat_id ~parent_id:prompt_node_id name)
+
 let execute_tool_parallel state ~chat_id (id, name, input) =
-  let result : Agent_tools.Tools.tool_result =
+  let result : Tools.tool_result =
     try
-      Agent_tools.Tools.execute state.Runtime.tools ~chat_id name input
+      Tools.execute state.Runtime.tools ~chat_id name input
     with exn ->
       Log.err (fun m -> m "Tool %s execution failed: %s" name (Printexc.to_string exn));
       let msg = "Tool execution exception: " ^ Printexc.to_string exn in
-      Agent_tools.Tools.failure ~error_type:"exception" ~error_category:Agent_tools.Tools.Other msg
+      Tools.failure ~error_type:"exception" ~error_category:Tools.Other msg
   in
   (id, result)
 
@@ -128,22 +154,22 @@ let tool_results_of_response state ~chat_id response =
            | Llm.Response_text _ -> None)
   in
   
-  let tool_results : (string * Agent_tools.Tools.tool_result) list =
+  let tool_results : (string * Tools.tool_result) list =
     if List.length tool_calls <= 1 then
       List.map (fun (id, name, input) ->
-        let result : Agent_tools.Tools.tool_result =
+        let result : Tools.tool_result =
           try
-            Agent_tools.Tools.execute state.Runtime.tools ~chat_id name input
+            Tools.execute state.Runtime.tools ~chat_id name input
           with exn ->
             Log.err (fun m -> m "Tool %s execution failed: %s" name (Printexc.to_string exn));
             let msg = "Tool execution exception: " ^ Printexc.to_string exn in
-            Agent_tools.Tools.failure ~error_type:"exception" ~error_category:Agent_tools.Tools.Other msg
+            Tools.failure ~error_type:"exception" ~error_category:Tools.Other msg
         in
         (id, result)
       ) tool_calls
     else
       (* Use the shared pool from the tools registry *)
-      let pool = Agent_tools.Tools.pool state.Runtime.tools in
+      let pool = Tools.pool state.Runtime.tools in
       try
         let futures =
           List.map
@@ -156,13 +182,13 @@ let tool_results_of_response state ~chat_id response =
       with exn ->
         Log.err (fun m -> m "Parallel tool execution infrastructure failed: %s" (Printexc.to_string exn));
         List.map (fun (id, name, input) ->
-          let result : Agent_tools.Tools.tool_result =
+          let result : Tools.tool_result =
             try
-              Agent_tools.Tools.execute state.Runtime.tools ~chat_id name input
+              Tools.execute state.Runtime.tools ~chat_id name input
             with exn ->
               Log.err (fun m -> m "Tool %s execution failed: %s" name (Printexc.to_string exn));
               let msg = "Tool execution exception: " ^ Printexc.to_string exn in
-              Agent_tools.Tools.failure ~error_type:"exception" ~error_category:Agent_tools.Tools.Other msg
+              Tools.failure ~error_type:"exception" ~error_category:Tools.Other msg
           in
           (id, result)
         ) tool_calls
@@ -171,18 +197,18 @@ let tool_results_of_response state ~chat_id response =
 
 let tool_result_block tool_use_id tool_result =
   let enhanced_content =
-    if tool_result.Agent_tools.Tools.is_error then begin
-      let base = tool_result.Agent_tools.Tools.content in
-      match tool_result.Agent_tools.Tools.recovery_hint with
+    if tool_result.Tools.is_error then begin
+      let base = tool_result.Tools.content in
+      match tool_result.Tools.recovery_hint with
       | Some hint -> Printf.sprintf "%s\n\nRecovery hint: %s" base hint
       | None -> base
     end else
-      tool_result.Agent_tools.Tools.content
+      tool_result.Tools.content
   in
   Llm.Tool_result {
     tool_use_id;
     content = enhanced_content;
-    is_error = if tool_result.Agent_tools.Tools.is_error then Some true else None;
+    is_error = if tool_result.Tools.is_error then Some true else None;
   }
 
 let process ?on_text_delta ?on_status state ~chat_id ?(persistent=false) prompt =
@@ -200,69 +226,72 @@ let process ?on_text_delta ?on_status state ~chat_id ?(persistent=false) prompt 
     match maybe_handle_approval_command state ~chat_id ?parent_id prompt with
     | Some handled -> handled
     | None ->
-        (* Add user prompt to transcript *)
-        let prompt_node_id =
-          match parent_id with
-          | Some pid -> Transcript.add_user_prompt state.Runtime.transcript ~chat_id ~parent_id:pid ~content:prompt ()
-          | None -> Transcript.add_user_prompt state.Runtime.transcript ~chat_id ~content:prompt ()
-        in
-        let system_prompt = build_system_prompt state ~chat_id in
-        let tool_defs = Agent_tools.Tools.definitions state.Runtime.tools in
-        let rec loop current_node_id rounds_remaining =
-          let messages = Transcript.get_branch state.Runtime.transcript current_node_id in
-          (* Truncate large tool outputs for LLM context - full content preserved in transcript *)
-          let messages = List.map (fun (m : Llm.message) -> { m with content = truncate_message_content m.content }) messages in
-          match
-            state.llm_call
-              state.provider_config
-              ?on_text_delta
-              ~system_prompt
-              messages
-              ~tools:tool_defs
-          with
-          | Error err -> Error err
-          | Ok response ->
-              let has_tool_use =
-                List.exists
-                  (function
-                    | Llm.Response_tool_use _ -> true
-                    | Llm.Response_text _ -> false)
-                  response.Llm.content
+        begin
+          match maybe_handle_skill_command state ~chat_id ?parent_id prompt with
+          | Some handled -> handled
+          | None ->
+              let prompt_node_id =
+                match parent_id with
+                | Some pid -> Transcript.add_user_prompt state.Runtime.transcript ~chat_id ~parent_id:pid ~content:prompt ()
+                | None -> Transcript.add_user_prompt state.Runtime.transcript ~chat_id ~content:prompt ()
               in
-              if has_tool_use then
-                if rounds_remaining = 0 then Error "Tool-call recursion limit exceeded"
-                else
-                  let assistant_message_content = Llm.Blocks (assistant_blocks_of_response response) in
-                  let model = state.provider_config.Llm_provider.model_name in
-                  let response_node_id = Transcript.add_llm_response state.Runtime.transcript ~parent_id:current_node_id ~model ~content:assistant_message_content () in
-                  Option.iter (fun f -> f "Executing tools...") on_status;
-                  let tool_results = tool_results_of_response state ~chat_id response in
-                  let last_node_id = ref response_node_id in
-                  List.iter (fun (tool_use_id, tool_result) ->
-                    let block = tool_result_block tool_use_id tool_result in
-                    match block with
-                    | Llm.Tool_result { tool_use_id; content; is_error } ->
-                        let is_err = Option.value is_error ~default:false in
-                        let result_id = Transcript.add_tool_result state.Runtime.transcript ~parent_id:!last_node_id ~tool_use_id ~content ~is_error:is_err in
-                        last_node_id := result_id
-                    | _ -> ()
-                  ) tool_results;
-                  begin
-                    match List.find_map (fun (_id, result) ->
-                      match result.Agent_tools.Tools.approval_request with
-                      | Some request -> Some (request, result.Agent_tools.Tools.content)
-                      | None -> None
-                    ) tool_results with
-                    | Some (_request, message) ->
-                        let response_text =
-                          Printf.sprintf "%s\n\nProject root: %s" message state.Runtime.project_root
-                        in
-                        make_text_response state ~parent_id:!last_node_id response_text
-                    | None ->
-                        loop !last_node_id (rounds_remaining - 1)
-                  end
-              else
-                let text = String.trim (response_text response) in
-                make_text_response state ~parent_id:current_node_id text
-        in
-        loop prompt_node_id state.config.max_tool_iterations
+              let system_prompt = build_system_prompt state ~chat_id in
+              let tool_defs = Tools.definitions state.Runtime.tools in
+              let rec loop current_node_id rounds_remaining =
+                let messages = Transcript.get_branch state.Runtime.transcript current_node_id in
+                let messages = List.map (fun (m : Llm.message) -> { m with content = truncate_message_content m.content }) messages in
+                match
+                  state.llm_call
+                    state.provider_config
+                    ?on_text_delta
+                    ~system_prompt
+                    messages
+                    ~tools:tool_defs
+                with
+                | Error err -> Error err
+                | Ok response ->
+                    let has_tool_use =
+                      List.exists
+                        (function
+                          | Llm.Response_tool_use _ -> true
+                          | Llm.Response_text _ -> false)
+                        response.Llm.content
+                    in
+                    if has_tool_use then
+                      if rounds_remaining = 0 then Error "Tool-call recursion limit exceeded"
+                      else
+                        let assistant_message_content = Llm.Blocks (assistant_blocks_of_response response) in
+                        let model = state.provider_config.Llm_provider.model_name in
+                        let response_node_id = Transcript.add_llm_response state.Runtime.transcript ~parent_id:current_node_id ~model ~content:assistant_message_content () in
+                        Option.iter (fun f -> f "Executing tools...") on_status;
+                        let tool_results = tool_results_of_response state ~chat_id response in
+                        let last_node_id = ref response_node_id in
+                        List.iter (fun (tool_use_id, tool_result) ->
+                          let block = tool_result_block tool_use_id tool_result in
+                          match block with
+                          | Llm.Tool_result { tool_use_id; content; is_error } ->
+                              let is_err = Option.value is_error ~default:false in
+                              let result_id = Transcript.add_tool_result state.Runtime.transcript ~parent_id:!last_node_id ~tool_use_id ~content ~is_error:is_err in
+                              last_node_id := result_id
+                          | _ -> ()
+                        ) tool_results;
+                        begin
+                          match List.find_map (fun (_id, result) ->
+                            match result.Tools.approval_request with
+                            | Some request -> Some (request, result.Tools.content)
+                            | None -> None
+                          ) tool_results with
+                          | Some (_request, message) ->
+                              let response_text =
+                                Printf.sprintf "%s\n\nProject root: %s" message state.Runtime.project_root
+                              in
+                              make_text_response state ~parent_id:!last_node_id response_text
+                          | None ->
+                              loop !last_node_id (rounds_remaining - 1)
+                        end
+                    else
+                      let text = String.trim (response_text response) in
+                      make_text_response state ~parent_id:current_node_id text
+              in
+              loop prompt_node_id state.config.max_tool_iterations
+        end

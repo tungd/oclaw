@@ -10,18 +10,36 @@ let expected_tools = [
   "read_file";
   "write_file";
   "edit_file";
+  "skill_list";
+  "skill_search";
+  "skill_install";
 ]
 
 let () =
   let temp_root = Filename.get_temp_dir_name () in
   let db_path = Filename.concat temp_root "oclaw-tools-registry.db" in
-  let registry =
-    Agent_tools.Tools.create_default_registry
+  let project_skills_dir = Filename.concat temp_root "project-skills" in
+  let user_skills_dir = Filename.concat temp_root "user-skills" in
+  Unix.mkdir project_skills_dir 0o755;
+  Unix.mkdir user_skills_dir 0o755;
+  let skills =
+    Agent_skills.Skills.create
       ~db_path
       ~project_root:temp_root
+      ~project_skills_dir
+      ~user_skills_dir
+      ~catalog_cache_path:(Filename.concat temp_root "skills-catalog.json")
       ()
   in
-  let actual_tools = Agent_tools.Tools.definitions registry |> List.map (fun tool -> tool.Llm_types.name) in
+  let registry =
+    Agent_runtime.Tools.create_default_registry
+      ~db_path
+      ~project_root:temp_root
+      ~skills
+      ()
+  in
+  let actual_tools = Agent_runtime.Tools.definitions registry |> List.map (fun tool -> tool.Llm_types.name) in
   expect (actual_tools = expected_tools) "default tool registry does not match expected surface";
-  Agent_tools.Tools.close registry;
+  Agent_runtime.Tools.close registry;
+  Agent_skills.Skills.close skills;
   Printf.printf "[PASS] tool registry smoke test (%d tools)\n" (List.length actual_tools)

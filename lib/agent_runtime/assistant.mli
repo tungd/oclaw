@@ -1,9 +1,9 @@
-(** Compatibility wrapper over the new persistent runtime. *)
+(** Compatibility wrapper over the persistent runtime facade. *)
 
 type t
 
 type llm_call =
-  Runtime.llm_call
+  App.llm_call
 
 val create :
   ?llm_call:llm_call ->

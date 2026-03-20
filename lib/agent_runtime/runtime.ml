@@ -13,7 +13,7 @@ type app_state = {
   db_path : string;
   transcript : Transcript.t;
   skills : Agent_skills.Skills.t;
-  tools : Agent_tools.Tools.t;
+  tools : Tools.t;
   llm_call : llm_call;
   system_prompt_override : string option;
 }
@@ -27,13 +27,24 @@ let create_app_state ?(llm_call=default_llm_call) ?system_prompt_override config
   let layout = Project_paths.discover ~start_dir:config.Config.data_dir () in
   try
     ensure_dir layout.agents_dir;
-    ensure_dir layout.skills_dir;
+    ensure_dir layout.project_skills_dir;
+    ensure_dir layout.user_agents_dir;
+    ensure_dir layout.user_skills_dir;
     let transcript = Transcript.create ~db_path:layout.db_path in
-    let skills = Agent_skills.Skills.create ~skills_dir:layout.skills_dir in
-    let tools =
-      Agent_tools.Tools.create_default_registry
+    let skills =
+      Agent_skills.Skills.create
         ~db_path:layout.db_path
         ~project_root:layout.project_root
+        ~project_skills_dir:layout.project_skills_dir
+        ~user_skills_dir:layout.user_skills_dir
+        ~catalog_cache_path:layout.catalog_cache_path
+        ()
+    in
+    let tools =
+      Tools.create_default_registry
+        ~db_path:layout.db_path
+        ~project_root:layout.project_root
+        ~skills
         ()
     in
     Ok {
@@ -52,4 +63,4 @@ let create_app_state ?(llm_call=default_llm_call) ?system_prompt_override config
 
 let close_app_state state =
   Transcript.close state.transcript;
-  Agent_tools.Tools.close state.tools
+  Tools.close state.tools
