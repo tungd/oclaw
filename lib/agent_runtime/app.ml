@@ -11,6 +11,9 @@ let close = Runtime.close_app_state
 let project_root (app : t) =
   app.Runtime.project_root
 
+let model_name (app : t) =
+  app.Runtime.provider_config.Llm_provider.model_name
+
 let db_path (app : t) =
   app.Runtime.db_path
 

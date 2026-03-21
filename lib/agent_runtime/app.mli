@@ -17,6 +17,7 @@ val create :
 val close : t -> unit
 
 val project_root : t -> string
+val model_name : t -> string
 val db_path : t -> string
 val tool_definitions : t -> Llm_types.tool_definition list
 val internal_state : t -> Runtime.app_state
