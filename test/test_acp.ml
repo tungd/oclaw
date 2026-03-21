@@ -34,12 +34,19 @@ let () =
       (Tool_call { name = "bash"; arguments = `Assoc [ ("command", `String "pwd") ] })
   in
   begin
-    match expect_some (of_jsonrpc_packet tool_packet) with
-    | Tool_call { name; arguments } ->
-        expect (name = "bash") "tool_call name mismatch";
-        expect (arguments = `Assoc [ ("command", `String "pwd") ])
-          "tool_call arguments mismatch"
-    | _ -> fail "expected tool_call round-trip"
+    match tool_packet with
+    | Jsonrpc.Packet.Notification notif ->
+        expect (notif.Jsonrpc.Notification.method_ = Method.tools_call)
+          "tool_call method mismatch";
+        begin
+          match expect_some (of_jsonrpc_packet tool_packet) with
+          | Tool_call { name; arguments } ->
+              expect (name = "bash") "tool_call name mismatch";
+              expect (arguments = `Assoc [ ("command", `String "pwd") ])
+                "tool_call arguments mismatch"
+          | _ -> fail "expected tool_call round-trip"
+        end
+    | _ -> fail "expected tool_call notification"
   end;
 
   let response_packet =
@@ -47,12 +54,19 @@ let () =
       (Tool_result { name = "read_file"; content = "ok"; is_error = false })
   in
   begin
-    match expect_some (of_jsonrpc_packet response_packet) with
-    | Tool_result { name; content; is_error } ->
-        expect (name = "read_file") "tool_result name mismatch";
-        expect (content = "ok") "tool_result content mismatch";
-        expect (not is_error) "tool_result error flag mismatch"
-    | _ -> fail "expected tool_result round-trip"
+    match response_packet with
+    | Jsonrpc.Packet.Notification notif ->
+        expect (notif.Jsonrpc.Notification.method_ = Method.tools_result)
+          "tool_result method mismatch";
+        begin
+          match expect_some (of_jsonrpc_packet response_packet) with
+          | Tool_result { name; content; is_error } ->
+              expect (name = "read_file") "tool_result name mismatch";
+              expect (content = "ok") "tool_result content mismatch";
+              expect (not is_error) "tool_result error flag mismatch"
+          | _ -> fail "expected tool_result round-trip"
+        end
+    | _ -> fail "expected tool_result notification"
   end;
 
   Printf.printf "[PASS] acp tests\n"

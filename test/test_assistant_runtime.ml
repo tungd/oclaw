@@ -58,6 +58,25 @@ let create_state ?llm_call data_dir =
   | Ok state -> state
   | Error err -> fail err
 
+let capture_process ?persistent state ~chat_id prompt =
+  let events = ref [] in
+  let emit event =
+    events := !events @ [event]
+  in
+  let result = Agent_runtime.Session.process ?persistent ~emit state ~chat_id prompt in
+  (result, !events)
+
+let expect_final_message expected events =
+  match
+    List.find_map
+      (function
+        | Acp.Message.Agent_message { content; _ } -> Some content
+        | _ -> None)
+      events
+  with
+  | Some content -> expect (content = expected) ("unexpected final message: " ^ content)
+  | None -> fail "expected final agent message"
+
 let text_messages messages =
   messages
   |> List.filter_map (fun (msg : Llm_types.message) ->
@@ -75,19 +94,19 @@ let text_messages messages =
 
 let test_persistent_session () =
   let data_dir = temp_dir () in
-  let first_llm _provider ?on_text_delta:_ ~system_prompt:_ messages ~tools:_ =
+  let first_llm _provider ?emit:_ ~system_prompt:_ messages ~tools:_ =
     let contents = text_messages messages in
     expect (List.mem "first prompt" contents) "current prompt missing from first turn";
     text_response "first answer"
   in
   let state1 = create_state ~llm_call:first_llm data_dir in
+  let result1, events1 = capture_process state1 ~chat_id:7 "first prompt" in
   begin
-    match Agent_runtime.Session.process state1 ~chat_id:7 "first prompt" with
-    | Ok "first answer" -> ()
-    | Ok other -> fail ("unexpected first reply: " ^ other)
+    match result1 with
+    | Ok () -> expect_final_message "first answer" events1
     | Error err -> fail err
   end;
-  let second_llm _provider ?on_text_delta:_ ~system_prompt:_ messages ~tools:_ =
+  let second_llm _provider ?emit:_ ~system_prompt:_ messages ~tools:_ =
     let contents = text_messages messages in
     expect (List.mem "first prompt" contents) "prior user message missing after restart";
     expect (List.mem "first answer" contents) "prior assistant message missing after restart";
@@ -95,33 +114,41 @@ let test_persistent_session () =
     text_response "second answer"
   in
   let state2 = create_state ~llm_call:second_llm data_dir in
+  let result2, events2 = capture_process ~persistent:true state2 ~chat_id:7 "second prompt" in
   begin
-    match Agent_runtime.Session.process ~persistent:true state2 ~chat_id:7 "second prompt" with
-    | Ok "second answer" -> ()
-    | Ok other -> fail ("unexpected second reply: " ^ other)
+    match result2 with
+    | Ok () -> expect_final_message "second answer" events2
     | Error err -> fail err
   end
 
 let test_session_isolation () =
   let data_dir = temp_dir () in
-  let first_llm _provider ?on_text_delta:_ ~system_prompt:_ _messages ~tools:_ =
+  let first_llm _provider ?emit:_ ~system_prompt:_ _messages ~tools:_ =
     text_response "chat one answer"
   in
   let state1 = create_state ~llm_call:first_llm data_dir in
-  ignore (Agent_runtime.Session.process state1 ~chat_id:1 "chat one prompt");
-  let second_llm _provider ?on_text_delta:_ ~system_prompt:_ messages ~tools:_ =
+  begin
+    match capture_process state1 ~chat_id:1 "chat one prompt" with
+    | Ok (), _ -> ()
+    | Error err, _ -> fail err
+  end;
+  let second_llm _provider ?emit:_ ~system_prompt:_ messages ~tools:_ =
     let contents = text_messages messages in
     expect (not (List.mem "chat one prompt" contents)) "chat history leaked across chat ids";
     text_response "chat two answer"
   in
   let state2 = create_state ~llm_call:second_llm data_dir in
-  ignore (Agent_runtime.Session.process state2 ~chat_id:2 "chat two prompt")
+  begin
+    match capture_process state2 ~chat_id:2 "chat two prompt" with
+    | Ok (), _ -> ()
+    | Error err, _ -> fail err
+  end
 
 let test_tool_loop_and_resume () =
   let data_dir = temp_dir () in
   write_file (Filename.concat data_dir "note.txt") "tool output";
   let calls = ref 0 in
-  let llm _provider ?on_text_delta:_ ~system_prompt:_ messages ~tools:_ =
+  let llm _provider ?emit:_ ~system_prompt:_ messages ~tools:_ =
     incr calls;
     if !calls = 1 then
       tool_response "read_file" [ ("path", `String (Filename.concat data_dir "note.txt")) ]
@@ -137,23 +164,38 @@ let test_tool_loop_and_resume () =
     | Ok _ -> ()
     | Error err -> fail err
   end;
+  let result1, events1 = capture_process state ~chat_id:3 "read the note" in
   begin
-    match Agent_runtime.Session.process state ~chat_id:3 "read the note" with
-    | Ok "done" -> ()
-    | Ok other -> fail ("unexpected tool loop reply: " ^ other)
+    match result1 with
+    | Ok () ->
+        expect_final_message "done" events1;
+        expect
+          (List.exists
+             (function
+               | Acp.Message.Tool_call { name; _ } -> name = "read_file"
+               | _ -> false)
+             events1)
+          "expected read_file tool call event";
+        expect
+          (List.exists
+             (function
+               | Acp.Message.Tool_result { name; is_error; _ } -> name = "read_file" && not is_error
+               | _ -> false)
+             events1)
+          "expected successful read_file tool result event"
     | Error err -> fail err
   end;
-  let resumed _provider ?on_text_delta:_ ~system_prompt:_ messages ~tools:_ =
+  let resumed _provider ?emit:_ ~system_prompt:_ messages ~tools:_ =
     let contents = text_messages messages in
     expect (List.mem "read the note" contents) "tool turn prompt missing after resume";
     expect (List.mem "done" contents) "final assistant reply missing after resume";
     text_response "second turn"
   in
   let state2 = create_state ~llm_call:resumed data_dir in
+  let result2, events2 = capture_process ~persistent:true state2 ~chat_id:3 "follow up" in
   begin
-    match Agent_runtime.Session.process ~persistent:true state2 ~chat_id:3 "follow up" with
-    | Ok "second turn" -> ()
-    | Ok other -> fail ("unexpected resumed reply: " ^ other)
+    match result2 with
+    | Ok () -> expect_final_message "second turn" events2
     | Error err -> fail err
   end
 
@@ -167,16 +209,29 @@ let test_project_root_db_and_approval_command () =
   let state = create_state nested in
   expect (Agent_runtime.App.project_root state = normalized_root) "runtime should reuse ancestor .agents directory";
   expect (Agent_runtime.App.db_path state = Filename.concat normalized_root ".agents/oclaw.db") "runtime should place db in .agents/oclaw.db";
+  let approval_result, approval_events =
+    capture_process ~persistent:true state ~chat_id:9 ("/approve read " ^ nested)
+  in
   begin
-    match Agent_runtime.Session.process ~persistent:true state ~chat_id:9 ("/approve read " ^ nested) with
-    | Ok response ->
-        expect (String.length response > 0) "approval command should return a response"
+    match approval_result with
+    | Ok () ->
+        begin
+          match
+            List.find_map
+              (function
+                | Acp.Message.Agent_message { content; _ } -> Some content
+                | _ -> None)
+              approval_events
+          with
+          | Some response -> expect (String.length response > 0) "approval command should return a response"
+          | None -> fail "approval command should emit a response"
+        end
     | Error err -> fail err
   end;
   let target = Filename.concat nested "approved.txt" in
   write_file target "approved contents";
   let calls = ref 0 in
-  let llm _provider ?on_text_delta:_ ~system_prompt:_ messages ~tools:_ =
+  let llm _provider ?emit:_ ~system_prompt:_ messages ~tools:_ =
     incr calls;
     let contents = text_messages messages in
     if !calls = 1 then (
@@ -188,10 +243,44 @@ let test_project_root_db_and_approval_command () =
     )
   in
   let state3 = create_state ~llm_call:llm nested in
+  let result3, events3 = capture_process state3 ~chat_id:9 "read approved file" in
   begin
-    match Agent_runtime.Session.process state3 ~chat_id:9 "read approved file" with
-    | Ok reply -> expect (reply = "done") "tool call should succeed after persisted approval"
+    match result3 with
+    | Ok () -> expect_final_message "done" events3
     | Error err -> fail err
+  end
+
+let test_event_sequence_for_text_reply () =
+  let data_dir = temp_dir () in
+  let streamed = ref false in
+  let llm _provider ?emit ~system_prompt:_ _messages ~tools:_ =
+    begin
+      match emit with
+      | Some send ->
+          send (Acp.Message.Agent_delta { content = "hello " });
+          send (Acp.Message.Agent_delta { content = "world" });
+          streamed := true
+      | None -> ()
+    end;
+    text_response "hello world"
+  in
+  let state = create_state ~llm_call:llm data_dir in
+  let result, events = capture_process state ~chat_id:11 "say hello" in
+  begin
+    match result with
+    | Error err -> fail err
+    | Ok () ->
+        expect !streamed "llm emit hook should stream deltas";
+        begin
+          match events with
+          | Acp.Message.Status { status; _ }
+            :: Acp.Message.Agent_delta { content = "hello " }
+            :: Acp.Message.Agent_delta { content = "world" }
+            :: Acp.Message.Agent_message { content = "hello world"; _ }
+            :: [Acp.Message.Done] ->
+              expect (status = "thinking") "expected thinking status first"
+          | _ -> fail "unexpected event sequence for text reply"
+        end
   end
 
 let () =
@@ -199,4 +288,5 @@ let () =
   test_session_isolation ();
   test_tool_loop_and_resume ();
   test_project_root_db_and_approval_command ();
+  test_event_sequence_for_text_reply ();
   Printf.printf "[PASS] assistant runtime tests\n"

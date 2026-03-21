@@ -19,6 +19,7 @@ module Message : sig
     val initialized : string
     val tools_list : string
     val tools_call : string
+    val tools_result : string
     val agent_plan : string
     val agent_message : string
     val agent_delta : string

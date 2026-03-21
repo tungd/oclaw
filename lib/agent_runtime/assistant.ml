@@ -26,7 +26,22 @@ let create ?llm_call ?system_prompt ?(chat_id=1) ?data_dir ~provider_config () =
   | Error err -> failwith err
 
 let query runtime prompt =
-  Session.process runtime.app ~chat_id:runtime.chat_id ~persistent:true prompt
+  let final_message = ref None in
+  let runtime_error = ref None in
+  let emit = function
+    | Acp.Message.Agent_message { content; _ } -> final_message := Some content
+    | Acp.Message.Error { message; _ } -> runtime_error := Some message
+    | _ -> ()
+  in
+  match Session.process ~emit runtime.app ~chat_id:runtime.chat_id ~persistent:true prompt with
+  | Error err -> Error err
+  | Ok () ->
+      begin
+        match !runtime_error, !final_message with
+        | Some err, _ -> Error err
+        | None, Some text -> Ok text
+        | None, None -> Error "Assistant completed without emitting a final message"
+      end
 
 let history runtime =
   runtime.active_branch

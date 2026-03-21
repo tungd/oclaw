@@ -3,10 +3,9 @@
 val build_system_prompt : Runtime.app_state -> chat_id:int -> string
 
 val process :
-  ?on_text_delta:(string -> unit) ->
-  ?on_status:(string -> unit) ->
+  emit:(Acp.Message.t -> unit) ->
   Runtime.app_state ->
   chat_id:int ->
   ?persistent:bool ->
   string ->
-  (string, string) result
+  (unit, string) result

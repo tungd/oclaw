@@ -17,7 +17,8 @@
   tyxml
   ppx_deriving_yojson.runtime
   yaml
-  domainslib
+ domainslib
+  acp
   llm_types
   llm_provider)
  (preprocess (pps ppx_deriving_yojson ppx_deriving_yaml)))

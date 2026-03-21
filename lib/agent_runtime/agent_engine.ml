@@ -144,17 +144,21 @@ let execute_tool_parallel state ~chat_id (id, name, input) =
       let msg = "Tool execution exception: " ^ Printexc.to_string exn in
       Tools.failure ~error_type:"exception" ~error_category:Tools.Other msg
   in
-  (id, result)
+  (id, name, result)
 
-let tool_results_of_response state ~chat_id response =
+let tool_results_of_response state ~chat_id ~emit response =
   let tool_calls = 
     response.Llm.content
     |> List.filter_map (function
            | Llm.Response_tool_use { id; name; input } -> Some (id, name, input)
            | Llm.Response_text _ -> None)
   in
-  
-  let tool_results : (string * Tools.tool_result) list =
+  List.iter
+    (fun (_id, name, input) ->
+      emit (Acp.Message.Tool_call { name; arguments = input }))
+    tool_calls;
+
+  let tool_results : (string * string * Tools.tool_result) list =
     if List.length tool_calls <= 1 then
       List.map (fun (id, name, input) ->
         let result : Tools.tool_result =
@@ -164,8 +168,8 @@ let tool_results_of_response state ~chat_id response =
             Log.err (fun m -> m "Tool %s execution failed: %s" name (Printexc.to_string exn));
             let msg = "Tool execution exception: " ^ Printexc.to_string exn in
             Tools.failure ~error_type:"exception" ~error_category:Tools.Other msg
-        in
-        (id, result)
+          in
+        (id, name, result)
       ) tool_calls
     else
       (* Use the shared pool from the tools registry *)
@@ -190,9 +194,19 @@ let tool_results_of_response state ~chat_id response =
               let msg = "Tool execution exception: " ^ Printexc.to_string exn in
               Tools.failure ~error_type:"exception" ~error_category:Tools.Other msg
           in
-          (id, result)
+          (id, name, result)
         ) tool_calls
   in
+  List.iter
+    (fun (_tool_use_id, name, result) ->
+      emit
+        (Acp.Message.Tool_result
+           {
+             name;
+             content = result.Tools.content;
+             is_error = result.Tools.is_error;
+           }))
+    tool_results;
   tool_results
 
 let tool_result_block tool_use_id tool_result =
@@ -211,9 +225,16 @@ let tool_result_block tool_use_id tool_result =
     is_error = if tool_result.Tools.is_error then Some true else None;
   }
 
-let process ?on_text_delta ?on_status state ~chat_id ?(persistent=false) prompt =
+let emit_final_message emit ~chat_id content =
+  emit (Acp.Message.Agent_message { content; chat_id = Some chat_id });
+  emit Acp.Message.Done
+
+let process ~emit state ~chat_id ?(persistent=false) prompt =
   let prompt = String.trim prompt in
-  if prompt = "" then Error "Prompt is empty"
+  if prompt = "" then begin
+    emit (Acp.Message.Error { message = "Prompt is empty"; code = 0 });
+    Error "Prompt is empty"
+  end
   else
     let parent_id =
       if persistent then
@@ -224,11 +245,17 @@ let process ?on_text_delta ?on_status state ~chat_id ?(persistent=false) prompt 
         None
     in
     match maybe_handle_approval_command state ~chat_id ?parent_id prompt with
-    | Some handled -> handled
+    | Some handled ->
+        Result.map
+          (fun response -> emit_final_message emit ~chat_id response)
+          handled
     | None ->
         begin
           match maybe_handle_skill_command state ~chat_id ?parent_id prompt with
-          | Some handled -> handled
+          | Some handled ->
+              Result.map
+                (fun response -> emit_final_message emit ~chat_id response)
+                handled
           | None ->
               let prompt_node_id =
                 match parent_id with
@@ -237,18 +264,21 @@ let process ?on_text_delta ?on_status state ~chat_id ?(persistent=false) prompt 
               in
               let system_prompt = build_system_prompt state ~chat_id in
               let tool_defs = Tools.definitions state.Runtime.tools in
+              emit (Acp.Message.Status { status = "thinking"; message = None });
               let rec loop current_node_id rounds_remaining =
                 let messages = Transcript.get_branch state.Runtime.transcript current_node_id in
                 let messages = List.map (fun (m : Llm.message) -> { m with content = truncate_message_content m.content }) messages in
                 match
                   state.llm_call
                     state.provider_config
-                    ?on_text_delta
+                    ~emit
                     ~system_prompt
                     messages
                     ~tools:tool_defs
                 with
-                | Error err -> Error err
+                | Error err ->
+                    emit (Acp.Message.Error { message = err; code = 0 });
+                    Error err
                 | Ok response ->
                     let has_tool_use =
                       List.exists
@@ -258,15 +288,19 @@ let process ?on_text_delta ?on_status state ~chat_id ?(persistent=false) prompt 
                         response.Llm.content
                     in
                     if has_tool_use then
-                      if rounds_remaining = 0 then Error "Tool-call recursion limit exceeded"
+                      if rounds_remaining = 0 then begin
+                        let err = "Tool-call recursion limit exceeded" in
+                        emit (Acp.Message.Error { message = err; code = 0 });
+                        Error err
+                      end
                       else
                         let assistant_message_content = Llm.Blocks (assistant_blocks_of_response response) in
                         let model = state.provider_config.Llm_provider.model_name in
                         let response_node_id = Transcript.add_llm_response state.Runtime.transcript ~parent_id:current_node_id ~model ~content:assistant_message_content () in
-                        Option.iter (fun f -> f "Executing tools...") on_status;
-                        let tool_results = tool_results_of_response state ~chat_id response in
+                        emit (Acp.Message.Status { status = "executing_tools"; message = None });
+                        let tool_results = tool_results_of_response state ~chat_id ~emit response in
                         let last_node_id = ref response_node_id in
-                        List.iter (fun (tool_use_id, tool_result) ->
+                        List.iter (fun (tool_use_id, _tool_name, tool_result) ->
                           let block = tool_result_block tool_use_id tool_result in
                           match block with
                           | Llm.Tool_result { tool_use_id; content; is_error } ->
@@ -276,7 +310,7 @@ let process ?on_text_delta ?on_status state ~chat_id ?(persistent=false) prompt 
                           | _ -> ()
                         ) tool_results;
                         begin
-                          match List.find_map (fun (_id, result) ->
+                          match List.find_map (fun (_id, _name, result) ->
                             match result.Tools.approval_request with
                             | Some request -> Some (request, result.Tools.content)
                             | None -> None
@@ -285,13 +319,29 @@ let process ?on_text_delta ?on_status state ~chat_id ?(persistent=false) prompt 
                               let response_text =
                                 Printf.sprintf "%s\n\nProject root: %s" message state.Runtime.project_root
                               in
-                              make_text_response state ~parent_id:!last_node_id response_text
+                              begin
+                                match make_text_response state ~parent_id:!last_node_id response_text with
+                                | Ok response ->
+                                    emit_final_message emit ~chat_id response;
+                                    Ok ()
+                                | Error err ->
+                                    emit (Acp.Message.Error { message = err; code = 0 });
+                                    Error err
+                              end
                           | None ->
                               loop !last_node_id (rounds_remaining - 1)
                         end
                     else
                       let text = String.trim (response_text response) in
-                      make_text_response state ~parent_id:current_node_id text
+                      begin
+                        match make_text_response state ~parent_id:current_node_id text with
+                        | Ok response ->
+                            emit_final_message emit ~chat_id response;
+                            Ok ()
+                        | Error err ->
+                            emit (Acp.Message.Error { message = err; code = 0 });
+                            Error err
+                      end
               in
               loop prompt_node_id state.config.max_tool_iterations
         end

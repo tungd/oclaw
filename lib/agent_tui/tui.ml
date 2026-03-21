@@ -1,13 +1,5 @@
 open Mosaic
 
-type agent_event =
-  | Status of string * string option
-  | Delta of string
-  | Message of string * int option
-  | Error of string
-  | Done
-  | Tick
-
 type model = {
   messages : (string * string) list;
   input_text : string;
@@ -21,8 +13,11 @@ type model = {
 type msg =
   | Input_changed of string
   | Submit
-  | Agent_event of agent_event
+  | Runtime_event of Acp.Message.t
+  | Runtime_error of string
+  | Runtime_done
   | Quit
+  | Tick
 
 let braille_spinner = [| "⠋"; "⠙"; "⠹"; "⠸"; "⠼"; "⠴"; "⠦"; "⠇" |]
 
@@ -44,20 +39,15 @@ let init state chat_id persistent () =
   let agent_cmd = Cmd.perform (fun dispatch ->
     let rec loop () =
       let prompt = Domainslib.Chan.recv to_agent_chan in
-      dispatch (Agent_event (Status ("thinking", None)));
-      let on_text_delta delta =
-        dispatch (Agent_event (Delta delta))
+      let emit runtime_message =
+        dispatch (Runtime_event runtime_message)
       in
-      let on_status status =
-        dispatch (Agent_event (Status (status, None)))
-      in
-      match Agent_runtime.Session.process ~on_text_delta ~on_status state ~chat_id ~persistent prompt with
-      | Ok response ->
-          dispatch (Agent_event (Message (response, Some chat_id)));
-          dispatch (Agent_event Done);
+      match Agent_runtime.Session.process ~emit state ~chat_id ~persistent prompt with
+      | Ok () ->
+          dispatch Runtime_done;
           loop ()
       | Error err ->
-          dispatch (Agent_event (Error err));
+          dispatch (Runtime_error err);
           loop ()
     in
     loop ()
@@ -79,23 +69,30 @@ let update msg model =
            is_thinking = true;
            status_text = "Thinking..."
          }, Cmd.None)
-  | Agent_event ev ->
-      (match ev with
-       | Status (status, msg) ->
-           let status_text = match msg with Some m -> status ^ ": " ^ m | None -> status in
+  | Runtime_event runtime_message ->
+      (match runtime_message with
+       | Acp.Message.Status { status; message } ->
+           let status_text = match message with Some m -> status ^ ": " ^ m | None -> status in
            ({ model with status_text; is_thinking = true }, Cmd.None)
-       | Delta text ->
-           ({ model with streaming_text = model.streaming_text ^ text; is_thinking = false }, Cmd.None)
-       | Message (text, _) ->
+       | Acp.Message.Agent_delta { content } ->
+           ({ model with streaming_text = model.streaming_text ^ content; is_thinking = true }, Cmd.None)
+       | Acp.Message.Agent_message { content; _ } ->
            ({ model with
-              messages = model.messages @ [("Assistant", text)];
+              messages = model.messages @ [("Assistant", content)];
               streaming_text = "";
               status_text = "Ready";
-              is_thinking = false
+              is_thinking = false;
             }, Cmd.None)
-       | Error err ->
-           ({ model with messages = model.messages @ [("Error", err)]; status_text = "Error"; is_thinking = false }, Cmd.None)
-       | Done ->
+       | Acp.Message.Tool_call { name; _ } ->
+           ({ model with status_text = "tool: " ^ name; is_thinking = true }, Cmd.None)
+       | Acp.Message.Tool_result { name; is_error; _ } ->
+           let status_text =
+             if is_error then "tool error: " ^ name else "tool finished: " ^ name
+           in
+           ({ model with status_text; is_thinking = true }, Cmd.None)
+       | Acp.Message.Error { message; _ } ->
+           ({ model with messages = model.messages @ [("Error", message)]; status_text = "Error"; is_thinking = false }, Cmd.None)
+       | Acp.Message.Done ->
            let model =
              if model.streaming_text <> "" then
                { model with
@@ -104,12 +101,19 @@ let update msg model =
              else model
            in
            ({ model with status_text = "Ready"; is_thinking = false }, Cmd.None)
-       | Tick ->
-           if model.is_thinking then
-             ({ model with spinner_index = (model.spinner_index + 1) mod 8 }, Cmd.None)
-           else
-             (model, Cmd.None)
-      )
+       | Acp.Message.Initialize _
+       | Acp.Message.Initialized
+       | Acp.Message.Agent_plan _ ->
+           (model, Cmd.None))
+  | Runtime_error err ->
+      ({ model with messages = model.messages @ [("Error", err)]; status_text = "Error"; is_thinking = false }, Cmd.None)
+  | Runtime_done ->
+      (model, Cmd.None)
+  | Tick ->
+      if model.is_thinking then
+        ({ model with spinner_index = (model.spinner_index + 1) mod 8 }, Cmd.None)
+      else
+        (model, Cmd.None)
   | Quit -> (model, Cmd.Quit)
 
 let view model =
@@ -155,9 +159,9 @@ let view model =
     ]
 
 let subscriptions _model =
-  Sub.batch [
+    Sub.batch [
     (* 150ms spinner tick - handled by Mosaic's event loop, not an OS thread *)
-    Sub.every 0.15 (fun () -> Agent_event Tick);
+    Sub.every 0.15 (fun () -> Tick);
     Sub.on_key_all (fun key ->
       let data = Event.Key.data key in
       match data.key with

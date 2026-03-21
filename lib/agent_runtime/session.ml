@@ -1,5 +1,5 @@
-let process ?on_text_delta ?on_status app ~chat_id ?(persistent=false) prompt =
-  Agent_engine.process ?on_text_delta ?on_status (App.internal_state app) ~chat_id ~persistent prompt
+let process ~emit app ~chat_id ?(persistent=false) prompt =
+  Agent_engine.process ~emit (App.internal_state app) ~chat_id ~persistent prompt
 
 let history (app : App.t) ~chat_id =
   let state = App.internal_state app in

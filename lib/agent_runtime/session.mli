@@ -1,11 +1,10 @@
 val process :
-  ?on_text_delta:(string -> unit) ->
-  ?on_status:(string -> unit) ->
+  emit:(Acp.Message.t -> unit) ->
   App.t ->
   chat_id:int ->
   ?persistent:bool ->
   string ->
-  (string, string) result
+  (unit, string) result
 
 val history : App.t -> chat_id:int -> Llm_types.message list
 val latest_node_id : App.t -> chat_id:int -> int option

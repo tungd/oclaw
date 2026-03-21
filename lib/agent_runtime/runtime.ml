@@ -1,6 +1,6 @@
 type llm_call =
   Llm_provider.provider_config ->
-  ?on_text_delta:(string -> unit) ->
+  ?emit:(Acp.Message.t -> unit) ->
   system_prompt:string ->
   Llm_types.message list ->
   tools:Llm_types.tool_definition list ->
@@ -18,7 +18,12 @@ type app_state = {
   system_prompt_override : string option;
 }
 
-let default_llm_call provider_config ?on_text_delta ~system_prompt messages ~tools =
+let default_llm_call provider_config ?emit ~system_prompt messages ~tools =
+  let on_text_delta =
+    Option.map
+      (fun emit delta -> emit (Acp.Message.Agent_delta { content = delta }))
+      emit
+  in
   Llm_provider.send_message provider_config ?on_text_delta ~system_prompt messages ~tools
 
 let ensure_dir = Project_paths.ensure_dir

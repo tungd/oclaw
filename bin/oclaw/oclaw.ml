@@ -28,6 +28,16 @@ let run_tui state chat_id persistent =
 
 let run_acp state chat_id persistent =
   let frontend = Acp.Stdio_frontend.create () in
+  let send_runtime_message ~id message =
+    let packet =
+      match message with
+      | Acp.Message.Agent_message _ | Acp.Message.Error _ ->
+          Acp.Message.to_jsonrpc ~id message
+      | _ ->
+          Acp.Message.to_jsonrpc message
+    in
+    Acp.Stdio_frontend.send frontend packet
+  in
   let rec loop () : int =
     match Acp.Stdio_frontend.recv frontend with
     | None -> loop ()
@@ -39,15 +49,8 @@ let run_acp state chat_id persistent =
              loop ()
          | Some (Acp.Message.Agent_message { content; _ }) ->
              let id = match packet with Jsonrpc.Packet.Request r -> r.Jsonrpc.Request.id | _ -> `Int 0 in
-             let on_text_delta delta =
-               Acp.Stdio_frontend.send frontend (Acp.Message.to_jsonrpc (Acp.Message.Agent_delta { content = delta }))
-             in
-             (match Agent_runtime.Session.process ~on_text_delta state ~chat_id ~persistent content with
-              | Ok response ->
-                  Acp.Stdio_frontend.send frontend (Acp.Message.to_jsonrpc ~id (Acp.Message.Agent_message { content = response; chat_id = Some chat_id }));
-                  Acp.Stdio_frontend.send frontend (Acp.Message.to_jsonrpc (Acp.Message.Done));
-              | Error err ->
-                  Acp.Stdio_frontend.send frontend (Acp.Message.to_jsonrpc ~id (Acp.Message.Error { message = err; code = 0 })));
+             let emit message = send_runtime_message ~id message in
+             ignore (Agent_runtime.Session.process ~emit state ~chat_id ~persistent content);
              loop ()
          | _ -> loop ())
   in

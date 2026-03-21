@@ -7,6 +7,7 @@ module Message = struct
     let initialized = "initialized"
     let tools_list = "tools/list"
     let tools_call = "tools/call"
+    let tools_result = "tools/result"
     let agent_plan = "agent/plan"
     let agent_message = "agent/message"
     let agent_delta = "agent/delta"
@@ -108,11 +109,10 @@ module Message = struct
         Jsonrpc.Packet.Notification (Jsonrpc.Notification.create ~method_:Method.agent_delta ~params ())
     | Tool_call _ ->
         let params = structured_of_yojson (to_structured ~id t) in
-        Jsonrpc.Packet.Request (Jsonrpc.Request.create ~id ~method_:Method.tools_call ~params ())
+        Jsonrpc.Packet.Notification (Jsonrpc.Notification.create ~method_:Method.tools_call ~params ())
     | Tool_result { name; content; is_error } ->
-        (* Tool results are sent as responses *)
-        let result = tool_result_payload_to_yojson { name; content; is_error } in
-        Jsonrpc.Packet.Response (Jsonrpc.Response.ok id result)
+        let params = structured_of_yojson (tool_result_payload_to_yojson { name; content; is_error }) in
+        Jsonrpc.Packet.Notification (Jsonrpc.Notification.create ~method_:Method.tools_result ~params ())
     | Status _ ->
         let params = structured_of_yojson (to_structured ~id t) in
         Jsonrpc.Packet.Notification (Jsonrpc.Notification.create ~method_:Method.status ~params ())
@@ -137,6 +137,11 @@ module Message = struct
     | "tools/call", _ ->
         begin match tool_call_params_of_yojson params with
         | Ok { name; arguments } -> Some (Tool_call { name; arguments })
+        | Error _ -> None
+        end
+    | "tools/result", _ ->
+        begin match tool_result_payload_of_yojson params with
+        | Ok { name; content; is_error } -> Some (Tool_result { name; content; is_error })
         | Error _ -> None
         end
     | "agent/plan", _ ->
@@ -170,14 +175,9 @@ module Message = struct
           ((Option.value ~default:(`Assoc []) notif.Jsonrpc.Notification.params : Jsonrpc.Structured.t) :> Yojson.Safe.t)
     | Jsonrpc.Packet.Response resp ->
         (match resp.Jsonrpc.Response.result with
-         | Ok json ->
-             begin match tool_result_payload_of_yojson json with
-             | Ok { name; content; is_error } ->
-                 Some (Tool_result { name; content; is_error })
-             | Error _ -> None
-             end
+         | Ok _ -> None
          | Error e ->
-             Some (Error { message = e.Jsonrpc.Response.Error.message; code = 
+             Some (Error { message = e.Jsonrpc.Response.Error.message; code =
                match e.Jsonrpc.Response.Error.code with
                | Other c -> c
                | _ -> -1
