@@ -1,0 +1,28 @@
+opam-version: "2.0"
+synopsis: "OCaml 5 CLI AI assistant with tool-first runtime"
+maintainer: ["OClaw Maintainers"]
+authors: ["OClaw Contributors"]
+license: "MIT"
+depends: [
+  "ocaml" {>= "5.0"}
+  "dune" {>= "3.15"}
+  "crunch"
+  "domainslib"
+  "sqlite3"
+  "h1" {>= "1.0.0"}
+  "iomux" {>= "0.3.0"}
+  "jsonrpc" {>= "0.21.0"}
+  "ppx_deriving_yojson"
+  "ppx_deriving_yaml"
+  "yaml"
+  "mosaic"
+  "tyxml" {>= "4.6.0"}
+  "curl"
+  "yojson"
+  "logs"
+]
+build: [
+  ["dune" "subst"] {dev}
+  ["dune" "build" "-p" name "-j" jobs]
+  ["dune" "runtest" "-p" name "-j" jobs] {with-test}
+]

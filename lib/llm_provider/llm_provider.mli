@@ -38,13 +38,18 @@ module Retry : sig
     max_delay_ms : int;
     exponential_base : float;
   }
+
+  type retry_error = {
+    message : string;
+    http_status : int option;
+  }
   
   type 'a retry_result =
     | Success of 'a
-    | Failed of string * int
+    | Failed of retry_error * int
   
   val default_config : retry_config
   val is_retryable_error : http_status:int option -> error_body:string -> bool
   val calculate_delay : config:retry_config -> attempt:int -> int
-  val with_retry : config:retry_config -> (unit -> ('a, string) result) -> 'a retry_result
+  val with_retry : config:retry_config -> (unit -> ('a, retry_error) result) -> 'a retry_result
 end

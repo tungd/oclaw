@@ -1,6 +1,4 @@
-(** Test suite for tool error classification and recovery hints *)
-
-module Tools = Agent_tools.Tools
+module Tools = Agent_runtime.Tools
 
 let fail msg =
   Printf.eprintf "[FAIL] %s\n" msg;
@@ -9,169 +7,181 @@ let fail msg =
 let expect cond msg =
   if not cond then fail msg
 
-(* ============================================================================
-   Error Classification Tests
-   ============================================================================ *)
+let temp_dir () =
+  let path = Filename.temp_file "oclaw-tools-" "" in
+  Sys.remove path;
+  Unix.mkdir path 0o755;
+  path
 
-let test_classify_file_not_found () =
-  (* Unix error messages with path - but NOT mentioning "directory" *)
-  expect (Tools.classify_error ~error_message:"/nonexistent/file.txt: file not found" = Tools.FileNotFound) "File not found with path";
-  expect (Tools.classify_error ~error_message:"Cannot open /path/to/file: file not found" = Tools.FileNotFound) "Generic file not found";
-  expect (Tools.classify_error ~error_message:"/home/user/doc.txt doesn't exist" = Tools.FileNotFound) "Doesn't exist";
-  print_endline "  ✓ classify_file_not_found"
-
-let test_classify_permission_denied () =
-  expect (Tools.classify_error ~error_message:"Permission denied: /etc/passwd" = Tools.PermissionDenied) "Permission denied";
-  expect (Tools.classify_error ~error_message:"Access forbidden: insufficient permissions" = Tools.PermissionDenied) "Forbidden";
-  expect (Tools.classify_error ~error_message:"Permission denied when reading file" = Tools.PermissionDenied) "Permission in message";
-  print_endline "  ✓ classify_permission_denied"
-
-let test_classify_directory_missing () =
-  (* Directory missing typically has "directory" in the error or is a path that doesn't exist *)
-  expect (Tools.classify_error ~error_message:"Cannot create file: no such directory" = Tools.DirectoryMissing) "Directory missing";
-  print_endline "  ✓ classify_directory_missing"
-
-let test_classify_pattern_not_found () =
-  expect (Tools.classify_error ~error_message:"old_text not found in file" = Tools.PatternNotFound) "Pattern not found";
-  print_endline "  ✓ classify_pattern_not_found"
-
-let test_classify_ambiguous_match () =
-  expect (Tools.classify_error ~error_message:"Ambiguity error: 'old_text' occurs multiple times" = Tools.AmbiguousMatch) "Ambiguous match";
-  expect (Tools.classify_error ~error_message:"Text occurs multiple times in file" = Tools.AmbiguousMatch) "Multiple times";
-  print_endline "  ✓ classify_ambiguous_match"
-
-let test_classify_command_timeout () =
-  expect (Tools.classify_error ~error_message:"Command timed out after 60 seconds" = Tools.CommandTimeout) "Command timeout";
-  expect (Tools.classify_error ~error_message:"Operation timeout" = Tools.CommandTimeout) "Timeout";
-  print_endline "  ✓ classify_command_timeout"
-
-let test_classify_command_not_found () =
-  expect (Tools.classify_error ~error_message:"bash: command not found: xyz" = Tools.CommandNotFound) "Command not found";
-  expect (Tools.classify_error ~error_message:"Command 'git' not found" = Tools.CommandNotFound) "Command not found variant";
-  print_endline "  ✓ classify_command_not_found"
-
-let test_classify_command_failed () =
-  expect (Tools.classify_error ~error_message:"Command failed with exit status 1" = Tools.CommandFailed) "Command failed";
-  print_endline "  ✓ classify_command_failed"
-
-let test_classify_invalid_parameters () =
-  expect (Tools.classify_error ~error_message:"path is required" = Tools.InvalidParameters) "Required parameter";
-  expect (Tools.classify_error ~error_message:"Invalid parameter type" = Tools.InvalidParameters) "Invalid parameter";
-  expect (Tools.classify_error ~error_message:"Expected string but got number" = Tools.InvalidParameters) "Expected type";
-  print_endline "  ✓ classify_invalid_parameters"
-
-let test_classify_other () =
-  expect (Tools.classify_error ~error_message:"Unknown error occurred" = Tools.Other) "Unknown error";
-  expect (Tools.classify_error ~error_message:"Something went wrong" = Tools.Other) "Generic error";
-  print_endline "  ✓ classify_other"
-
-(* ============================================================================
-   Recovery Hint Tests
-   ============================================================================ *)
-
-let test_recovery_hints_present () =
-  (* Test that failure creates recovery hints *)
-  let result = Tools.failure "File /nonexistent.txt not found" in
-  expect result.Tools.is_error "Should be error";
-  expect (result.Tools.error_category = Some Tools.FileNotFound) "Should classify as FileNotFound";
-  expect (result.Tools.recovery_hint <> None) "Should have recovery hint";
-  
-  let result2 = Tools.failure "Permission denied" in
-  expect (result2.Tools.error_category = Some Tools.PermissionDenied) "Should classify as PermissionDenied";
-  expect (result2.Tools.recovery_hint <> None) "Should have recovery hint";
-  
-  let result3 = Tools.failure "old_text not found in file" in
-  expect (result3.Tools.error_category = Some Tools.PatternNotFound) "Should classify as PatternNotFound";
-  expect (result3.Tools.recovery_hint <> None) "Should have recovery hint";
-  
-  print_endline "  ✓ recovery_hints_present"
-
-let test_recovery_hints_content () =
-  (* Test that recovery hints contain actionable advice *)
-  let result = Tools.failure "File /nonexistent.txt not found" in
-  match result.Tools.recovery_hint with
-  | Some hint ->
-      expect (String.length hint > 20) "Hint should be descriptive";
-      expect (String.contains hint '`' || String.contains hint ' ') "Hint should contain guidance";
-      print_endline "  ✓ recovery_hints_content"
-  | None -> fail "Should have recovery hint"
-
-let test_failure_with_explicit_category () =
-  (* Test that explicit error category overrides classification *)
-  let result = Tools.failure ~error_category:Tools.CommandTimeout "Some random error" in
-  expect (result.Tools.error_category = Some Tools.CommandTimeout) "Should use explicit category";
-  expect (result.Tools.recovery_hint <> None) "Should still have hint";
-  print_endline "  ✓ failure_with_explicit_category"
-
-(* ============================================================================
-   Tool Integration Tests
-   ============================================================================ *)
-
-let test_read_file_error_classification () =
-  (* Test that read_file tool properly classifies errors *)
-  let registry = Tools.create_default_registry () in
-  let result = Tools.execute registry ~chat_id:1 "read_file" (`Assoc [("path", `String "/nonexistent/file.txt")]) in
-  expect result.Tools.is_error "Should be error";
-  (* Unix error "No such file or directory" could be classified as either FileNotFound or DirectoryMissing *)
-  let is_file_or_dir_error = 
-    result.Tools.error_category = Some Tools.FileNotFound || 
-    result.Tools.error_category = Some Tools.DirectoryMissing
+let temp_registry () =
+  let root = temp_dir () in
+  let db_path = Filename.concat root "approvals.db" in
+  let project_skills_dir = Filename.concat root "project-skills" in
+  let user_skills_dir = Filename.concat root "user-skills" in
+  Unix.mkdir project_skills_dir 0o755;
+  Unix.mkdir user_skills_dir 0o755;
+  let skills =
+    Agent_skills.Skills.create
+      ~project_skills_dir
+      ~user_skills_dir
+      ~catalog_cache_path:(Filename.concat root "skills-catalog.json")
+      ()
   in
-  expect is_file_or_dir_error "Should classify as FileNotFound or DirectoryMissing";
-  expect (result.Tools.recovery_hint <> None) "Should have recovery hint";
-  Tools.close registry;
-  print_endline "  ✓ read_file_error_classification"
-
-let test_edit_file_pattern_not_found () =
-  (* Test that edit_file properly classifies pattern not found *)
-  let registry = Tools.create_default_registry () in
-  let result = Tools.execute registry ~chat_id:1 "edit_file" (`Assoc [
-    ("path", `String "/etc/passwd");
-    ("old_text", `String "nonexistent_pattern_xyz");
-    ("new_text", `String "replacement");
-  ]) in
-  expect result.Tools.is_error "Should be error";
-  expect (result.Tools.error_category = Some Tools.PatternNotFound) "Should classify as PatternNotFound";
-  expect (result.Tools.recovery_hint <> None) "Should have recovery hint";
-  Tools.close registry;
-  print_endline "  ✓ edit_file_pattern_not_found"
-
-let test_bash_command_failed () =
-  (* Test that bash properly classifies command failures *)
-  (* Note: This test may fail in some environments due to effect handling issues *)
-  let registry = Tools.create_default_registry () in
-  let result = Tools.execute registry ~chat_id:1 "bash" (`Assoc [("command", `String "exit 1")]) in
-  expect result.Tools.is_error "Should be error";
-  (* Check if it's a command failure OR an exception (both are acceptable in test env) *)
-  let is_expected_error = 
-    result.Tools.error_category = Some Tools.CommandFailed ||
-    result.Tools.error_category = Some Tools.Other  (* Exception in test env *)
+  let registry =
+    Tools.create_default_registry
+      ~db_path
+      ~project_root:root
+      ~skills
+      ()
   in
-  expect is_expected_error "Should classify as CommandFailed or Other (exception)";
-  expect (result.Tools.recovery_hint <> None) "Should have recovery hint";
-  Tools.close registry;
-  print_endline "  ✓ bash_command_failed"
+  (root, skills, registry)
 
-(* ============================================================================
-   Main
-   ============================================================================ *)
+let write_file path content =
+  let rec mkdir_p dir =
+    if dir = "" || dir = "." || dir = "/" then ()
+    else if Sys.file_exists dir then ()
+    else (
+      mkdir_p (Filename.dirname dir);
+      Unix.mkdir dir 0o755
+    )
+  in
+  mkdir_p (Filename.dirname path);
+  Stdlib.Out_channel.with_open_bin path (fun channel -> output_string channel content)
+
+let test_read_file_requires_approval () =
+  let root, skills, registry = temp_registry () in
+  let file_path = Filename.concat root "note.txt" in
+  write_file file_path "hello" ;
+  let result = Tools.execute registry ~chat_id:1 "read_file" (`Assoc [("path", `String file_path)]) in
+  expect (not result.Tools.is_error) "read_file should succeed inside project_root without extra approval";
+  expect (result.Tools.content = "hello") "read_file should return file contents";
+  Tools.close registry;
+  Agent_skills.Skills.close skills;
+  print_endline "  ✓ read_file_allowed_in_project_root"
+
+let test_read_file_succeeds_after_approval () =
+  let _root, skills, registry = temp_registry () in
+  let approved_root = temp_dir () in
+  let nested = Filename.concat approved_root "docs/note.txt" in
+  write_file nested "approved read" ;
+  begin
+    match Tools.approve_root registry ~scope:Tools.Read approved_root with
+    | Ok _ -> ()
+    | Error err -> fail err
+  end;
+  let result = Tools.execute registry ~chat_id:1 "read_file" (`Assoc [("path", `String nested)]) in
+  expect (not result.Tools.is_error) "read_file should succeed after approval";
+  expect (result.Tools.content = "approved read") "read_file should return file contents";
+  Tools.close registry;
+  Agent_skills.Skills.close skills;
+  print_endline "  ✓ read_file_succeeds_after_approval"
+
+let test_write_allowed_in_project_root () =
+  let root, skills, registry = temp_registry () in
+  let file_path = Filename.concat root "write.txt" in
+  let result =
+    Tools.execute registry ~chat_id:1 "write_file"
+      (`Assoc [("path", `String file_path); ("content", `String "text")])
+  in
+  expect (not result.Tools.is_error) "write_file should succeed inside project_root without extra approval";
+  expect (Sys.file_exists file_path) "write_file should create the target file";
+  Tools.close registry;
+  Agent_skills.Skills.close skills;
+  print_endline "  ✓ write_allowed_in_project_root"
+
+let test_write_requires_separate_write_approval_outside_project_root () =
+  let root, skills, registry = temp_registry () in
+  begin
+    match Tools.approve_root registry ~scope:Tools.Read root with
+    | Ok _ -> ()
+    | Error err -> fail err
+  end;
+  let outside_root = temp_dir () in
+  let file_path = Filename.concat outside_root "write.txt" in
+  let result =
+    Tools.execute registry ~chat_id:1 "write_file"
+      (`Assoc [("path", `String file_path); ("content", `String "text")])
+  in
+  expect result.Tools.is_error "write_file should fail outside project_root without write approval";
+  expect (result.Tools.error_category = Some Tools.ApprovalRequired) "write_file should require write approval outside project_root";
+  Tools.close registry;
+  Agent_skills.Skills.close skills;
+  print_endline "  ✓ write_requires_separate_write_approval_outside_project_root"
+
+let test_edit_pattern_errors_are_structured () =
+  let root, skills, registry = temp_registry () in
+  let file_path = Filename.concat root "edit.txt" in
+  write_file file_path "repeat\nrepeat\n" ;
+  begin
+    match Tools.approve_root registry ~scope:Tools.Write root with
+    | Ok _ -> ()
+    | Error err -> fail err
+  end;
+  let result =
+    Tools.execute registry ~chat_id:1 "edit_file"
+      (`Assoc [
+        ("path", `String file_path);
+        ("old_text", `String "repeat");
+        ("new_text", `String "done");
+      ])
+  in
+  expect result.Tools.is_error "edit_file should fail on ambiguous replacement";
+  expect (result.Tools.error_category = Some Tools.AmbiguousMatch) "edit_file should return AmbiguousMatch";
+  Tools.close registry;
+  Agent_skills.Skills.close skills;
+  print_endline "  ✓ edit_pattern_errors_are_structured"
+
+let test_bash_timeout_validation () =
+  let _root, skills, registry = temp_registry () in
+  let result =
+    Tools.execute registry ~chat_id:1 "bash"
+      (`Assoc [("command", `String "echo ok"); ("timeout_seconds", `Int 0)])
+  in
+  expect result.Tools.is_error "bash should reject invalid timeout";
+  expect (result.Tools.error_category = Some Tools.InvalidParameters) "bash should validate timeout bounds";
+  Tools.close registry;
+  Agent_skills.Skills.close skills;
+  print_endline "  ✓ bash_timeout_validation"
+
+let test_bash_requires_executable_approval () =
+  let _root, skills, registry = temp_registry () in
+  let result = Tools.execute registry ~chat_id:1 "bash" (`Assoc [("command", `String "echo ok")]) in
+  expect result.Tools.is_error "bash should fail before executable approval";
+  expect (result.Tools.error_category = Some Tools.ApprovalRequired) "bash should request executable approval";
+  begin
+    match result.Tools.approval_request with
+    | Some request -> expect (request.scope = Tools.Execute) "approval should target executable scope"
+    | None -> fail "expected executable approval request"
+  end;
+  Tools.close registry;
+  Agent_skills.Skills.close skills;
+  print_endline "  ✓ bash_requires_executable_approval"
+
+let test_bash_succeeds_after_executable_approval () =
+  let _root, skills, registry = temp_registry () in
+  begin
+    match Tools.approve_executable registry "echo" with
+    | Ok _ -> ()
+    | Error err -> fail err
+  end;
+  let result =
+    Tools.execute registry ~chat_id:1 "bash"
+      (`Assoc [("command", `String "echo approved"); ("timeout_seconds", `Int 2)])
+  in
+  expect (not result.Tools.is_error) "bash should succeed after approval";
+  expect (String.contains result.Tools.content 'a') "bash output should be present";
+  Tools.close registry;
+  Agent_skills.Skills.close skills;
+  print_endline "  ✓ bash_succeeds_after_executable_approval"
 
 let () =
-  print_endline "Running tool error tests...";
-  test_classify_file_not_found ();
-  test_classify_permission_denied ();
-  test_classify_directory_missing ();
-  test_classify_pattern_not_found ();
-  test_classify_ambiguous_match ();
-  test_classify_command_timeout ();
-  test_classify_command_not_found ();
-  test_classify_command_failed ();
-  test_classify_invalid_parameters ();
-  test_classify_other ();
-  test_recovery_hints_present ();
-  test_recovery_hints_content ();
-  test_failure_with_explicit_category ();
-  test_read_file_error_classification ();
-  test_edit_file_pattern_not_found ();
-  test_bash_command_failed ();
-  print_endline "[PASS] all tool error tests ✓"
+  print_endline "Running tool approval and error tests...";
+  test_read_file_requires_approval ();
+  test_read_file_succeeds_after_approval ();
+  test_write_allowed_in_project_root ();
+  test_write_requires_separate_write_approval_outside_project_root ();
+  test_edit_pattern_errors_are_structured ();
+  test_bash_timeout_validation ();
+  test_bash_requires_executable_approval ();
+  test_bash_succeeds_after_executable_approval ();
+  print_endline "[PASS] tool approval and error tests"

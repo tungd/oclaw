@@ -13,6 +13,46 @@ module Message = struct
     let status = "status"
   end
 
+  type initialize_params = {
+    capabilities : Yojson.Safe.t;
+  }
+  [@@deriving yojson]
+
+  type agent_message_params = {
+    content : string;
+    chat_id : int option;
+  }
+  [@@deriving yojson]
+
+  type agent_plan_params = {
+    steps : string list;
+  }
+  [@@deriving yojson]
+
+  type agent_delta_params = {
+    content : string;
+  }
+  [@@deriving yojson]
+
+  type tool_call_params = {
+    name : string;
+    arguments : Yojson.Safe.t;
+  }
+  [@@deriving yojson]
+
+  type tool_result_payload = {
+    name : string;
+    content : string;
+    is_error : bool;
+  }
+  [@@deriving yojson]
+
+  type status_params = {
+    status : string;
+    message : string option;
+  }
+  [@@deriving yojson]
+
   type t =
     | Initialize of { capabilities : Yojson.Safe.t }
     | Initialized
@@ -25,34 +65,27 @@ module Message = struct
     | Error of { message : string; code : int }
     | Done
 
+  let structured_of_yojson json =
+    Jsonrpc.Structured.t_of_yojson json
+
   let to_structured ~id:_ t =
     match t with
     | Initialize { capabilities } ->
-        `Assoc [("capabilities", capabilities)]
+        initialize_params_to_yojson { capabilities }
     | Initialized ->
         `Assoc []
     | Agent_message { content; chat_id } ->
-        let fields = [("content", `String content)] in
-        let fields = match chat_id with
-          | Some cid -> ("chat_id", `Int cid) :: fields
-          | None -> fields
-        in
-        `Assoc fields
+        agent_message_params_to_yojson { content; chat_id }
     | Agent_plan { steps } ->
-        `Assoc [("steps", `List (List.map (fun s -> `String s) steps))]
+        agent_plan_params_to_yojson { steps }
     | Agent_delta { content } ->
-        `Assoc [("content", `String content)]
+        agent_delta_params_to_yojson { content }
     | Tool_call { name; arguments } ->
-        `Assoc [("name", `String name); ("arguments", arguments)]
+        tool_call_params_to_yojson { name; arguments }
     | Tool_result { name; content; is_error } ->
-        `Assoc [("name", `String name); ("content", `String content); ("is_error", `Bool is_error)]
+        tool_result_payload_to_yojson { name; content; is_error }
     | Status { status; message } ->
-        let fields = [("status", `String status)] in
-        let fields = match message with
-          | Some m -> ("message", `String m) :: fields
-          | None -> fields
-        in
-        `Assoc fields
+        status_params_to_yojson { status; message }
     | Error { message; code } ->
         `Assoc [("message", `String message); ("code", `Int code)]
     | Done ->
@@ -65,23 +98,23 @@ module Message = struct
     | Initialized ->
         Jsonrpc.Packet.Notification (Jsonrpc.Notification.create ~method_:Method.initialized ())
     | Agent_message _ ->
-        let params = to_structured ~id t in
+        let params = structured_of_yojson (to_structured ~id t) in
         Jsonrpc.Packet.Request (Jsonrpc.Request.create ~id ~method_:Method.agent_message ~params ())
     | Agent_plan _ ->
-        let params = to_structured ~id t in
+        let params = structured_of_yojson (to_structured ~id t) in
         Jsonrpc.Packet.Notification (Jsonrpc.Notification.create ~method_:Method.agent_plan ~params ())
     | Agent_delta _ ->
-        let params = to_structured ~id t in
+        let params = structured_of_yojson (to_structured ~id t) in
         Jsonrpc.Packet.Notification (Jsonrpc.Notification.create ~method_:Method.agent_delta ~params ())
     | Tool_call _ ->
-        let params = to_structured ~id t in
+        let params = structured_of_yojson (to_structured ~id t) in
         Jsonrpc.Packet.Request (Jsonrpc.Request.create ~id ~method_:Method.tools_call ~params ())
     | Tool_result { name; content; is_error } ->
         (* Tool results are sent as responses *)
-        let result = `Assoc [("name", `String name); ("content", `String content); ("is_error", `Bool is_error)] in
+        let result = tool_result_payload_to_yojson { name; content; is_error } in
         Jsonrpc.Packet.Response (Jsonrpc.Response.ok id result)
     | Status _ ->
-        let params = to_structured ~id t in
+        let params = structured_of_yojson (to_structured ~id t) in
         Jsonrpc.Packet.Notification (Jsonrpc.Notification.create ~method_:Method.status ~params ())
     | Error { message; code } ->
         let error = Jsonrpc.Response.Error.make ~code:(Jsonrpc.Response.Error.Code.Other code) ~message () in
@@ -91,48 +124,36 @@ module Message = struct
 
   let of_structured method_name params =
     match method_name, params with
-    | "initialize", `Assoc fields ->
-        let capabilities = List.assoc_opt "capabilities" fields |> Option.value ~default:`Null in
-        Some (Initialize { capabilities })
-    | "agent/message", `Assoc fields ->
-        let content = match List.assoc_opt "content" fields with
-          | Some (`String s) -> s
-          | _ -> ""
-        in
-        let chat_id = match List.assoc_opt "chat_id" fields with
-          | Some (`Int i) -> Some i
-          | _ -> None
-        in
-        Some (Agent_message { content; chat_id })
-    | "tools/call", `Assoc fields ->
-        let name = match List.assoc_opt "name" fields with
-          | Some (`String s) -> s
-          | _ -> ""
-        in
-        let arguments = List.assoc_opt "arguments" fields |> Option.value ~default:`Null in
-        Some (Tool_call { name; arguments })
-    | "agent/plan", `Assoc fields ->
-        let steps = match List.assoc_opt "steps" fields with
-          | Some (`List l) -> List.filter_map (function `String s -> Some s | _ -> None) l
-          | _ -> []
-        in
-        Some (Agent_plan { steps })
-    | "agent/delta", `Assoc fields ->
-        let content = match List.assoc_opt "content" fields with
-          | Some (`String s) -> s
-          | _ -> ""
-        in
-        Some (Agent_delta { content })
-    | "status", `Assoc fields ->
-        let status = match List.assoc_opt "status" fields with
-          | Some (`String s) -> s
-          | _ -> ""
-        in
-        let message = match List.assoc_opt "message" fields with
-          | Some (`String s) -> Some s
-          | _ -> None
-        in
-        Some (Status { status; message })
+    | "initialize", _ ->
+        begin match initialize_params_of_yojson params with
+        | Ok { capabilities } -> Some (Initialize { capabilities })
+        | Error _ -> None
+        end
+    | "agent/message", _ ->
+        begin match agent_message_params_of_yojson params with
+        | Ok { content; chat_id } -> Some (Agent_message { content; chat_id })
+        | Error _ -> None
+        end
+    | "tools/call", _ ->
+        begin match tool_call_params_of_yojson params with
+        | Ok { name; arguments } -> Some (Tool_call { name; arguments })
+        | Error _ -> None
+        end
+    | "agent/plan", _ ->
+        begin match agent_plan_params_of_yojson params with
+        | Ok { steps } -> Some (Agent_plan { steps })
+        | Error _ -> None
+        end
+    | "agent/delta", _ ->
+        begin match agent_delta_params_of_yojson params with
+        | Ok { content } -> Some (Agent_delta { content })
+        | Error _ -> None
+        end
+    | "status", _ ->
+        begin match status_params_of_yojson params with
+        | Ok { status; message } -> Some (Status { status; message })
+        | Error _ -> None
+        end
     | "done", _ ->
         Some Done
     | "initialized", _ ->
@@ -142,32 +163,26 @@ module Message = struct
   let of_jsonrpc_packet packet =
     match packet with
     | Jsonrpc.Packet.Request req ->
-        of_structured req.Jsonrpc.Request.method_ (Option.value ~default:(`Assoc []) req.Jsonrpc.Request.params)
+        of_structured req.Jsonrpc.Request.method_
+          ((Option.value ~default:(`Assoc []) req.Jsonrpc.Request.params : Jsonrpc.Structured.t) :> Yojson.Safe.t)
     | Jsonrpc.Packet.Notification notif ->
-        of_structured notif.Jsonrpc.Notification.method_ (Option.value ~default:(`Assoc []) notif.Jsonrpc.Notification.params)
+        of_structured notif.Jsonrpc.Notification.method_
+          ((Option.value ~default:(`Assoc []) notif.Jsonrpc.Notification.params : Jsonrpc.Structured.t) :> Yojson.Safe.t)
     | Jsonrpc.Packet.Response resp ->
         (match resp.Jsonrpc.Response.result with
-         | Ok (`Assoc fields) ->
-             let name = match List.assoc_opt "name" fields with
-               | Some (`String s) -> s
-               | _ -> ""
-             in
-             let content = match List.assoc_opt "content" fields with
-               | Some (`String s) -> s
-               | _ -> ""
-             in
-             let is_error = match List.assoc_opt "is_error" fields with
-               | Some (`Bool b) -> b
-               | _ -> false
-             in
-             Some (Tool_result { name; content; is_error })
+         | Ok json ->
+             begin match tool_result_payload_of_yojson json with
+             | Ok { name; content; is_error } ->
+                 Some (Tool_result { name; content; is_error })
+             | Error _ -> None
+             end
          | Error e ->
              Some (Error { message = e.Jsonrpc.Response.Error.message; code = 
                match e.Jsonrpc.Response.Error.code with
                | Other c -> c
                | _ -> -1
              })
-         | _ -> None)
+        )
     | Jsonrpc.Packet.Batch_response _ | Jsonrpc.Packet.Batch_call _ ->
         None
 end

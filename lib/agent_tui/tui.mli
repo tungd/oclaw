@@ -8,4 +8,4 @@
 *)
 
 (** Start the TUI application *)
-val run : state:Agent_core.Runtime.app_state -> chat_id:int -> persistent:bool -> unit
+val run : state:Agent_runtime.App.t -> chat_id:int -> persistent:bool -> unit

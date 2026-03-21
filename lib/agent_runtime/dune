@@ -1,0 +1,23 @@
+(rule
+ (targets transcript_css.ml)
+ (deps (source_tree transcript_css))
+ (action (run ocaml-crunch -m plain -o %{targets} transcript_css)))
+
+(library
+ (name agent_runtime)
+ (modules config app session export assistant runtime agent_engine project_paths transcript tree transcript_css tools)
+ (private_modules runtime agent_engine project_paths transcript tree transcript_css)
+ (libraries
+  agent_skills
+  httpkit
+ sqlite3
+  unix
+  logs
+  yojson
+  tyxml
+  ppx_deriving_yojson.runtime
+  yaml
+  domainslib
+  llm_types
+  llm_provider)
+ (preprocess (pps ppx_deriving_yojson ppx_deriving_yaml)))

@@ -1,27 +1,39 @@
 (test
  (name test_config)
- (libraries agent_core llm_provider))
+ (libraries agent_runtime llm_provider))
 
 (test
  (name test_http_client)
  (libraries h1 httpkit yojson))
 
 (test
+ (name test_acp)
+ (libraries acp yojson))
+
+(test
  (name test_tools_registry)
- (libraries agent_core agent_tools yojson unix))
+ (libraries agent_runtime yojson unix))
 
 (test
  (name test_assistant_runtime)
- (libraries agent_core agent_tools llm_provider yojson unix))
+ (libraries agent_runtime llm_provider yojson unix))
 
 (test
  (name test_llm_provider)
  (libraries llm_types llm_provider yojson))
 
 (test
+ (name test_llm_types)
+ (libraries llm_types yojson))
+
+(test
  (name test_retry)
- (libraries agent_core llm_provider))
+ (libraries llm_provider))
 
 (test
  (name test_tool_errors)
- (libraries agent_core agent_tools))
+ (libraries agent_runtime))
+
+(test
+ (name test_skill_support)
+ (libraries agent_runtime agent_skills unix))

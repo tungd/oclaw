@@ -10,6 +10,8 @@ OClaw is a CLI-first AI assistant written in OCaml 5. It ships as a single execu
 
 The codebase is organized as a set of reusable libraries around a small `oclaw` entrypoint.
 
+The supported runtime surface is `agent_runtime`. Skill parsing and discovery remain in `agent_skills`, while tool execution, skill trust, and activation approvals live inside the runtime.
+
 ## Current Status
 
 What is implemented today:
@@ -18,8 +20,8 @@ What is implemented today:
 - ACP mode for JSON-RPC clients
 - Persistent conversations keyed by `chat_id`
 - Tree-structured transcript storage with conversation export to HTML and JSON
-- Built-in tools: `bash`, `read_file`, `write_file`, `edit_file`
-- Local skill discovery from `workspace/skills/`
+- Built-in tools: `bash`, `read_file`, `write_file`, `edit_file`, `skill_list`, `skill_search`, `skill_install`
+- Agent Skills discovery, trust gating, activation, and remote install/search support
 - OpenAI-compatible chat-completions provider integration
 - Retry logic and tool error classification covered by tests
 
@@ -36,9 +38,8 @@ oclaw/
 ├── bin/oclaw/          # CLI entrypoint
 ├── lib/
 │   ├── acp/            # ACP message and stdio transport support
-│   ├── agent_core/     # Runtime, transcript store, config, agent loop
-│   ├── agent_skills/   # Local skill discovery and sync
-│   ├── agent_tools/    # Built-in tool registry and execution
+│   ├── agent_runtime/  # Runtime, transcript store, config, agent loop, and tools
+│   ├── agent_skills/   # Skill discovery, parsing, and install/search data
 │   ├── agent_tui/      # Mosaic-based TUI frontend
 │   ├── httpkit/        # Minimal HTTP client
 │   ├── llm_provider/   # OpenAI-compatible provider + retry logic
@@ -177,10 +178,13 @@ Notes:
 
 ## Runtime Data
 
-By default, OClaw writes state under `workspace/`:
+By default, OClaw writes project state under `<project>/.agents/`:
 
-- `workspace/runtime/` for transcript data
-- `workspace/skills/` for local skills
+- `<project>/.agents/oclaw.db` for transcript data and approvals
+- `<project>/.agents/skills/` for project-scoped skills
+- `<project>/.agents/user/skills/` as a fallback user-scope skills directory when `~/.oclaw` is not writable
+
+When writable, OClaw also uses `~/.oclaw/` for user-scoped skills and remote catalog cache.
 
 The transcript layer supports:
 
@@ -191,12 +195,17 @@ The transcript layer supports:
 
 ## Built-in Tools
 
-The default registry contains four tools:
+The default registry contains seven always-available tools:
 
 - `bash`
 - `read_file`
 - `write_file`
 - `edit_file`
+- `skill_list`
+- `skill_search`
+- `skill_install`
+
+When at least one trusted skill is available, OClaw also exposes `activate_skill`.
 
 Tool execution behavior today:
 
@@ -211,21 +220,41 @@ Important limitation:
 
 ## Skills
 
-Skills are discovered from `workspace/skills/<name>/SKILL.md`.
+OClaw follows the `agentskills.io` `SKILL.md` model with scoped discovery and explicit activation.
 
-Current capabilities:
+Discovery scopes:
 
-- Discover local skills and include a catalog in the system prompt
-- Read a specific skill by name
-- Sync a skill from a remote GitHub repo into the local skills directory
+- Built-in skills shipped with OClaw
+- User skills from `~/.oclaw/skills/` when writable
+- Project skills from `<project>/.agents/skills/`
 
-This is currently a local file-based workflow, not a full packaged plugin system.
+Trust behavior:
+
+- Project skills are hidden from the model until the project is trusted
+- User and built-in skills are available without project trust
+- Skills are disclosed progressively: only metadata goes into the system prompt, and full instructions are loaded via `activate_skill`
+- Trust is enforced by `agent_runtime`, not by `agent_skills`
+
+User and agent entrypoints:
+
+- `skill_list` lists discoverable skills
+- `skill_search` searches local and remote official catalog skills
+- `skill_install` installs a remote skill after explicit approval
+- `activate_skill` loads a trusted skill into the conversation
+- Users can explicitly activate skills with `/skill <name>` or `$skill-name`
+
+Approval behavior:
+
+- `skill_install` requires `/approve install <skill-name>`
+- Skill `allowed-tools` entries currently pre-approve supported `Read`, `Write`, and `Bash(...)` entries during activation
 
 ## Architecture Notes
 
 ### Agent Loop
 
-The core loop in [`lib/agent_core/agent_engine.ml`](/Users/tung/Projects/std23/oclaw/lib/agent_core/agent_engine.ml) does the following:
+The public runtime entrypoint is exposed through `Agent_runtime.App`, `Agent_runtime.Session`, and `Agent_runtime.Export`.
+
+Internally, the core loop in [`lib/agent_runtime/agent_engine.ml`](/Users/tung/Projects/std23/oclaw/lib/agent_runtime/agent_engine.ml) does the following:
 
 1. Store the user prompt in the transcript
 2. Build the system prompt, including discovered skills

@@ -1,4 +1,4 @@
-module Config = Agent_core.Config
+module Config = Agent_runtime.Config
 module Log = (val Logs.src_log Logs.default : Logs.LOG)
 
 type cli_options = {
@@ -42,7 +42,7 @@ let run_acp state chat_id persistent =
              let on_text_delta delta =
                Acp.Stdio_frontend.send frontend (Acp.Message.to_jsonrpc (Acp.Message.Agent_delta { content = delta }))
              in
-             (match Agent_core.Agent_engine.process ~on_text_delta state ~chat_id ~persistent content with
+             (match Agent_runtime.Session.process ~on_text_delta state ~chat_id ~persistent content with
               | Ok response ->
                   Acp.Stdio_frontend.send frontend (Acp.Message.to_jsonrpc ~id (Acp.Message.Agent_message { content = response; chat_id = Some chat_id }));
                   Acp.Stdio_frontend.send frontend (Acp.Message.to_jsonrpc (Acp.Message.Done));
@@ -88,7 +88,7 @@ let () =
           exit 2
       | Ok config ->
           begin
-            match Agent_core.Runtime.create_app_state config with
+            match Agent_runtime.App.create config with
             | Error err ->
                 prerr_endline ("OClaw error: " ^ err);
                 exit 1
@@ -97,9 +97,9 @@ let () =
                 (match !options.export_chat with
                 | Some chat_id ->
                     let out_path = Option.value ~default:(Printf.sprintf "transcript_%d.html" chat_id) !options.export_output in
-                    Agent_core.Transcript.export_html state.Agent_core.Runtime.transcript ~chat_id ~out_path;
+                    Agent_runtime.Export.html state ~chat_id ~out_path;
                     Printf.printf "Exported to %s\n" out_path;
-                    Agent_core.Runtime.close_app_state state;
+                    Agent_runtime.App.close state;
                     exit 0
                 | None ->
                     let exit_code =

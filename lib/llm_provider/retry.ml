@@ -12,9 +12,14 @@ type retry_config = {
   exponential_base : float;
 }
 
+type retry_error = {
+  message : string;
+  http_status : int option;
+}
+
 type 'a retry_result =
   | Success of 'a
-  | Failed of string * int
+  | Failed of retry_error * int
 
 let default_config = {
   max_retries = 3;
@@ -97,44 +102,23 @@ let with_retry ~config f =
     else
       match f () with
       | Ok result -> Success result
-      | Error error_msg ->
-          (* Try to extract HTTP status from error message *)
-          (* Look for patterns like "HTTP 429" or "status: 500" in error *)
-          let http_status =
-            try
-              let re = Str.regexp "\\b\\(4[0-9][0-9]\\|5[0-9][0-9]\\)\\b" in
-              let _ = Str.search_forward re error_msg 0 in
-              let matched = Str.matched_string error_msg in
-              Some (int_of_string matched)
-            with Not_found | Failure _ -> None
-          in
-          
-          (* Check if retryable: either has retryable HTTP status OR contains retryable patterns in body *)
+      | Error error ->
           let is_retryable =
-            match http_status with
-            | Some 429 -> true
-            | Some status when status >= 500 && status < 600 -> true
-            | None ->
-                (* No status code - check error body for retryable patterns *)
-                is_retryable_error ~http_status:None ~error_body:error_msg
-            | Some _ ->
-                (* Client error - only retry if body contains retryable patterns *)
-                is_retryable_error ~http_status:(Some 400) ~error_body:error_msg
+            is_retryable_error ~http_status:error.http_status ~error_body:error.message
           in
-          
           if is_retryable then
             begin
               Log.warn (fun m -> m "API call failed (attempt %d/%d): %s" 
-                          attempt config.max_retries error_msg);
+                          attempt config.max_retries error.message);
               let delay_ms = calculate_delay ~config ~attempt in
               Log.info (fun m -> m "Waiting %dms before retry..." delay_ms);
               Unix.sleepf (float delay_ms /. 1000.0);
-              loop (attempt + 1) error_msg
+              loop (attempt + 1) error
             end
           else
             begin
-              Log.err (fun m -> m "Non-retryable error (attempt %d): %s" attempt error_msg);
-              Failed (error_msg, attempt)
+              Log.err (fun m -> m "Non-retryable error (attempt %d): %s" attempt error.message);
+              Failed (error, attempt)
             end
   in
-  loop 1 "Unknown error"
+  loop 1 { message = "Unknown error"; http_status = None }

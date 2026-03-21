@@ -14,15 +14,3 @@ val execute_request :
   ?on_write:(string -> unit) ->
   H1.Request.t ->
   (H1.Response.t * string, string) result
-
-(** Perform multiple HTTP requests concurrently using curl.multi.
-
-    Each request may optionally have a request body. If [on_write] is provided,
-    it receives the request index and each response chunk as it arrives.
-
-    Each element succeeds independently. *)
-val execute_requests :
-  ?timeout:int ->
-  ?on_write:(int -> string -> unit) ->
-  (H1.Request.t * string option) list ->
-  (H1.Response.t * string, string) result list

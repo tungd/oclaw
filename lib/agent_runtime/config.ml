@@ -7,7 +7,6 @@
 *)
 
 module Yaml_lib = Yaml
-module Yaml = Protocol_conv_yaml.Yaml
 
 (* ============================================================================
    Configuration Type
@@ -24,7 +23,7 @@ type config = {
   
   (* Agent Limits *)
   max_tool_iterations : int;
-  
+
   (* Debug *)
   debug : bool;
   
@@ -34,7 +33,7 @@ type config = {
   api_retry_base_delay_ms : int;
   api_retry_max_delay_ms : int;
 }
-[@@deriving protocol ~driver:(module Yaml)]
+[@@deriving yaml]
 
 (* ============================================================================
    Hardcoded Constants
@@ -44,7 +43,6 @@ let default_llm_api_base = "https://coding-intl.dashscope.aliyuncs.com/v1"
 let default_data_dir = "workspace"
 let default_max_tool_iterations = 256
 let default_llm_timeout = 60
-
 (* API Retry defaults *)
 let default_api_retry_enabled = true
 let default_api_retry_max_retries = 3

@@ -1,6 +1,6 @@
 (** Configuration tests: precedence, validation, and parse failures. *)
 
-module Config = Agent_core.Config
+module Config = Agent_runtime.Config
 
 let fail msg =
   Printf.eprintf "[FAIL] %s\n" msg;
