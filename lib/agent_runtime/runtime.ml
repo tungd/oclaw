@@ -6,6 +6,12 @@ type llm_call =
   tools:Llm_types.tool_definition list ->
   (Llm_types.messages_response, string) result
 
+type pending_permission = {
+  tool_call : Acp.Message.tool_call;
+  request : Tools.approval_request;
+  resume : Acp.Message.permission_outcome -> (unit, string) result;
+}
+
 type app_state = {
   config : Config.config;
   provider_config : Llm_provider.provider_config;
@@ -16,6 +22,8 @@ type app_state = {
   tools : Tools.t;
   llm_call : llm_call;
   system_prompt_override : string option;
+  pending_permissions : (int, pending_permission) Hashtbl.t;
+  pending_permissions_mutex : Mutex.t;
 }
 
 let default_llm_call provider_config ?emit ~system_prompt messages ~tools =
@@ -60,6 +68,8 @@ let create_app_state ?(llm_call=default_llm_call) ?system_prompt_override config
       tools;
       llm_call;
       system_prompt_override;
+      pending_permissions = Hashtbl.create 8;
+      pending_permissions_mutex = Mutex.create ();
     }
   with exn ->
     Error (Printexc.to_string exn)

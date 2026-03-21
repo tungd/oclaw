@@ -312,12 +312,14 @@ let get_roots t ~chat_id =
 let get_branch t node_id =
   let _ = match get_node t node_id with Some n -> n | None -> failwith "Node not found" in
   let path_nodes = get_path_to_root t node_id in
-  let node_to_message n = match n.kind with
-    | UserPrompt -> { Llm_types.role = "user"; content = n.content }
-    | LLMResponse -> { Llm_types.role = "assistant"; content = n.content }
-    | ToolCall -> { Llm_types.role = "assistant"; content = n.content }
-    | ToolResult -> { Llm_types.role = "user"; content = n.content }
-  in List.map node_to_message path_nodes
+  let node_to_message n =
+    match n.kind with
+    | UserPrompt -> Some { Llm_types.role = "user"; content = n.content }
+    | LLMResponse -> Some { Llm_types.role = "assistant"; content = n.content }
+    | ToolCall -> None
+    | ToolResult -> Some { Llm_types.role = "user"; content = n.content }
+  in
+  List.filter_map node_to_message path_nodes
 
 let get_subtree t node_id =
   let node = match get_node t node_id with Some n -> n | None -> failwith "Node not found" in

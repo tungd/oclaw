@@ -9,3 +9,9 @@ val process :
   ?persistent:bool ->
   string ->
   (unit, string) result
+
+val resolve_permission :
+  Runtime.app_state ->
+  chat_id:int ->
+  Acp.Message.permission_outcome ->
+  (unit, string) result

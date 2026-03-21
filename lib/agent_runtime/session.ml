@@ -1,6 +1,9 @@
 let process ~emit app ~chat_id ?(persistent=false) prompt =
   Agent_engine.process ~emit (App.internal_state app) ~chat_id ~persistent prompt
 
+let resolve_permission app ~chat_id outcome =
+  Agent_engine.resolve_permission (App.internal_state app) ~chat_id outcome
+
 let history (app : App.t) ~chat_id =
   let state = App.internal_state app in
   match Transcript.get_latest_node state.Runtime.transcript ~chat_id with

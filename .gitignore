@@ -3,3 +3,4 @@
 /.envrc
 /lib/_build/
 /workspace/runtime/
+/.agents/oclaw.db

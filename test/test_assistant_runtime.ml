@@ -77,6 +77,17 @@ let expect_final_message expected events =
   | Some content -> expect (content = expected) ("unexpected final message: " ^ content)
   | None -> fail "expected final agent message"
 
+let tool_call_uses_path tool_call expected_path =
+  match tool_call.Acp.Message.raw_input with
+  | Some (`Assoc fields) ->
+      begin
+        match List.assoc_opt "path" fields, List.assoc_opt "command" fields with
+        | Some (`String path), _ -> path = expected_path
+        | _, Some (`String command) -> command = expected_path
+        | _ -> false
+      end
+  | _ -> false
+
 let text_messages messages =
   messages
   |> List.filter_map (fun (msg : Llm_types.message) ->
@@ -91,6 +102,21 @@ let text_messages messages =
              |> function
              | [] -> None
              | lines -> Some (String.concat "\n" lines))
+
+let count_assistant_tool_use_messages messages =
+  messages
+  |> List.fold_left
+       (fun count (msg : Llm_types.message) ->
+         match msg.role, msg.content with
+         | "assistant", Llm_types.Blocks blocks
+           when List.exists
+                  (function
+                    | Llm_types.Tool_use _ -> true
+                    | _ -> false)
+                  blocks ->
+             count + 1
+         | _ -> count)
+       0
 
 let test_persistent_session () =
   let data_dir = temp_dir () in
@@ -154,6 +180,9 @@ let test_tool_loop_and_resume () =
       tool_response "read_file" [ ("path", `String (Filename.concat data_dir "note.txt")) ]
     else (
       let contents = text_messages messages in
+      expect
+        (count_assistant_tool_use_messages messages = 1)
+        "tool turn should replay exactly one assistant tool_use message";
       expect (List.mem "tool output" contents) "tool result missing from follow-up call";
       text_response "done"
     )
@@ -172,14 +201,16 @@ let test_tool_loop_and_resume () =
         expect
           (List.exists
              (function
-               | Acp.Message.Tool_call { name; _ } -> name = "read_file"
+               | Acp.Message.Session_update { update = Acp.Message.Tool_call tool_call; _ } ->
+                   tool_call_uses_path tool_call (Filename.concat data_dir "note.txt")
                | _ -> false)
              events1)
           "expected read_file tool call event";
         expect
           (List.exists
              (function
-               | Acp.Message.Tool_result { name; is_error; _ } -> name = "read_file" && not is_error
+               | Acp.Message.Session_update { update = Acp.Message.Tool_call_update { status = Some Acp.Message.Completed; raw_input; _ }; _ } ->
+                   raw_input = Some (`Assoc [ ("path", `String (Filename.concat data_dir "note.txt")) ])
                | _ -> false)
              events1)
           "expected successful read_file tool result event"
@@ -197,6 +228,86 @@ let test_tool_loop_and_resume () =
     match result2 with
     | Ok () -> expect_final_message "second turn" events2
     | Error err -> fail err
+  end
+
+let test_permission_request_and_resume () =
+  let data_dir = temp_dir () in
+  let calls = ref 0 in
+  let llm _provider ?emit:_ ~system_prompt:_ messages ~tools:_ =
+    incr calls;
+    if !calls = 1 then
+      tool_response "bash" [ ("command", `String "echo approved") ]
+    else (
+      let contents = text_messages messages in
+      expect (List.exists (fun text -> String.contains text 'a') contents) "approved tool result should be present after resume";
+      text_response "done"
+    )
+  in
+  let state = create_state ~llm_call:llm data_dir in
+  let events = ref [] in
+  let emit event = events := !events @ [ event ] in
+  begin
+    match Agent_runtime.Session.process ~emit state ~chat_id:15 "run echo" with
+    | Error err -> fail err
+    | Ok () ->
+        expect
+          (List.exists
+             (function
+               | Acp.Message.Request_permission { tool_call = { tool_call_id = "call-1"; _ }; options; _ } ->
+                   List.length options = 2
+               | _ -> false)
+             !events)
+          "expected request_permission event"
+  end;
+  begin
+    match Agent_runtime.Session.resolve_permission state ~chat_id:15 (Acp.Message.Selected "allow-once") with
+    | Error err -> fail err
+    | Ok () ->
+        expect_final_message "done" !events;
+        expect
+          (List.exists
+             (function
+               | Acp.Message.Session_update { update = Acp.Message.Tool_call_update { status = Some Acp.Message.Completed; _ }; _ } -> true
+               | _ -> false)
+             !events)
+          "expected completed tool call after approval"
+  end
+
+let test_permission_request_and_reject () =
+  let data_dir = temp_dir () in
+  let calls = ref 0 in
+  let llm _provider ?emit:_ ~system_prompt:_ messages ~tools:_ =
+    incr calls;
+    if !calls = 1 then
+      tool_response "bash" [ ("command", `String "echo rejected") ]
+    else (
+      let contents = text_messages messages in
+      expect
+        (List.exists (fun text -> String.starts_with ~prefix:"Permission rejected" text) contents)
+        "rejection should be returned as tool failure";
+      text_response "rejected done"
+    )
+  in
+  let state = create_state ~llm_call:llm data_dir in
+  let events = ref [] in
+  let emit event = events := !events @ [ event ] in
+  begin
+    match Agent_runtime.Session.process ~emit state ~chat_id:16 "run reject" with
+    | Error err -> fail err
+    | Ok () -> ()
+  end;
+  begin
+    match Agent_runtime.Session.resolve_permission state ~chat_id:16 (Acp.Message.Selected "reject-once") with
+    | Error err -> fail err
+    | Ok () ->
+        expect_final_message "rejected done" !events;
+        expect
+          (List.exists
+             (function
+               | Acp.Message.Session_update { update = Acp.Message.Tool_call_update { status = Some Acp.Message.Failed; _ }; _ } -> true
+               | _ -> false)
+             !events)
+          "expected failed tool call after rejection"
   end
 
 let test_project_root_db_and_approval_command () =
@@ -287,6 +398,8 @@ let () =
   test_persistent_session ();
   test_session_isolation ();
   test_tool_loop_and_resume ();
+  test_permission_request_and_resume ();
+  test_permission_request_and_reject ();
   test_project_root_db_and_approval_command ();
   test_event_sequence_for_text_reply ();
   Printf.printf "[PASS] assistant runtime tests\n"

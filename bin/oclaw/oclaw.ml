@@ -28,11 +28,28 @@ let run_tui state chat_id persistent =
 
 let run_acp state chat_id persistent =
   let frontend = Acp.Stdio_frontend.create () in
-  let send_runtime_message ~id message =
+  let permission_requests : (string, int) Hashtbl.t = Hashtbl.create 8 in
+  let next_permission_id = ref 1000 in
+  let id_key = function
+    | `String value -> "s:" ^ value
+    | `Int value -> "i:" ^ string_of_int value
+    | `Null -> "null"
+  in
+  let fresh_permission_id () =
+    let id = !next_permission_id in
+    incr next_permission_id;
+    `Int id
+  in
+  let send_runtime_message ?id message =
     let packet =
       match message with
+      | Acp.Message.Request_permission _ ->
+          let permission_id = Option.value id ~default:(fresh_permission_id ()) in
+          let key = id_key permission_id in
+          Hashtbl.replace permission_requests key chat_id;
+          Acp.Message.to_jsonrpc ~id:permission_id message
       | Acp.Message.Agent_message _ | Acp.Message.Error _ ->
-          Acp.Message.to_jsonrpc ~id message
+          Acp.Message.to_jsonrpc ?id message
       | _ ->
           Acp.Message.to_jsonrpc message
     in
@@ -52,7 +69,20 @@ let run_acp state chat_id persistent =
              let emit message = send_runtime_message ~id message in
              ignore (Agent_runtime.Session.process ~emit state ~chat_id ~persistent content);
              loop ()
-         | _ -> loop ())
+         | _ ->
+             begin
+               match Acp.Message.permission_outcome_of_packet packet with
+               | Some (id, outcome) ->
+                   begin
+                     match Hashtbl.find_opt permission_requests (id_key id) with
+                     | Some pending_chat_id ->
+                         Hashtbl.remove permission_requests (id_key id);
+                         ignore (Agent_runtime.Session.resolve_permission state ~chat_id:pending_chat_id outcome);
+                         loop ()
+                     | None -> loop ()
+                   end
+               | None -> loop ()
+             end)
   in
   loop ()
 
