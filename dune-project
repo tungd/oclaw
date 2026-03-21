@@ -22,5 +22,4 @@
   (tyxml (>= 4.6.0))
   curl
   yojson
-  logs
-  str))
+  logs))
