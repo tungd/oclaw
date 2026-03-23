@@ -224,6 +224,47 @@ let get_all_approved_paths db scope =
   in
   loop []
 
+let approval_section_title = function
+  | Execute -> "Approved tools (executables)"
+  | Read -> "Approved read roots"
+  | Write -> "Approved write roots"
+  | Install -> "Approved skill installs"
+
+let dedupe_display_entries entries =
+  let seen = Hashtbl.create 8 in
+  List.filter_map
+    (fun (key, display) ->
+      if Hashtbl.mem seen key then
+        None
+      else begin
+        Hashtbl.add seen key ();
+        Some display
+      end)
+    entries
+
+let approval_section_entries registry ~scope ~include_project_root =
+  let explicit_entries =
+    get_all_approved_paths registry.db scope
+    |> List.map (fun path -> (path, path))
+  in
+  let entries =
+    match scope with
+    | Read | Write when include_project_root ->
+        (registry.project_root, registry.project_root ^ " (project root, implicit)") :: explicit_entries
+    | Read | Write | Execute | Install ->
+        explicit_entries
+  in
+  dedupe_display_entries entries
+
+let render_approval_section registry ~scope ~include_project_root =
+  let entries = approval_section_entries registry ~scope ~include_project_root in
+  let lines =
+    match entries with
+    | [] -> [ "- none" ]
+    | values -> List.map (fun value -> "- " ^ value) values
+  in
+  approval_section_title scope ^ ":\n" ^ String.concat "\n" lines
+
 let get_exact_match_approval db ~scope ~target =
   let stmt = Sqlite3.prepare db "SELECT 1 FROM tool_approvals WHERE scope = ? AND path = ? LIMIT 1" in
   let _ = Sqlite3.bind_text stmt 1 (approval_scope_to_string scope) in
@@ -960,3 +1001,13 @@ let approve_root registry ~scope path =
 let approve_install registry name =
   approve_install_internal registry name;
   Ok (Printf.sprintf "Approved %s: %s" (approval_scope_label Install) name)
+
+let list_approvals_formatted ?scope ?(include_project_root=true) registry =
+  let scopes =
+    match scope with
+    | Some scope -> [ scope ]
+    | None -> [ Execute; Read; Write; Install ]
+  in
+  scopes
+  |> List.map (fun scope -> render_approval_section registry ~scope ~include_project_root)
+  |> String.concat "\n\n"

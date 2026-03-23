@@ -7,6 +7,38 @@ let fail msg =
 let expect cond msg =
   if not cond then fail msg
 
+let contains haystack needle =
+  let hay_len = String.length haystack in
+  let needle_len = String.length needle in
+  let rec loop idx =
+    if idx + needle_len > hay_len then false
+    else if String.sub haystack idx needle_len = needle then true
+    else loop (idx + 1)
+  in
+  needle_len = 0 || loop 0
+
+let find_index haystack needle =
+  let hay_len = String.length haystack in
+  let needle_len = String.length needle in
+  let rec loop idx =
+    if idx + needle_len > hay_len then None
+    else if String.sub haystack idx needle_len = needle then Some idx
+    else loop (idx + 1)
+  in
+  if needle_len = 0 then Some 0 else loop 0
+
+let count_occurrences haystack needle =
+  let hay_len = String.length haystack in
+  let needle_len = String.length needle in
+  let rec loop idx count =
+    if needle_len = 0 || idx + needle_len > hay_len then count
+    else if String.sub haystack idx needle_len = needle then
+      loop (idx + needle_len) (count + 1)
+    else
+      loop (idx + 1) count
+  in
+  loop 0 0
+
 let temp_dir () =
   let path = Filename.temp_file "oclaw-tools-" "" in
   Sys.remove path;
@@ -174,6 +206,85 @@ let test_bash_succeeds_after_executable_approval () =
   Agent_skills.Skills.close skills;
   print_endline "  ✓ bash_succeeds_after_executable_approval"
 
+let test_list_approvals_formatted () =
+  let root, skills, registry = temp_registry () in
+  let project_root = Unix.realpath root in
+  let read_parent = temp_dir () in
+  let read_alpha = Filename.concat read_parent "alpha" in
+  let read_beta = Filename.concat read_parent "beta" in
+  Unix.mkdir read_alpha 0o755;
+  Unix.mkdir read_beta 0o755;
+  let read_alpha = Unix.realpath read_alpha in
+  let read_beta = Unix.realpath read_beta in
+  let write_parent = temp_dir () in
+  let write_root = Filename.concat write_parent "writes" in
+  Unix.mkdir write_root 0o755;
+  begin
+    match Tools.approve_root registry ~scope:Tools.Read root with
+    | Ok _ -> ()
+    | Error err -> fail err
+  end;
+  begin
+    match Tools.approve_root registry ~scope:Tools.Write root with
+    | Ok _ -> ()
+    | Error err -> fail err
+  end;
+  begin
+    match Tools.approve_root registry ~scope:Tools.Read read_beta with
+    | Ok _ -> ()
+    | Error err -> fail err
+  end;
+  begin
+    match Tools.approve_root registry ~scope:Tools.Read read_alpha with
+    | Ok _ -> ()
+    | Error err -> fail err
+  end;
+  begin
+    match Tools.approve_root registry ~scope:Tools.Write write_root with
+    | Ok _ -> ()
+    | Error err -> fail err
+  end;
+  begin
+    match Tools.approve_executable registry "echo" with
+    | Ok _ -> ()
+    | Error err -> fail err
+  end;
+  begin
+    match Tools.approve_install registry "demo-skill" with
+    | Ok _ -> ()
+    | Error err -> fail err
+  end;
+  let output = Tools.list_approvals_formatted registry in
+  expect (contains output "Approved tools (executables):") "approval listing should include executables";
+  expect (contains output "Approved read roots:") "approval listing should include read roots";
+  expect (contains output "Approved write roots:") "approval listing should include write roots";
+  expect (contains output "Approved skill installs:") "approval listing should include installs";
+  expect
+    (count_occurrences output (project_root ^ " (project root, implicit)") = 2)
+    "project root should appear once each for read and write";
+  expect
+    (not (contains output ("- " ^ project_root ^ "\n")))
+    "project root should not be duplicated as an explicit raw entry";
+  let alpha_idx =
+    match find_index output ("- " ^ read_alpha) with
+    | Some idx -> idx
+    | None -> fail "missing alpha read root in listing"
+  in
+  let beta_idx =
+    match find_index output ("- " ^ read_beta) with
+    | Some idx -> idx
+    | None -> fail "missing beta read root in listing"
+  in
+  expect (alpha_idx < beta_idx) "read roots should remain sorted";
+  let read_only = Tools.list_approvals_formatted ~scope:Tools.Read registry in
+  expect (contains read_only "Approved read roots:") "filtered listing should keep the selected section";
+  expect (not (contains read_only "Approved tools (executables):")) "filtered listing should omit other sections";
+  expect (not (contains read_only "Approved write roots:")) "filtered listing should omit write roots";
+  expect (not (contains read_only "Approved skill installs:")) "filtered listing should omit installs";
+  Tools.close registry;
+  Agent_skills.Skills.close skills;
+  print_endline "  ✓ list_approvals_formatted"
+
 let () =
   print_endline "Running tool approval and error tests...";
   test_read_file_requires_approval ();
@@ -184,4 +295,5 @@ let () =
   test_bash_timeout_validation ();
   test_bash_requires_executable_approval ();
   test_bash_succeeds_after_executable_approval ();
+  test_list_approvals_formatted ();
   print_endline "[PASS] tool approval and error tests"

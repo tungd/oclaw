@@ -84,6 +84,7 @@ Current interactive behavior:
 - Renders transcript output with `layoutz` while still appending directly to stdout
 - Replays the current persistent branch on startup when `--persistent` is enabled
 - Uses boxed numbered approval prompts for tool permissions
+- Supports `/permissions` and `/permissions <read|write|exec|install>` for reviewing approvals
 - Exits with `/exit` or `/quit`
 
 ### Persistent Conversations
@@ -285,6 +286,7 @@ User and agent entrypoints:
 Approval behavior:
 
 - `skill_install` requires `/approve install <skill-name>`
+- `/permissions` lists current executable, read, write, and install approvals
 - Skill `allowed-tools` entries currently pre-approve supported `Read`, `Write`, and `Bash(...)` entries during activation
 
 ## Architecture Notes

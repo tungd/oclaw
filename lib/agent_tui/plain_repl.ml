@@ -963,6 +963,14 @@ let render_history_message_with_ansi ~supports_ansi message =
 let render_history_message message =
   render_history_message_with_ansi ~supports_ansi:false message
 
+let user_message_is_replay_hidden_command (message : Llm_types.message) =
+  match message.role, message.content with
+  | "user", Llm_types.Text_content text ->
+      let trimmed = String.trim text in
+      String.equal trimmed "/permissions"
+      || String.starts_with ~prefix:"/permissions " trimmed
+  | _ -> false
+
 let assistant_message_has_trailing_tool_use (message : Llm_types.message) =
   match message.role, message.content with
   | "assistant", Llm_types.Blocks blocks ->
@@ -1164,17 +1172,21 @@ let print_banner io deps =
 
 let replay_history io messages =
   let tool_descriptors = Hashtbl.create 16 in
-  let rec loop = function
+  let rec loop skip_hidden_response = function
     | [] -> ()
     | message :: rest ->
-        begin
+        if user_message_is_replay_hidden_command message then
+          loop true rest
+        else if skip_hidden_response && String.equal message.Llm_types.role "assistant" then
+          loop false rest
+        else begin
           match
             render_history_message_with_tools
               ~supports_ansi:io.supports_ansi
               tool_descriptors
               message
           with
-          | [] -> loop rest
+          | [] -> loop false rest
           | lines ->
               List.iter (write_line io) lines;
               begin
@@ -1183,10 +1195,10 @@ let replay_history io messages =
                     write_line io ""
                 | _ -> ()
               end;
-              loop rest
+              loop false rest
         end
   in
-  loop messages;
+  loop false messages;
   if messages <> [] then write_line io ""
 
 let rec prompt_for_permission state pending =

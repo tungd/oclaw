@@ -295,6 +295,27 @@ let test_persistent_startup_replays_history () =
   let exit_idx = match find_index output "> /exit" with Some idx -> idx | None -> fail "missing exit prompt echo" in
   expect (old_idx < exit_idx) "history replay should appear before the first interactive prompt"
 
+let test_persistent_startup_hides_permissions_replay () =
+  let deps =
+    make_deps
+      ~history:(fun () ->
+        [
+          Llm_types.{ role = "user"; content = Text_content "/permissions" };
+          Llm_types.{
+            role = "assistant";
+            content = Text_content "Approved read roots:\n- /tmp/project (project root, implicit)";
+          };
+          Llm_types.{ role = "user"; content = Text_content "follow-up" };
+          Llm_types.{ role = "assistant"; content = Text_content "kept" };
+        ])
+      ()
+  in
+  let output = run_loop_capture ~input_text:"/exit\n" ~persistent:true deps in
+  expect (not (contains output "> /permissions")) "permissions slash command should be hidden on replay";
+  expect (not (contains output "Approved read roots:")) "permissions slash command response should be hidden on replay";
+  expect (contains output "> follow-up") "normal replayed user prompts should still be shown";
+  expect (contains output "kept") "normal replayed assistant responses should still be shown"
+
 let test_live_tool_call_logging () =
   let deps =
     make_deps
@@ -419,6 +440,7 @@ let () =
   test_exit_commands_skip_process ();
   test_normal_prompt_calls_process ();
   test_persistent_startup_replays_history ();
+  test_persistent_startup_hides_permissions_replay ();
   test_live_tool_call_logging ();
   test_invalid_approval_reprompts ();
   test_streaming_does_not_duplicate_final_message ();

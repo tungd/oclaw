@@ -5,6 +5,16 @@ let fail msg =
 let expect cond msg =
   if not cond then fail msg
 
+let contains haystack needle =
+  let hay_len = String.length haystack in
+  let needle_len = String.length needle in
+  let rec loop idx =
+    if idx + needle_len > hay_len then false
+    else if String.sub haystack idx needle_len = needle then true
+    else loop (idx + 1)
+  in
+  needle_len = 0 || loop 0
+
 let temp_dir () =
   let path = Filename.temp_file "oclaw-runtime-" "" in
   Sys.remove path;
@@ -75,6 +85,17 @@ let expect_final_message expected events =
       events
   with
   | Some content -> expect (content = expected) ("unexpected final message: " ^ content)
+  | None -> fail "expected final agent message"
+
+let final_message events =
+  match
+    List.find_map
+      (function
+        | Acp.Message.Agent_message { content; _ } -> Some content
+        | _ -> None)
+      events
+  with
+  | Some content -> content
   | None -> fail "expected final agent message"
 
 let tool_call_uses_path tool_call expected_path =
@@ -361,6 +382,115 @@ let test_project_root_db_and_approval_command () =
     | Error err -> fail err
   end
 
+let test_permissions_command_lists_approvals () =
+  let data_dir = temp_dir () in
+  let llm_called = ref false in
+  let llm _provider ?emit:_ ~system_prompt:_ _messages ~tools:_ =
+    llm_called := true;
+    text_response "unexpected"
+  in
+  let state = create_state ~llm_call:llm data_dir in
+  let read_root = temp_dir () in
+  let write_root = temp_dir () in
+  begin
+    match Agent_runtime.Session.approve_read state read_root with
+    | Ok _ -> ()
+    | Error err -> fail err
+  end;
+  begin
+    match Agent_runtime.Session.approve_write state write_root with
+    | Ok _ -> ()
+    | Error err -> fail err
+  end;
+  begin
+    match Agent_runtime.Session.approve_exec state "echo" with
+    | Ok _ -> ()
+    | Error err -> fail err
+  end;
+  begin
+    match Agent_runtime.Session.approve_install state "demo-skill" with
+    | Ok _ -> ()
+    | Error err -> fail err
+  end;
+  let result, events = capture_process ~persistent:true state ~chat_id:17 "/permissions" in
+  begin
+    match result with
+    | Error err -> fail err
+    | Ok () ->
+        expect (not !llm_called) "/permissions should not enter the LLM loop";
+        let message = final_message events in
+        let project_root = Agent_runtime.App.project_root state in
+        expect (contains message "Approved tools (executables):") "permissions output should include executables";
+        expect (contains message "Approved read roots:") "permissions output should include read roots";
+        expect (contains message "Approved write roots:") "permissions output should include write roots";
+        expect (contains message "Approved skill installs:") "permissions output should include installs";
+        expect
+          (contains message (project_root ^ " (project root, implicit)"))
+          "permissions output should include implicit project root access";
+        let history = Agent_runtime.Session.history state ~chat_id:17 in
+        expect
+          (List.exists
+             (fun (msg : Llm_types.message) ->
+               msg.role = "user" && msg.content = Llm_types.Text_content "/permissions")
+             history)
+          "permissions command should be stored in transcript";
+        expect
+          (List.exists
+             (fun (msg : Llm_types.message) ->
+               msg.role = "assistant" && msg.content = Llm_types.Text_content message)
+             history)
+          "permissions response should be stored in transcript"
+  end
+
+let test_permissions_command_read_filter () =
+  let data_dir = temp_dir () in
+  let llm_called = ref false in
+  let llm _provider ?emit:_ ~system_prompt:_ _messages ~tools:_ =
+    llm_called := true;
+    text_response "unexpected"
+  in
+  let state = create_state ~llm_call:llm data_dir in
+  let read_root = temp_dir () in
+  begin
+    match Agent_runtime.Session.approve_read state read_root with
+    | Ok _ -> ()
+    | Error err -> fail err
+  end;
+  begin
+    match Agent_runtime.Session.approve_exec state "echo" with
+    | Ok _ -> ()
+    | Error err -> fail err
+  end;
+  let result, events = capture_process state ~chat_id:18 "/permissions read" in
+  begin
+    match result with
+    | Error err -> fail err
+    | Ok () ->
+        expect (not !llm_called) "/permissions read should not enter the LLM loop";
+        let message = final_message events in
+        expect (contains message "Approved read roots:") "read filter should return the read section";
+        expect (not (contains message "Approved tools (executables):")) "read filter should omit executables";
+        expect (not (contains message "Approved write roots:")) "read filter should omit write roots";
+        expect (not (contains message "Approved skill installs:")) "read filter should omit installs"
+  end
+
+let test_permissions_command_invalid_usage () =
+  let data_dir = temp_dir () in
+  let llm_called = ref false in
+  let llm _provider ?emit:_ ~system_prompt:_ _messages ~tools:_ =
+    llm_called := true;
+    text_response "unexpected"
+  in
+  let state = create_state ~llm_call:llm data_dir in
+  let result, events = capture_process state ~chat_id:19 "/permissions exec extra" in
+  begin
+    match result with
+    | Error err -> fail err
+    | Ok () ->
+        expect (not !llm_called) "invalid /permissions usage should not enter the LLM loop";
+        expect_final_message "Usage: /permissions [exec|read|write|install]" events
+  end
+
 let test_event_sequence_for_text_reply () =
   let data_dir = temp_dir () in
   let streamed = ref false in
@@ -401,5 +531,8 @@ let () =
   test_permission_request_and_resume ();
   test_permission_request_and_reject ();
   test_project_root_db_and_approval_command ();
+  test_permissions_command_lists_approvals ();
+  test_permissions_command_read_filter ();
+  test_permissions_command_invalid_usage ();
   test_event_sequence_for_text_reply ();
   Printf.printf "[PASS] assistant runtime tests\n"

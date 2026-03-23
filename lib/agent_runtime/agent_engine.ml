@@ -489,6 +489,22 @@ let maybe_handle_approval_command state ~chat_id prompt =
           in
           Some (Approval_text response)
 
+let maybe_handle_permissions_command state prompt =
+  let trimmed = String.trim prompt in
+  let usage = "Usage: /permissions [exec|read|write|install]" in
+  if String.equal trimmed "/permissions" then
+    Some (Ok (Tools.list_approvals_formatted state.Runtime.tools))
+  else if not (String.starts_with ~prefix:"/permissions " trimmed) then
+    None
+  else
+    let rest = String.trim (String.sub trimmed 12 (String.length trimmed - 12)) in
+    match List.filter (fun part -> part <> "") (String.split_on_char ' ' rest) with
+    | [ "exec" ] -> Some (Ok (Tools.list_approvals_formatted ~scope:Tools.Execute state.Runtime.tools))
+    | [ "read" ] -> Some (Ok (Tools.list_approvals_formatted ~scope:Tools.Read state.Runtime.tools))
+    | [ "write" ] -> Some (Ok (Tools.list_approvals_formatted ~scope:Tools.Write state.Runtime.tools))
+    | [ "install" ] -> Some (Ok (Tools.list_approvals_formatted ~scope:Tools.Install state.Runtime.tools))
+    | _ -> Some (Error usage)
+
 let maybe_handle_skill_command state ~chat_id ?parent_id prompt =
   let trimmed = String.trim prompt in
   let skill_name =
@@ -548,18 +564,37 @@ let process ~emit state ~chat_id ?(persistent=false) prompt =
         end
     | None ->
         begin
-          match maybe_handle_skill_command state ~chat_id ?parent_id prompt with
+          match maybe_handle_permissions_command state prompt with
           | Some handled ->
-              Result.map (fun response -> emit_final_message emit ~chat_id response) handled
-          | None ->
               let prompt_node_id =
                 match parent_id with
                 | Some pid -> Transcript.add_user_prompt state.Runtime.transcript ~chat_id ~parent_id:pid ~content:prompt ()
                 | None -> Transcript.add_user_prompt state.Runtime.transcript ~chat_id ~content:prompt ()
               in
-              let system_prompt = build_system_prompt state ~chat_id in
-              emit (Acp.Message.Status { status = "thinking"; message = None });
-              continue_llm_loop ~emit state ~chat_id ~system_prompt prompt_node_id state.config.max_tool_iterations
+              begin
+                match handled with
+                | Ok text ->
+                    Result.map (fun response -> emit_final_message emit ~chat_id response)
+                      (make_text_response state ~parent_id:prompt_node_id text)
+                | Error err ->
+                    Result.map (fun response -> emit_final_message emit ~chat_id response)
+                      (make_text_response state ~parent_id:prompt_node_id err)
+              end
+          | None ->
+              begin
+                match maybe_handle_skill_command state ~chat_id ?parent_id prompt with
+                | Some handled ->
+                    Result.map (fun response -> emit_final_message emit ~chat_id response) handled
+                | None ->
+                    let prompt_node_id =
+                      match parent_id with
+                      | Some pid -> Transcript.add_user_prompt state.Runtime.transcript ~chat_id ~parent_id:pid ~content:prompt ()
+                      | None -> Transcript.add_user_prompt state.Runtime.transcript ~chat_id ~content:prompt ()
+                    in
+                    let system_prompt = build_system_prompt state ~chat_id in
+                    emit (Acp.Message.Status { status = "thinking"; message = None });
+                    continue_llm_loop ~emit state ~chat_id ~system_prompt prompt_node_id state.config.max_tool_iterations
+              end
         end
 
 let resolve_permission state ~chat_id outcome =

@@ -67,3 +67,4 @@ val build_skills_catalog : t -> string
 val approve_executable : t -> string -> (string, string) result
 val approve_root : t -> scope:approval_scope -> string -> (string, string) result
 val approve_install : t -> string -> (string, string) result
+val list_approvals_formatted : ?scope:approval_scope -> ?include_project_root:bool -> t -> string

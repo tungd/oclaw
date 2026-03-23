@@ -19,6 +19,7 @@ val approve_read : App.t -> string -> (string, string) result
 val approve_write : App.t -> string -> (string, string) result
 val approve_exec : App.t -> string -> (string, string) result
 val approve_install : App.t -> string -> (string, string) result
+val list_permissions : ?scope:Tools.approval_scope -> App.t -> string
 
 val trust_project : ?path:string -> App.t -> (string, string) result
 val available_skills : App.t -> string list

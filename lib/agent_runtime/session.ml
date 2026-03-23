@@ -25,6 +25,9 @@ let approve_exec (app : App.t) path =
 let approve_install (app : App.t) name =
   Tools.approve_install (App.internal_state app).Runtime.tools name
 
+let list_permissions ?scope (app : App.t) =
+  Tools.list_approvals_formatted ?scope (App.internal_state app).Runtime.tools
+
 let trust_project ?path (app : App.t) =
   Tools.trust_project ?path (App.internal_state app).Runtime.tools
 
