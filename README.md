@@ -2,7 +2,7 @@
 
 OClaw is a CLI-first AI assistant written in OCaml 5. It ships as a single executable with:
 
-- An interactive TUI frontend
+- An interactive append-only REPL frontend with `layoutz`-based terminal rendering
 - An ACP JSON-RPC mode over stdio
 - A tool-first agent loop with streaming text deltas
 - Persistent transcript storage under a local workspace directory
@@ -16,13 +16,15 @@ The supported runtime surface is `agent_runtime`. Skill parsing and discovery re
 
 What is implemented today:
 
-- TUI chat mode with streaming assistant output and status updates
+- Plain REPL chat mode with streaming assistant output and markdown-aware terminal rendering
 - ACP mode for JSON-RPC clients
 - Persistent conversations keyed by `chat_id`
 - Tree-structured transcript storage with conversation export to HTML and JSON
 - Built-in tools: `bash`, `read_file`, `write_file`, `edit_file`, `skill_list`, `skill_search`, `skill_install`
 - Agent Skills discovery, trust gating, activation, and remote install/search support
 - OpenAI-compatible chat-completions provider integration
+- Token estimation with tiktoken-compatible BPE tokenizer
+- Context usage tracking and warnings
 - Retry logic and tool error classification covered by tests
 
 What is not here:
@@ -40,7 +42,7 @@ oclaw/
 │   ├── acp/            # ACP message and stdio transport support
 │   ├── agent_runtime/  # Runtime, transcript store, config, agent loop, and tools
 │   ├── agent_skills/   # Skill discovery, parsing, and install/search data
-│   ├── agent_tui/      # Mosaic-based TUI frontend
+│   ├── agent_tui/      # Layoutz-backed append-only REPL frontend
 │   ├── httpkit/        # Minimal HTTP client
 │   ├── llm_provider/   # OpenAI-compatible provider + retry logic
 │   └── llm_types/      # Shared message/tool types
@@ -68,20 +70,21 @@ dune exec ./bin/oclaw/oclaw.exe
 
 ## Usage
 
-### Interactive TUI
+### Interactive REPL
 
-The default mode launches the terminal UI.
+The default mode launches the append-only terminal REPL.
 
 ```bash
 dune exec ./bin/oclaw/oclaw.exe
 ```
 
-Current TUI behavior:
+Current interactive behavior:
 
 - Streams assistant text as it arrives
-- Shows simple status updates and a spinner while work is in progress
-- Keeps in-memory UI state for the current run
-- Exits on `Escape`
+- Renders transcript output with `layoutz` while still appending directly to stdout
+- Replays the current persistent branch on startup when `--persistent` is enabled
+- Uses boxed numbered approval prompts for tool permissions
+- Exits with `/exit` or `/quit`
 
 ### Persistent Conversations
 
@@ -193,6 +196,42 @@ The transcript layer supports:
 - Forking conversations from an existing node
 - Export to JSON and HTML
 
+## Token Estimation
+
+OClaw includes built-in token counting using a tiktoken-compatible BPE tokenizer. This allows tracking context usage and warning when approaching model limits.
+
+Features:
+
+- Automatic token counting before each LLM call
+- Context usage tracking (system prompt + messages + tool definitions)
+- Warnings at 80%, 90%, and 100% of context limit
+- Support for multiple encodings:
+  - `cl100k_base` (GPT-4, GPT-3.5-turbo)
+  - `o200k_base` (GPT-4o, GPT-4o-mini)
+- Automatic model-to-encoding mapping
+
+Token usage is logged and displayed in status updates when approaching limits.
+
+### Context Limits
+
+Supported models and their context limits:
+
+- GPT-4, GPT-4-32k: 8,192 / 32,768 tokens
+- GPT-3.5-turbo, GPT-3.5-turbo-16k: 4,096 / 16,385 tokens
+- GPT-4o, GPT-4o-mini: 128,000 tokens
+- Qwen models: 32,768 tokens (default)
+
+### Configuration
+
+Token warning threshold can be configured (default: 0.8 = 80%):
+
+```yaml
+# In config.yaml
+llm_model: gpt-4
+```
+
+The token estimator automatically detects the model and applies the appropriate encoding and context limit.
+
 ## Built-in Tools
 
 The default registry contains seven always-available tools:
@@ -271,9 +310,9 @@ The provider code in [`lib/llm_provider/llm_provider.ml`](/Users/tung/Projects/s
 - Tool-call reconstruction from streaming deltas
 - Configurable retry policy via the retry module
 
-### TUI
+### Interactive Frontend
 
-The TUI in [`lib/agent_tui/tui.ml`](/Users/tung/Projects/std23/oclaw/lib/agent_tui/tui.ml) is built on Mosaic and communicates with the agent loop through channels.
+The interactive frontend in [`lib/agent_tui/plain_repl.ml`](/Users/tung/Projects/std23/oclaw/lib/agent_tui/plain_repl.ml) is a synchronous stdio REPL. It uses `layoutz` for the startup banner, approval blocks, and markdown-aware transcript rendering while still replaying persistent history on startup and appending output directly to stdout.
 
 ## Tests
 
@@ -292,6 +331,7 @@ Current test suites include:
 - [`test/test_llm_provider.ml`](/Users/tung/Projects/std23/oclaw/test/test_llm_provider.ml)
 - [`test/test_retry.ml`](/Users/tung/Projects/std23/oclaw/test/test_retry.ml)
 - [`test/test_tool_errors.ml`](/Users/tung/Projects/std23/oclaw/test/test_tool_errors.ml)
+- [`test/test_plain_repl.ml`](/Users/tung/Projects/std23/oclaw/test/test_plain_repl.ml)
 
 ## License
 

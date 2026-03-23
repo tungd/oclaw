@@ -18,8 +18,14 @@
   ppx_deriving_yojson
   ppx_deriving_yaml
   yaml
-  mosaic
   (tyxml (>= 4.6.0))
   curl
   yojson
-  logs))
+  logs
+  layoutz
+  (re (>= 1.10.0))
+  (uutf (>= 1.0.0))
+  (base64 (>= 3.0.0))
+  lwt
+  lwt_unix
+  str))

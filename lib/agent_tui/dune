@@ -1,11 +1,9 @@
 (library
  (name agent_tui)
- (modules tui)
+ (modules plain_repl tui)
  (libraries
-  agent_runtime
+ agent_runtime
   acp
-  logs
-  mosaic
-  domainslib
+  layoutz
   unix
   yojson))

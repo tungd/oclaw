@@ -1,4 +1,4 @@
 (library
  (name llm_provider)
- (modules llm_provider retry)
- (libraries h1 httpkit llm_types curl iomux yojson logs str))
+ (modules llm_provider retry token_estimator)
+ (libraries h1 httpkit llm_types curl iomux yojson logs str tiktoken))

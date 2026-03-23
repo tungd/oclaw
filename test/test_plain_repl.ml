@@ -1,0 +1,297 @@
+let fail msg =
+  Printf.eprintf "[FAIL] %s\n" msg;
+  exit 1
+
+let expect cond msg =
+  if not cond then fail msg
+
+let close_in_noerr ic =
+  try close_in ic with _ -> ()
+
+let close_out_noerr oc =
+  try close_out oc with _ -> ()
+
+let slurp path =
+  let ic = open_in_bin path in
+  Fun.protect
+    ~finally:(fun () -> close_in_noerr ic)
+    (fun () ->
+      let len = in_channel_length ic in
+      really_input_string ic len)
+
+let contains haystack needle =
+  let hay_len = String.length haystack in
+  let needle_len = String.length needle in
+  let rec loop idx =
+    if idx + needle_len > hay_len then false
+    else if String.sub haystack idx needle_len = needle then true
+    else loop (idx + 1)
+  in
+  needle_len = 0 || loop 0
+
+let find_index haystack needle =
+  let hay_len = String.length haystack in
+  let needle_len = String.length needle in
+  let rec loop idx =
+    if idx + needle_len > hay_len then None
+    else if String.sub haystack idx needle_len = needle then Some idx
+    else loop (idx + 1)
+  in
+  if needle_len = 0 then Some 0 else loop 0
+
+let count_occurrences haystack needle =
+  let hay_len = String.length haystack in
+  let needle_len = String.length needle in
+  let rec loop idx count =
+    if needle_len = 0 || idx + needle_len > hay_len then count
+    else if String.sub haystack idx needle_len = needle then
+      loop (idx + needle_len) (count + 1)
+    else
+      loop (idx + 1) count
+  in
+  loop 0 0
+
+let run_loop_capture ~input_text ~persistent deps =
+  let in_path = Filename.temp_file "plain_repl_in" ".txt" in
+  let out_path = Filename.temp_file "plain_repl_out" ".txt" in
+  let input_writer = open_out_bin in_path in
+  output_string input_writer input_text;
+  close_out input_writer;
+  let ic = open_in_bin in_path in
+  let oc = open_out_bin out_path in
+  Fun.protect
+    ~finally:(fun () ->
+      close_in_noerr ic;
+      close_out_noerr oc;
+      Sys.remove in_path;
+      Sys.remove out_path)
+    (fun () ->
+      Agent_tui.Plain_repl.run_loop ~input:ic ~output:oc ~persistent deps;
+      close_out oc;
+      slurp out_path)
+
+let make_deps ?(history=(fun () -> [])) ?(process=(fun ~emit:_ _ -> Ok ())) ?(resolve_permission=(fun _ -> Ok ())) () =
+  {
+    Agent_tui.Plain_repl.process;
+    resolve_permission;
+    history;
+    project_root = "/tmp/project";
+    model_name = "test-model";
+    chat_label = "chat:1 ephemeral";
+  }
+
+let allow_once =
+  Acp.Message.{ option_id = "allow-once"; name = "Allow once"; kind = Allow_once }
+
+let reject_once =
+  Acp.Message.{ option_id = "reject-once"; name = "Reject"; kind = Reject_once }
+
+let sample_tool_call =
+  Acp.Message.{
+    tool_call_id = "call-1";
+    title = Some "List files";
+    kind = Some Execute;
+    status = Some Pending;
+    content = None;
+    raw_input = Some (`Assoc [ ("command", `String "ls") ]);
+    raw_output = None;
+  }
+
+let test_render_history_message () =
+  let user_lines =
+    Agent_tui.Plain_repl.render_history_message
+      Llm_types.{ role = "user"; content = Text_content "hello" }
+  in
+  expect (user_lines = [ "> hello" ]) "user history should render with a prompt prefix";
+
+  let assistant_lines =
+    Agent_tui.Plain_repl.render_history_message
+      Llm_types.{
+        role = "assistant";
+        content =
+          Blocks [
+            Text { text = "visible" };
+            Tool_use { id = "tool-1"; name = "bash"; input = `Assoc [ ("command", `String "pwd") ] };
+          ];
+      }
+  in
+  expect (assistant_lines = [ "visible" ]) "assistant history should hide tool_use blocks";
+
+  let hidden_tool_result =
+    Agent_tui.Plain_repl.render_history_message
+      Llm_types.{
+        role = "user";
+        content =
+          Blocks [
+            Tool_result { tool_use_id = "tool-1"; content = "ok"; is_error = Some false };
+          ];
+      }
+  in
+  expect (hidden_tool_result = []) "user tool_result history should be hidden"
+
+let test_select_permission_option () =
+  let selected =
+    Agent_tui.Plain_repl.select_permission_option [ allow_once; reject_once ] "1"
+  in
+  expect
+    (selected = Ok (Acp.Message.Selected "allow-once"))
+    "choice 1 should map to the first option";
+  let invalid =
+    Agent_tui.Plain_repl.select_permission_option [ allow_once; reject_once ] "9"
+  in
+  expect
+    (invalid = Error "Enter a number between 1 and 2.")
+    "out-of-range approval choices should be rejected"
+
+let test_markdown_rendering () =
+  let plain =
+    Agent_tui.Plain_repl.render_markdown_lines
+      ~supports_ansi:false
+      "# Heading\nUse `code` and **bold**"
+  in
+  expect
+    (plain = [ "# Heading"; "Use code and bold" ])
+    "plain markdown rendering should strip inline markdown markers";
+  let colored =
+    Agent_tui.Plain_repl.render_markdown_lines
+      ~supports_ansi:true
+      "# Heading"
+    |> String.concat "\n"
+  in
+  expect
+    (contains colored "\027[")
+    "ANSI markdown rendering should emit escape sequences when enabled"
+
+let test_exit_commands_skip_process () =
+  let process_calls = ref 0 in
+  let deps =
+    make_deps
+      ~process:(fun ~emit:_ _prompt ->
+        incr process_calls;
+        Ok ())
+      ()
+  in
+  ignore (run_loop_capture ~input_text:"/exit\n" ~persistent:false deps);
+  expect (!process_calls = 0) "/exit should terminate without calling process";
+  ignore (run_loop_capture ~input_text:"/quit\n" ~persistent:false deps);
+  expect (!process_calls = 0) "/quit should terminate without calling process"
+
+let test_normal_prompt_calls_process () =
+  let prompts = ref [] in
+  let deps =
+    make_deps
+      ~process:(fun ~emit prompt ->
+        prompts := prompt :: !prompts;
+        emit (Acp.Message.Agent_message { content = "ok"; chat_id = None });
+        emit Acp.Message.Done;
+        Ok ())
+      ()
+  in
+  let output = run_loop_capture ~input_text:"hello\n/exit\n" ~persistent:false deps in
+  expect (!prompts = [ "hello" ]) "normal prompts should call process exactly once";
+  expect (contains output "> hello") "non-tty loop should echo submitted prompts";
+  expect (contains output "ok") "assistant responses should be printed"
+
+let test_persistent_startup_replays_history () =
+  let deps =
+    make_deps
+      ~history:(fun () ->
+        [
+          Llm_types.{ role = "user"; content = Text_content "old prompt" };
+          Llm_types.{
+            role = "assistant";
+            content =
+              Blocks [
+                Text { text = "old reply" };
+                Tool_use { id = "call-1"; name = "bash"; input = `Assoc [ ("command", `String "pwd") ] };
+              ];
+          };
+          Llm_types.{
+            role = "user";
+            content = Blocks [ Tool_result { tool_use_id = "call-1"; content = "ignored"; is_error = Some false } ];
+          };
+        ])
+      ()
+  in
+  let output = run_loop_capture ~input_text:"/exit\n" ~persistent:true deps in
+  expect (contains output "> old prompt") "persistent startup should replay prior user messages";
+  expect (contains output "old reply") "persistent startup should replay visible assistant text";
+  expect (not (contains output "pwd")) "persistent replay should hide tool_use payloads";
+  expect (not (contains output "ignored")) "persistent replay should hide tool results";
+  let old_idx = match find_index output "> old prompt" with Some idx -> idx | None -> fail "missing replayed prompt" in
+  let exit_idx = match find_index output "> /exit" with Some idx -> idx | None -> fail "missing exit prompt echo" in
+  expect (old_idx < exit_idx) "history replay should appear before the first interactive prompt"
+
+let test_invalid_approval_reprompts () =
+  let resolved = ref [] in
+  let deps =
+    make_deps
+      ~process:(fun ~emit _prompt ->
+        emit
+          (Acp.Message.Request_permission {
+             session_id = "1";
+             tool_call = sample_tool_call;
+             options = [ allow_once; reject_once ];
+           });
+        Ok ())
+      ~resolve_permission:(fun outcome ->
+        resolved := outcome :: !resolved;
+        Ok ())
+      ()
+  in
+  let output = run_loop_capture ~input_text:"run\n9\n1\n/exit\n" ~persistent:false deps in
+  expect (contains output "Approval required") "approval requests should be printed";
+  expect
+    (contains output "Invalid choice. Enter a number between 1 and 2.")
+    "invalid approval input should reprompt";
+  expect
+    (!resolved = [ Acp.Message.Selected "allow-once" ])
+    "approval loop should keep the pending request until a valid selection is made"
+
+let test_streaming_does_not_duplicate_final_message () =
+  let streamed = "streamed-response" in
+  let deps =
+    make_deps
+      ~process:(fun ~emit _prompt ->
+        emit (Acp.Message.Agent_delta { content = "streamed-" });
+        emit (Acp.Message.Agent_delta { content = "response" });
+        emit (Acp.Message.Agent_message { content = streamed; chat_id = None });
+        emit Acp.Message.Done;
+        Ok ())
+      ()
+  in
+  let output = run_loop_capture ~input_text:"hello\n/exit\n" ~persistent:false deps in
+  expect
+    (count_occurrences output streamed = 1)
+    "streamed assistant output should not be duplicated when the final Agent_message arrives"
+
+let test_streaming_markdown_reassembles_split_inline_markup () =
+  let deps =
+    make_deps
+      ~process:(fun ~emit _prompt ->
+        emit (Acp.Message.Agent_delta { content = "**bo" });
+        emit (Acp.Message.Agent_delta { content = "ld**" });
+        emit (Acp.Message.Agent_message { content = "**bold**"; chat_id = None });
+        emit Acp.Message.Done;
+        Ok ())
+      ()
+  in
+  let output = run_loop_capture ~input_text:"hello\n/exit\n" ~persistent:false deps in
+  expect
+    (contains output "bold")
+    "split inline markdown should render its visible text once the turn completes";
+  expect
+    (not (contains output "**bold**"))
+    "split inline markdown should not leak raw markdown markers into the transcript"
+
+let () =
+  test_render_history_message ();
+  test_select_permission_option ();
+  test_markdown_rendering ();
+  test_exit_commands_skip_process ();
+  test_normal_prompt_calls_process ();
+  test_persistent_startup_replays_history ();
+  test_invalid_approval_reprompts ();
+  test_streaming_does_not_duplicate_final_message ();
+  test_streaming_markdown_reassembles_split_inline_markup ();
+  Printf.printf "[PASS] plain repl tests\n"

@@ -37,3 +37,22 @@
 (test
  (name test_skill_support)
  (libraries agent_runtime agent_skills unix))
+
+(test
+ (name test_plain_repl)
+ (libraries agent_tui acp llm_types unix))
+
+(rule
+ (copy ../lib/tiktoken/vocab_cl100k.txt vocab_cl100k.txt))
+(rule
+ (copy ../lib/tiktoken/vocab_o200k.txt vocab_o200k.txt))
+
+(test
+ (name test_tiktoken)
+ (libraries tiktoken unix)
+ (deps vocab_cl100k.txt vocab_o200k.txt))
+
+(test
+ (name test_token_estimator)
+ (libraries llm_provider tiktoken unix)
+ (deps vocab_cl100k.txt vocab_o200k.txt))

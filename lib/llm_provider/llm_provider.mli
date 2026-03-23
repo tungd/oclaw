@@ -53,3 +53,6 @@ module Retry : sig
   val calculate_delay : config:retry_config -> attempt:int -> int
   val with_retry : config:retry_config -> (unit -> ('a, retry_error) result) -> 'a retry_result
 end
+
+(** Token estimation for context management *)
+module Token_estimator = Token_estimator

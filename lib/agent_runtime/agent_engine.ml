@@ -223,6 +223,56 @@ let rec continue_llm_loop ~emit state ~chat_id ~system_prompt current_node_id ro
       (fun (m : Llm.message) -> { m with content = truncate_message_content m.content })
       messages
   in
+  
+  (* Token counting and context management *)
+  let model_name = state.Runtime.provider_config.Llm_provider.model_name in
+  let token_estimator = Llm_provider.Token_estimator.for_model model_name in
+  let messages_for_counting =
+    List.map
+      (fun (m : Llm.message) ->
+        let role =
+          match String.lowercase_ascii m.Llm.role with
+          | "user" | "assistant" | "system" as role -> role
+          | role -> role
+        in
+        let content =
+          match m.Llm.content with
+          | Llm.Text_content s -> s
+          | Llm.Blocks blocks ->
+              List.fold_left
+                (fun acc block ->
+                  match block with
+                  | Llm.Text { text } -> acc ^ text
+                  | _ -> acc)
+                "" blocks
+        in
+        (role, content))
+      messages
+  in
+  
+  let system_tokens = Llm_provider.Token_estimator.count_system_prompt token_estimator system_prompt in
+  let prompt_tokens = Llm_provider.Token_estimator.count_messages token_estimator messages_for_counting in
+  let tool_defs =
+    Tools.definitions state.Runtime.tools
+    |> List.map Llm.tool_definition_to_yojson
+    |> fun defs -> Yojson.Safe.to_string (`List defs)
+  in
+  let tool_tokens = Llm_provider.Token_estimator.count_tools token_estimator tool_defs in
+  let usage = Llm_provider.Token_estimator.calculate_usage 
+    ~prompt_tokens 
+    ~system_tokens 
+    ~tool_tokens 
+    token_estimator 
+  in
+  
+  (* Log token usage and check for warnings *)
+  if Llm_provider.Token_estimator.should_warn token_estimator usage then begin
+    let warning = Llm_provider.Token_estimator.warning_message usage in
+    Option.iter (fun msg -> Log.warn (fun m -> m "%s" msg)) warning;
+    emit (Acp.Message.Status { status = "token_warning"; message = warning })
+  end;
+  Log.info (fun m -> m "Token usage: %s" (Llm_provider.Token_estimator.format_usage usage));
+  
   match state.Runtime.llm_call state.provider_config ~emit ~system_prompt messages ~tools:(Tools.definitions state.Runtime.tools) with
   | Error err ->
       emit (Acp.Message.Error { message = err; code = 0 });

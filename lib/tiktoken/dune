@@ -1,0 +1,21 @@
+(library
+ (name tiktoken)
+ (modules tiktoken vocab bpe encoding)
+ (libraries re uutf unix)
+ (preprocess (pps ppx_deriving_yojson)))
+
+;; Copy vocabulary files to build directory
+(rule
+ (targets vocab_cl100k.txt)
+ (deps (source_tree vocab_cl100k))
+ (action (copy vocab_cl100k/vocab_cl100k.txt %{targets})))
+
+(rule
+ (targets vocab_o200k.txt)
+ (deps (source_tree vocab_o200k))
+ (action (copy vocab_o200k/vocab_o200k.txt %{targets})))
+
+;; Install vocabulary files with the library
+(install
+ (section lib)
+ (files vocab_cl100k.txt vocab_o200k.txt))

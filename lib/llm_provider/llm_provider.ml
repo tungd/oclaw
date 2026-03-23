@@ -502,3 +502,6 @@ end
 
 (* Expose Retry module for testing and advanced usage *)
 module Retry = Retry
+
+(* Expose Token_estimator module for token counting *)
+module Token_estimator = Token_estimator
