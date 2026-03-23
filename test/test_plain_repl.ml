@@ -97,6 +97,21 @@ let sample_tool_call =
     raw_output = None;
   }
 
+let sample_completed_tool_call =
+  Acp.Message.{
+    sample_tool_call with
+    status = Some Completed;
+    content = Some [ Content (Text "done") ];
+    raw_output =
+      Some
+        (`Assoc
+           [
+             ("content", `String "done");
+             ("isError", `Bool false);
+             ("durationMs", `Int 42);
+           ]);
+  }
+
 let test_render_history_message () =
   let user_lines =
     Agent_tui.Plain_repl.render_history_message
@@ -115,9 +130,11 @@ let test_render_history_message () =
           ];
       }
   in
-  expect (assistant_lines = [ "visible" ]) "assistant history should hide tool_use blocks";
+  expect
+    (assistant_lines = [ "visible"; "tool> Exec: pwd" ])
+    "assistant history should render tool_use blocks inline";
 
-  let hidden_tool_result =
+  let tool_result_lines =
     Agent_tui.Plain_repl.render_history_message
       Llm_types.{
         role = "user";
@@ -127,7 +144,9 @@ let test_render_history_message () =
           ];
       }
   in
-  expect (hidden_tool_result = []) "user tool_result history should be hidden"
+  expect
+    (tool_result_lines = [ "tool> Tool done: tool-1" ])
+    "user tool_result history should render a concise status line"
 
 let test_select_permission_option () =
   let selected =
@@ -161,6 +180,56 @@ let test_markdown_rendering () =
   expect
     (contains colored "\027[")
     "ANSI markdown rendering should emit escape sequences when enabled"
+
+let test_table_rendering () =
+  let rendered =
+    Agent_tui.Plain_repl.render_markdown_lines
+      ~supports_ansi:false
+      "| Name | Value |\n| --- | ---: |\n| foo | 10 |\n| longer | 2 |"
+  in
+  expect
+    (rendered =
+       [
+         "┌────────┬───────┐";
+         "│ Name   │ Value │";
+         "├────────┼───────┤";
+         "│ foo    │    10 │";
+         "│ longer │     2 │";
+         "└────────┴───────┘";
+       ])
+    "pipe tables should render as aligned bordered tables"
+
+let test_table_alignment_markers () =
+  let rendered =
+    Agent_tui.Plain_repl.render_markdown_lines
+      ~supports_ansi:false
+      "| Left | Right | Center |\n| :--- | ---: | :---: |\n| a | 1 | x |\n| bb | 22 | yy |"
+  in
+  expect
+    (List.mem "│ a    │     1 │   x    │" rendered)
+    "table alignment markers should control cell padding"
+
+let test_table_inline_markdown () =
+  let rendered =
+    Agent_tui.Plain_repl.render_markdown_lines
+      ~supports_ansi:false
+      "| Name | Value |\n| --- | --- |\n| **foo** | `bar` |"
+    |> String.concat "\n"
+  in
+  expect (contains rendered "foo") "table cells should keep visible bold text";
+  expect (contains rendered "bar") "table cells should keep visible code text";
+  expect (not (contains rendered "**foo**")) "table cells should not leak bold markers";
+  expect (not (contains rendered "`bar`")) "table cells should not leak code markers"
+
+let test_code_fence_ignores_table_detection () =
+  let rendered =
+    Agent_tui.Plain_repl.render_markdown_lines
+      ~supports_ansi:false
+      "```\n| Name | Value |\n| --- | --- |\n```"
+  in
+  expect
+    (rendered = [ "```"; "| Name | Value |"; "| --- | --- |"; "```" ])
+    "pipe rows inside code fences should stay literal"
 
 let test_exit_commands_skip_process () =
   let process_calls = ref 0 in
@@ -216,11 +285,42 @@ let test_persistent_startup_replays_history () =
   let output = run_loop_capture ~input_text:"/exit\n" ~persistent:true deps in
   expect (contains output "> old prompt") "persistent startup should replay prior user messages";
   expect (contains output "old reply") "persistent startup should replay visible assistant text";
-  expect (not (contains output "pwd")) "persistent replay should hide tool_use payloads";
-  expect (not (contains output "ignored")) "persistent replay should hide tool results";
+  expect (contains output "tool> Exec: pwd") "persistent replay should show tool_use lines";
+  expect (contains output "tool> Exec done: pwd") "persistent replay should show tool_result lines";
+  expect
+    (not (contains output "tool> Exec: pwd\n\ntool> Exec done: pwd"))
+    "persistent replay should keep a tool start and its done line grouped";
+  expect (not (contains output "ignored")) "successful tool results should stay concise in replay";
   let old_idx = match find_index output "> old prompt" with Some idx -> idx | None -> fail "missing replayed prompt" in
   let exit_idx = match find_index output "> /exit" with Some idx -> idx | None -> fail "missing exit prompt echo" in
   expect (old_idx < exit_idx) "history replay should appear before the first interactive prompt"
+
+let test_live_tool_call_logging () =
+  let deps =
+    make_deps
+      ~process:(fun ~emit _prompt ->
+        emit
+          (Acp.Message.Session_update {
+             session_id = "1";
+             update = Acp.Message.Tool_call sample_tool_call;
+           });
+        emit
+          (Acp.Message.Session_update {
+             session_id = "1";
+             update = Acp.Message.Tool_call_update sample_completed_tool_call;
+           });
+        emit Acp.Message.Done;
+        Ok ())
+      ()
+  in
+  let output = run_loop_capture ~input_text:"run\n/exit\n" ~persistent:false deps in
+  expect (contains output "tool> Exec: ls") "live tool_call events should be logged";
+  expect
+    (contains output "tool> Exec done: ls (42ms)")
+    "completed tool updates should include timing";
+  expect
+    (not (contains output "tool> Exec: ls\n\ntool> Exec done: ls"))
+    "sequential live tool updates should stay grouped"
 
 let test_invalid_approval_reprompts () =
   let resolved = ref [] in
@@ -284,14 +384,44 @@ let test_streaming_markdown_reassembles_split_inline_markup () =
     (not (contains output "**bold**"))
     "split inline markdown should not leak raw markdown markers into the transcript"
 
+let test_streaming_table_renders_once_when_complete () =
+  let table =
+    "| Name | Value |\n| --- | ---: |\n| foo | 10 |\n| longer | 2 |"
+  in
+  let deps =
+    make_deps
+      ~process:(fun ~emit _prompt ->
+        emit (Acp.Message.Agent_delta { content = "| Name | Value |\n" });
+        emit (Acp.Message.Agent_delta { content = "| --- | ---: |\n| foo | 10 |\n" });
+        emit (Acp.Message.Agent_delta { content = "| longer | 2 |" });
+        emit (Acp.Message.Agent_message { content = table; chat_id = None });
+        emit Acp.Message.Done;
+        Ok ())
+      ()
+  in
+  let output = run_loop_capture ~input_text:"hello\n/exit\n" ~persistent:false deps in
+  expect (contains output "┌────────┬───────┐") "streamed tables should render as a bordered table";
+  expect
+    (not (contains output "| Name | Value |"))
+    "streamed tables should not leak the raw header row";
+  expect
+    (not (contains output "| --- | ---: |"))
+    "streamed tables should not leak the raw separator row"
+
 let () =
   test_render_history_message ();
   test_select_permission_option ();
   test_markdown_rendering ();
+  test_table_rendering ();
+  test_table_alignment_markers ();
+  test_table_inline_markdown ();
+  test_code_fence_ignores_table_detection ();
   test_exit_commands_skip_process ();
   test_normal_prompt_calls_process ();
   test_persistent_startup_replays_history ();
+  test_live_tool_call_logging ();
   test_invalid_approval_reprompts ();
   test_streaming_does_not_duplicate_final_message ();
   test_streaming_markdown_reassembles_split_inline_markup ();
+  test_streaming_table_renders_once_when_complete ();
   Printf.printf "[PASS] plain repl tests\n"

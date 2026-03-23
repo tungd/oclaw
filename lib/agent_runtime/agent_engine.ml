@@ -136,12 +136,17 @@ let tool_result_content result =
     Some [ Acp.Message.Content (Acp.Message.Text result.Tools.content) ]
 
 let tool_result_raw_output result =
-  Some
-    (`Assoc
-       [
-         ("content", `String result.Tools.content);
-         ("isError", `Bool result.Tools.is_error);
-       ])
+  let fields =
+    [
+      ("content", `String result.Tools.content);
+      ("isError", `Bool result.Tools.is_error);
+    ]
+    @
+    match result.Tools.duration_ms with
+    | Some duration_ms -> [ ("durationMs", `Int duration_ms) ]
+    | None -> []
+  in
+  Some (`Assoc fields)
 
 let emit_tool_call emit ~chat_id tool_call =
   emit
@@ -201,12 +206,23 @@ let rejection_result request =
     (Printf.sprintf "Permission rejected for %s" request.Tools.target)
 
 let execute_tool state ~chat_id name input =
+  let start_time = Unix.gettimeofday () in
+  let with_duration result =
+    match result.Tools.duration_ms, result.Tools.approval_request with
+    | Some _, _
+    | None, Some _ -> result
+    | None, None ->
+        let duration_ms =
+          max 0 (int_of_float ((Unix.gettimeofday () -. start_time) *. 1000.0))
+        in
+        { result with Tools.duration_ms = Some duration_ms }
+  in
   try
-    Tools.execute state.Runtime.tools ~chat_id name input
+    with_duration (Tools.execute state.Runtime.tools ~chat_id name input)
   with exn ->
     Log.err (fun m -> m "Tool %s execution failed: %s" name (Printexc.to_string exn));
     let msg = "Tool execution exception: " ^ Printexc.to_string exn in
-    Tools.failure ~error_type:"exception" ~error_category:Tools.Other msg
+    with_duration (Tools.failure ~error_type:"exception" ~error_category:Tools.Other msg)
 
 let add_tool_result_node state ~parent_id ~tool_call_id result =
   let block = tool_result_block tool_call_id result in
