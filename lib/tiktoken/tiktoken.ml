@@ -196,7 +196,9 @@ let model_context_limits = [
   ("text-embedding-ada-002", 8191);
   ("text-embedding-3-small", 8191);
   ("text-embedding-3-large", 8191);
+  ("glm-5", 128000);
   (* Qwen models *)
+  ("qwen3.5-plus", 128000);
   ("qwen-turbo", 131072);
   ("qwen-plus", 131072);
   ("qwen-max", 32768);

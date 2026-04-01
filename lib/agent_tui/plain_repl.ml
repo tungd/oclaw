@@ -17,6 +17,8 @@ type deps = {
   project_root : string;
   model_name : string;
   chat_label : unit -> string;
+  git_branch : unit -> string option;
+  token_usage : unit -> string;
 }
 
 type pending_permission = {
@@ -98,14 +100,15 @@ let merge_style base overlay =
 let make_span ?(style=default_style) text =
   { text; style }
 
-let prompt_footer_path path =
-  let home =
-    try Sys.getenv "HOME" with Not_found -> ""
-  in
-  if home <> "" && String.starts_with ~prefix:home path then
-    "~" ^ String.sub path (String.length home) (String.length path - String.length home)
-  else
-    path
+let get_git_branch ~project_root =
+  try
+    let cmd = Printf.sprintf "cd %s && git rev-parse --abbrev-ref HEAD 2>/dev/null" (Filename.quote project_root) in
+    let chan = Unix.open_process_in cmd in
+    let branch = input_line chan in
+    let _ = Unix.close_process_in chan in
+    if branch <> "" then Some branch else None
+  with _ ->
+    None
 
 let write_raw io text =
   if text <> "" then begin
@@ -134,6 +137,28 @@ let read_prompted_line io prompt =
       Some line
   | exception End_of_file ->
       None
+
+let print_prompt_header io (deps : deps) =
+  ensure_newline io;
+  let header : Prompt_header.t =
+    {
+      project_root = deps.project_root;
+      model_name = deps.model_name;
+      chat_label = deps.chat_label ();
+      git_branch = deps.git_branch ();
+      token_usage = deps.token_usage ();
+    }
+  in
+  let rendered =
+    Prompt_header.render
+      ~supports_ansi:io.supports_ansi
+      header
+  in
+  write_line io rendered
+
+let read_main_prompted_line io deps =
+  print_prompt_header io deps;
+  read_prompted_line io "> "
 
 let classify_input line =
   let trimmed = String.trim line in
@@ -1172,25 +1197,6 @@ let handle_event state = function
   | Acp.Message.Agent_plan _ ->
       ()
 
-let print_banner io deps =
-  let row label value =
-    L.statusCard
-      ~label:(style_element ~supports_ansi:io.supports_ansi ~fg:transcript_dim (L.s label))
-      ~content:(style_element ~supports_ansi:io.supports_ansi ~fg:transcript_fg (L.s value))
-  in
-  let rendered =
-    render_element
-      (L.box
-         ~title:"OClaw"
-         [
-           row "cwd" (prompt_footer_path deps.project_root);
-           row "model" deps.model_name;
-           row "session" (deps.chat_label ());
-         ])
-  in
-  List.iter (write_line io) (split_lines rendered);
-  write_line io ""
-
 let replay_history io messages =
   let tool_descriptors = Hashtbl.create 16 in
   let rec loop skip_hidden_response = function
@@ -1278,8 +1284,7 @@ let handle_session_command io deps ~persistent command =
   else
     match action () with
     | Ok chat_id ->
-        print_notice io ~title:"Session" (success_message chat_id);
-        print_banner io deps
+        print_notice io ~title:"Session" (success_message chat_id)
     | Error err ->
         print_error io err
 
@@ -1311,10 +1316,9 @@ let run_loop ~input ~output ~persistent deps =
     }
   in
   let emit message = handle_event state message in
-  print_banner io deps;
   if persistent then replay_history io (deps.history ());
   let rec loop () =
-    match read_prompted_line io "> " with
+    match read_main_prompted_line io deps with
     | None ->
         ensure_newline io
     | Some line ->
@@ -1346,6 +1350,9 @@ let run_loop ~input ~output ~persistent deps =
 
 let run ~state ~chat_id ~persistent =
   let current_chat_id = ref chat_id in
+  let project_root = Agent_runtime.App.project_root state in
+  let model_name = Agent_runtime.App.model_name state in
+  let token_estimator = Llm_provider.Token_estimator.for_model model_name in
   let deps =
     {
       process =
@@ -1366,12 +1373,29 @@ let run ~state ~chat_id ~persistent =
       resolve_permission =
         (fun outcome -> Agent_runtime.Session.resolve_permission state ~chat_id:!current_chat_id outcome);
       history = (fun () -> Agent_runtime.Session.history state ~chat_id:!current_chat_id);
-      project_root = Agent_runtime.App.project_root state;
-      model_name = Agent_runtime.App.model_name state;
+      project_root;
+      model_name;
       chat_label =
         (fun () ->
           if persistent then Printf.sprintf "chat:%d persistent" !current_chat_id
           else Printf.sprintf "chat:%d ephemeral" !current_chat_id);
+      git_branch = (fun () -> get_git_branch ~project_root);
+      token_usage =
+        (fun () ->
+          let messages = Agent_runtime.Session.history state ~chat_id:!current_chat_id in
+          let messages_for_counting =
+            List.filter_map
+              (fun (msg : Llm_types.message) ->
+                match msg.content with
+                | Llm_types.Text_content text -> Some (msg.role, text)
+                | Llm_types.Blocks _ -> None)
+              messages
+          in
+          let prompt_tokens = Llm_provider.Token_estimator.count_messages token_estimator messages_for_counting in
+          let usage = Llm_provider.Token_estimator.calculate_usage ~prompt_tokens token_estimator in
+          (* Format as "0.0%/128k" *)
+          let context_k = usage.context_limit / 1000 in
+          Printf.sprintf "%.1f%%/%dk" usage.percentage context_k);
     }
   in
   run_loop ~input:stdin ~output:stdout ~persistent deps

@@ -81,7 +81,9 @@ let test_model_encodings () =
     "gpt-3.5-turbo";
     "gpt-4o";
     "gpt-4o-mini";
+    "glm-5";
     "qwen-plus";
+    "qwen3.5-plus";
   ] in
   
   List.iter (fun model ->

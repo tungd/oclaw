@@ -85,7 +85,7 @@ let () =
   
   (* Test 7: Model encoding mapping *)
   Printf.printf "Test 7: Model encoding mapping...\n%!";
-  let models = ["gpt-4"; "gpt-3.5-turbo"; "gpt-4o"; "qwen-plus"] in
+  let models = ["gpt-4"; "gpt-3.5-turbo"; "gpt-4o"; "glm-5"; "qwen-plus"; "qwen3.5-plus"] in
   List.iter (fun model ->
     let est = Llm_provider.Token_estimator.for_model model in
     let usage = Llm_provider.Token_estimator.calculate_usage ~prompt_tokens:100 est in

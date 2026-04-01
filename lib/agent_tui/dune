@@ -1,6 +1,6 @@
 (library
  (name agent_tui)
- (modules plain_repl tui)
+ (modules plain_repl prompt_header tui)
  (libraries
  agent_runtime
   acp

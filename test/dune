@@ -43,9 +43,9 @@
  (libraries agent_tui acp llm_types unix))
 
 (rule
- (copy ../lib/tiktoken/vocab_cl100k.txt vocab_cl100k.txt))
+ (copy ../lib/tiktoken/vocab_cl100k/vocab_cl100k.txt vocab_cl100k.txt))
 (rule
- (copy ../lib/tiktoken/vocab_o200k.txt vocab_o200k.txt))
+ (copy ../lib/tiktoken/vocab_o200k/vocab_o200k.txt vocab_o200k.txt))
 
 (test
  (name test_tiktoken)

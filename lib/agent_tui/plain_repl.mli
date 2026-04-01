@@ -17,6 +17,8 @@ type deps = {
   project_root : string;
   model_name : string;
   chat_label : unit -> string;
+  git_branch : unit -> string option;
+  token_usage : unit -> string;
 }
 
 val classify_input : string -> command

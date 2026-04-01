@@ -51,6 +51,8 @@ let count_occurrences haystack needle =
   in
   loop 0 0
 
+let default_status_line = "/tmp/project -- test-model -- chat:1 -- 0.0%/128k"
+
 let run_loop_capture ~input_text ~persistent deps =
   let in_path = Filename.temp_file "plain_repl_in" ".txt" in
   let out_path = Filename.temp_file "plain_repl_out" ".txt" in
@@ -88,6 +90,8 @@ let make_deps
     project_root = "/tmp/project";
     model_name = "test-model";
     chat_label;
+    git_branch = (fun () -> None);
+    token_usage = (fun () -> "0.0%/128k");
   }
 
 let allow_once =
@@ -301,7 +305,9 @@ let test_new_command_switches_active_session () =
   let output = run_loop_capture ~input_text:"/new\nhello\n/exit\n" ~persistent:true deps in
   expect (!prompts = [ (2, "hello") ]) "/new should switch the active chat before the next prompt";
   expect (contains output "Created new conversation and switched to chat:2.") "/new should print a local success message";
-  expect (contains output "chat:2 persistent") "/new should re-render the banner with the new session label"
+  expect
+    (contains output "test-model -- chat:2 -- 0.0%/128k")
+    "/new should re-render the compact status line with the new session label"
 
 let test_fork_command_switches_active_session () =
   let active_chat = ref 4 in
@@ -322,7 +328,9 @@ let test_fork_command_switches_active_session () =
   let output = run_loop_capture ~input_text:"/fork\nafter fork\n/exit\n" ~persistent:true deps in
   expect (!prompts = [ (9, "after fork") ]) "/fork should switch the active chat before the next prompt";
   expect (contains output "Forked current conversation and switched to chat:9.") "/fork should print a local success message";
-  expect (contains output "chat:9 persistent") "/fork should re-render the banner with the new session label"
+  expect
+    (contains output "test-model -- chat:9 -- 0.0%/128k")
+    "/fork should re-render the compact status line with the new session label"
 
 let test_normal_prompt_calls_process () =
   let prompts = ref [] in
@@ -337,6 +345,12 @@ let test_normal_prompt_calls_process () =
   in
   let output = run_loop_capture ~input_text:"hello\n/exit\n" ~persistent:false deps in
   expect (!prompts = [ "hello" ]) "normal prompts should call process exactly once";
+  expect
+    (contains output (default_status_line ^ "\n> hello"))
+    "the status header should be printed immediately above the prompt with no blank line";
+  expect
+    (count_occurrences output default_status_line = 2)
+    "the status header should be reprinted before each main prompt";
   expect (contains output "> hello") "non-tty loop should echo submitted prompts";
   expect (contains output "ok") "assistant responses should be printed"
 
