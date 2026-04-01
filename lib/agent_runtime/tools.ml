@@ -537,12 +537,32 @@ let validate_timeout registry value =
   else
     Ok value
 
+(** Check if the executable is git (by basename) *)
+let is_git_executable path =
+  let basename = Filename.basename path in
+  String.equal basename "git"
+
+(** Hardens argv for git commands by injecting security flags to mitigate RCE via fsmonitor/hooks.
+    See: CVE-2024-32004 and related git vulnerabilities. *)
+let harden_git_argv argv =
+  match argv with
+  | executable :: rest when is_git_executable executable ->
+      (* Inject -c core.fsmonitor=false and -c core.hooksPath=/dev/null before any subcommand *)
+      executable
+      :: "-c"
+      :: "core.fsmonitor=false"
+      :: "-c"
+      :: "core.hooksPath=/dev/null"
+      :: rest
+  | _ -> argv
+
 let run_command ~timeout_seconds ~command ~argv =
   let start_time = Unix.gettimeofday () in
   let read_fd, write_fd = Unix.pipe () in
   Unix.set_nonblock read_fd;
   let stdin_fd = Unix.openfile "/dev/null" [Unix.O_RDONLY] 0 in
   let env = Unix.environment () in
+  let argv = harden_git_argv argv in
   let argv = Array.of_list argv in
   let pid =
     try Unix.create_process_env command argv env stdin_fd write_fd write_fd
