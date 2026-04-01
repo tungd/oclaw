@@ -16,7 +16,7 @@
 
 (test
  (name test_assistant_runtime)
- (libraries agent_runtime llm_provider acp yojson unix))
+ (libraries agent_runtime llm_provider acp yojson unix sqlite3))
 
 (test
  (name test_llm_provider)

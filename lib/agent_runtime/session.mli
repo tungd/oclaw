@@ -14,6 +14,8 @@ val resolve_permission :
 
 val history : App.t -> chat_id:int -> Llm_types.message list
 val latest_node_id : App.t -> chat_id:int -> int option
+val create_conversation : App.t -> ?title:string -> unit -> int
+val fork_latest_conversation : App.t -> chat_id:int -> ?title:string -> unit -> (int, string) result
 
 val approve_read : App.t -> string -> (string, string) result
 val approve_write : App.t -> string -> (string, string) result

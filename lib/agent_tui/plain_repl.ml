@@ -3,16 +3,20 @@ module L = Layoutz
 type command =
   [ `Ignore
   | `Exit
+  | `New
+  | `Fork
   | `Prompt of string
   ]
 
 type deps = {
   process : emit:(Acp.Message.t -> unit) -> string -> (unit, string) result;
+  create_conversation : unit -> (int, string) result;
+  fork_conversation : unit -> (int, string) result;
   resolve_permission : Acp.Message.permission_outcome -> (unit, string) result;
   history : unit -> Llm_types.message list;
   project_root : string;
   model_name : string;
-  chat_label : string;
+  chat_label : unit -> string;
 }
 
 type pending_permission = {
@@ -137,6 +141,10 @@ let classify_input line =
     `Ignore
   else if trimmed = "/exit" || trimmed = "/quit" then
     `Exit
+  else if trimmed = "/new" then
+    `New
+  else if trimmed = "/fork" then
+    `Fork
   else
     `Prompt line
 
@@ -1014,6 +1022,19 @@ let print_error io message =
   List.iter (write_line io) (split_lines rendered);
   write_line io ""
 
+let print_notice io ~title message =
+  ensure_newline io;
+  let rendered =
+    render_element
+      (L.box
+         ~title
+         [
+           style_element ~supports_ansi:io.supports_ansi ~fg:transcript_fg (L.s message);
+         ])
+  in
+  List.iter (write_line io) (split_lines rendered);
+  write_line io ""
+
 let reset_stream_state state =
   Buffer.clear state.stream_buffer;
   state.stream_markdown_state <- initial_markdown_state
@@ -1164,7 +1185,7 @@ let print_banner io deps =
          [
            row "cwd" (prompt_footer_path deps.project_root);
            row "model" deps.model_name;
-           row "session" deps.chat_label;
+           row "session" (deps.chat_label ());
          ])
   in
   List.iter (write_line io) (split_lines rendered);
@@ -1208,6 +1229,8 @@ let rec prompt_for_permission state pending =
       begin
         match classify_input line with
         | `Exit -> raise Exit_requested
+        | `New
+        | `Fork
         | `Ignore ->
             write_line state.io "Invalid choice. Enter a number.";
             prompt_for_permission state pending
@@ -1234,6 +1257,31 @@ let rec handle_pending_permissions state deps =
             if not state.saw_error_event then print_error state.io err;
             handle_pending_permissions state deps
       end
+
+let handle_session_command io deps ~persistent command =
+  let command_name, action, success_message =
+    match command with
+    | `New ->
+        ( "/new",
+          deps.create_conversation,
+          (fun chat_id ->
+            Printf.sprintf "Created new conversation and switched to chat:%d." chat_id) )
+    | `Fork ->
+        ( "/fork",
+          deps.fork_conversation,
+          (fun chat_id ->
+            Printf.sprintf "Forked current conversation and switched to chat:%d." chat_id) )
+    | _ -> invalid_arg "handle_session_command expects /new or /fork"
+  in
+  if not persistent then
+    print_error io (Printf.sprintf "%s requires --persistent." command_name)
+  else
+    match action () with
+    | Ok chat_id ->
+        print_notice io ~title:"Session" (success_message chat_id);
+        print_banner io deps
+    | Error err ->
+        print_error io err
 
 let run_loop ~input ~output ~persistent deps =
   let io =
@@ -1275,6 +1323,12 @@ let run_loop ~input ~output ~persistent deps =
           | `Ignore -> loop ()
           | `Exit ->
               ensure_newline io
+          | `New ->
+              handle_session_command io deps ~persistent `New;
+              loop ()
+          | `Fork ->
+              handle_session_command io deps ~persistent `Fork;
+              loop ()
           | `Prompt prompt ->
               state.saw_error_event <- false;
               begin
@@ -1291,19 +1345,33 @@ let run_loop ~input ~output ~persistent deps =
   try loop () with Exit_requested -> ensure_newline io
 
 let run ~state ~chat_id ~persistent =
+  let current_chat_id = ref chat_id in
   let deps =
     {
       process =
         (fun ~emit prompt ->
-          Agent_runtime.Session.process ~emit state ~chat_id ~persistent prompt);
+          Agent_runtime.Session.process ~emit state ~chat_id:!current_chat_id ~persistent prompt);
+      create_conversation =
+        (fun () ->
+          let new_chat_id = Agent_runtime.Session.create_conversation state () in
+          current_chat_id := new_chat_id;
+          Ok new_chat_id);
+      fork_conversation =
+        (fun () ->
+          match Agent_runtime.Session.fork_latest_conversation state ~chat_id:!current_chat_id () with
+          | Ok new_chat_id ->
+              current_chat_id := new_chat_id;
+              Ok new_chat_id
+          | Error err -> Error err);
       resolve_permission =
-        (fun outcome -> Agent_runtime.Session.resolve_permission state ~chat_id outcome);
-      history = (fun () -> Agent_runtime.Session.history state ~chat_id);
+        (fun outcome -> Agent_runtime.Session.resolve_permission state ~chat_id:!current_chat_id outcome);
+      history = (fun () -> Agent_runtime.Session.history state ~chat_id:!current_chat_id);
       project_root = Agent_runtime.App.project_root state;
       model_name = Agent_runtime.App.model_name state;
       chat_label =
-        if persistent then Printf.sprintf "chat:%d persistent" chat_id
-        else Printf.sprintf "chat:%d ephemeral" chat_id;
+        (fun () ->
+          if persistent then Printf.sprintf "chat:%d persistent" !current_chat_id
+          else Printf.sprintf "chat:%d ephemeral" !current_chat_id);
     }
   in
   run_loop ~input:stdin ~output:stdout ~persistent deps

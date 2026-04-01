@@ -101,7 +101,69 @@ let init_db db =
   exec "CREATE INDEX IF NOT EXISTS idx_transcripts_path ON transcripts(chat_id, path)";
   exec "CREATE INDEX IF NOT EXISTS idx_conversations_parent ON conversations(parent_chat_id)"
 
+let conversation_exists t chat_id =
+  let stmt = Sqlite3.prepare t.db "SELECT 1 FROM conversations WHERE id = ? LIMIT 1" in
+  let _ = Sqlite3.bind_int stmt 1 chat_id in
+  match Sqlite3.step stmt with
+  | Sqlite3.Rc.ROW ->
+      let _ = Sqlite3.finalize stmt in
+      true
+  | Sqlite3.Rc.DONE ->
+      let _ = Sqlite3.finalize stmt in
+      false
+  | rc ->
+      let _ = Sqlite3.finalize stmt in
+      failwith (Sqlite3.Rc.to_string rc)
+
+let insert_conversation_row t ~chat_id ?title ?parent_chat_id ?parent_node_id () =
+  let title_opt = Option.value title ~default:"" in
+  let timestamp = Unix.gettimeofday () in
+  let sql =
+    "INSERT INTO conversations (id, title, parent_chat_id, parent_node_id, timestamp) VALUES (?, ?, ?, ?, ?)"
+  in
+  let stmt = Sqlite3.prepare t.db sql in
+  let _ = Sqlite3.bind_int stmt 1 chat_id in
+  let _ = Sqlite3.bind_text stmt 2 title_opt in
+  let _ = match parent_chat_id with None -> Sqlite3.bind stmt 3 Data.NULL | Some id -> Sqlite3.bind_int stmt 3 id in
+  let _ = match parent_node_id with None -> Sqlite3.bind stmt 4 Data.NULL | Some id -> Sqlite3.bind_int stmt 4 id in
+  let _ = Sqlite3.bind_double stmt 5 timestamp in
+  match Sqlite3.step stmt with
+  | Sqlite3.Rc.DONE ->
+      let _ = Sqlite3.finalize stmt in
+      ()
+  | rc ->
+      let _ = Sqlite3.finalize stmt in
+      failwith (Sqlite3.Rc.to_string rc)
+
+let max_id_for_query t sql =
+  let stmt = Sqlite3.prepare t.db sql in
+  match Sqlite3.step stmt with
+  | Sqlite3.Rc.ROW ->
+      let value =
+        match Sqlite3.column stmt 0 with
+        | Data.INT i -> Int64.to_int i
+        | _ -> 0
+      in
+      let _ = Sqlite3.finalize stmt in
+      value
+  | Sqlite3.Rc.DONE ->
+      let _ = Sqlite3.finalize stmt in
+      0
+  | rc ->
+      let _ = Sqlite3.finalize stmt in
+      failwith (Sqlite3.Rc.to_string rc)
+
+let next_chat_id t =
+  let conversation_max = max_id_for_query t "SELECT COALESCE(MAX(id), 0) FROM conversations" in
+  let transcript_max = max_id_for_query t "SELECT COALESCE(MAX(chat_id), 0) FROM transcripts" in
+  max conversation_max transcript_max + 1
+
+let ensure_conversation_exists t ~chat_id =
+  if not (conversation_exists t chat_id) then
+    insert_conversation_row t ~chat_id ()
+
 let insert_node t ~chat_id ~path ~kind ~content ~model ~metadata =
+  ensure_conversation_exists t ~chat_id;
   let kind_str = node_kind_to_string kind in
   let content_json = Yojson.Safe.to_string (message_content_to_yojson content) in
   let metadata_json = Yojson.Safe.to_string (node_metadata_to_yojson metadata) in
@@ -143,17 +205,10 @@ let create ~db_path =
 let close t = let _ = Sqlite3.db_close t.db in ()
 
 let create_conversation t ?title ?parent_chat_id ?parent_node_id () =
-  let title_opt = Option.value title ~default:"" in
-  let timestamp = Unix.gettimeofday () in
-  let sql = "INSERT INTO conversations (title, parent_chat_id, parent_node_id, timestamp) VALUES (?, ?, ?, ?)" in
-  let stmt = Sqlite3.prepare t.db sql in
-  let _ = Sqlite3.bind_text stmt 1 title_opt in
-  let _ = match parent_chat_id with None -> Sqlite3.bind stmt 2 Data.NULL | Some id -> Sqlite3.bind_int stmt 2 id in
-  let _ = match parent_node_id with None -> Sqlite3.bind stmt 3 Data.NULL | Some id -> Sqlite3.bind_int stmt 3 id in
-  let _ = Sqlite3.bind_double stmt 4 timestamp in
-  match Sqlite3.step stmt with
-  | Sqlite3.Rc.DONE -> let id = Int64.to_int (Sqlite3.last_insert_rowid t.db) in let _ = Sqlite3.finalize stmt in id
-  | rc -> let _ = Sqlite3.finalize stmt in failwith (Sqlite3.Rc.to_string rc)
+  Option.iter (fun chat_id -> ensure_conversation_exists t ~chat_id) parent_chat_id;
+  let chat_id = next_chat_id t in
+  insert_conversation_row t ~chat_id ?title ?parent_chat_id ?parent_node_id ();
+  chat_id
 
 let get_conversation t chat_id =
   let sql = "SELECT id, title, parent_chat_id, parent_node_id, timestamp FROM conversations WHERE id = ?" in
@@ -344,6 +399,7 @@ let get_latest_node t ~chat_id =
   | rc -> let _ = Sqlite3.finalize stmt in failwith (Sqlite3.Rc.to_string rc)
 
 let fork_conversation t ~chat_id node_id ?title () =
+  ensure_conversation_exists t ~chat_id;
   let branch = get_path_to_root t node_id in
   let branch = List.sort (fun a b -> compare (Tree.path_depth a.path) (Tree.path_depth b.path)) branch in
   let new_chat_id = create_conversation t ~title:(Option.value ~default:"Forked conversation" title) ~parent_chat_id:chat_id ~parent_node_id:node_id () in

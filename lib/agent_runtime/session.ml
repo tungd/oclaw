@@ -13,6 +13,15 @@ let history (app : App.t) ~chat_id =
 let latest_node_id (app : App.t) ~chat_id =
   Transcript.get_latest_node (App.internal_state app).Runtime.transcript ~chat_id
 
+let create_conversation (app : App.t) ?title () =
+  Transcript.create_conversation (App.internal_state app).Runtime.transcript ?title ()
+
+let fork_latest_conversation (app : App.t) ~chat_id ?title () =
+  let transcript = (App.internal_state app).Runtime.transcript in
+  match Transcript.get_latest_node transcript ~chat_id with
+  | None -> Error "No conversation history to fork."
+  | Some node_id -> Ok (Transcript.fork_conversation transcript ~chat_id node_id ?title ())
+
 let approve_read (app : App.t) path =
   Tools.approve_root (App.internal_state app).Runtime.tools ~scope:Tools.Read path
 

@@ -68,6 +68,106 @@ let create_state ?llm_call data_dir =
   | Ok state -> state
   | Error err -> fail err
 
+let close_db_noerr db =
+  try ignore (Sqlite3.db_close db) with _ -> ()
+
+let with_db state f =
+  let db = Sqlite3.db_open (Agent_runtime.App.db_path state) in
+  Fun.protect
+    ~finally:(fun () -> close_db_noerr db)
+    (fun () -> f db)
+
+let conversation_exists db chat_id =
+  let stmt = Sqlite3.prepare db "SELECT 1 FROM conversations WHERE id = ? LIMIT 1" in
+  let _ = Sqlite3.bind_int stmt 1 chat_id in
+  match Sqlite3.step stmt with
+  | Sqlite3.Rc.ROW ->
+      let _ = Sqlite3.finalize stmt in
+      true
+  | Sqlite3.Rc.DONE ->
+      let _ = Sqlite3.finalize stmt in
+      false
+  | rc ->
+      let _ = Sqlite3.finalize stmt in
+      fail (Sqlite3.Rc.to_string rc)
+
+let conversation_parent_info db chat_id =
+  let stmt = Sqlite3.prepare db "SELECT parent_chat_id, parent_node_id FROM conversations WHERE id = ?" in
+  let _ = Sqlite3.bind_int stmt 1 chat_id in
+  match Sqlite3.step stmt with
+  | Sqlite3.Rc.ROW ->
+      let parent_chat_id =
+        match Sqlite3.column stmt 0 with
+        | Sqlite3.Data.INT i -> Some (Int64.to_int i)
+        | _ -> None
+      in
+      let parent_node_id =
+        match Sqlite3.column stmt 1 with
+        | Sqlite3.Data.INT i -> Some (Int64.to_int i)
+        | _ -> None
+      in
+      let _ = Sqlite3.finalize stmt in
+      Some (parent_chat_id, parent_node_id)
+  | Sqlite3.Rc.DONE ->
+      let _ = Sqlite3.finalize stmt in
+      None
+  | rc ->
+      let _ = Sqlite3.finalize stmt in
+      fail (Sqlite3.Rc.to_string rc)
+
+let legacy_metadata_json =
+  Yojson.Safe.to_string
+    (`Assoc
+       [
+         ("tool_name", `Null);
+         ("tool_result_status", `Null);
+         ("fork_point", `Bool false);
+       ])
+
+let insert_legacy_text_node db ~chat_id ?parent_path ~kind text timestamp =
+  let content_json =
+    Yojson.Safe.to_string
+      (Llm_types.message_content_to_yojson (Llm_types.Text_content text))
+  in
+  let stmt =
+    Sqlite3.prepare db
+      "INSERT INTO transcripts (chat_id, path, kind, content, model, metadata, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)"
+  in
+  let _ = Sqlite3.bind_int stmt 1 chat_id in
+  let _ = Sqlite3.bind_text stmt 2 "" in
+  let _ = Sqlite3.bind_text stmt 3 kind in
+  let _ = Sqlite3.bind_text stmt 4 content_json in
+  let _ = Sqlite3.bind_text stmt 5 "" in
+  let _ = Sqlite3.bind_text stmt 6 legacy_metadata_json in
+  let _ = Sqlite3.bind_double stmt 7 timestamp in
+  let inserted_id =
+    match Sqlite3.step stmt with
+    | Sqlite3.Rc.DONE ->
+        let id = Int64.to_int (Sqlite3.last_insert_rowid db) in
+        let _ = Sqlite3.finalize stmt in
+        id
+    | rc ->
+        let _ = Sqlite3.finalize stmt in
+        fail (Sqlite3.Rc.to_string rc)
+  in
+  let path =
+    match parent_path with
+    | None -> string_of_int inserted_id
+    | Some parent -> parent ^ "." ^ string_of_int inserted_id
+  in
+  let update_stmt = Sqlite3.prepare db "UPDATE transcripts SET path = ? WHERE id = ?" in
+  let _ = Sqlite3.bind_text update_stmt 1 path in
+  let _ = Sqlite3.bind_int update_stmt 2 inserted_id in
+  begin
+    match Sqlite3.step update_stmt with
+    | Sqlite3.Rc.DONE -> ()
+    | rc ->
+        let _ = Sqlite3.finalize update_stmt in
+        fail (Sqlite3.Rc.to_string rc)
+  end;
+  let _ = Sqlite3.finalize update_stmt in
+  (inserted_id, path)
+
 let capture_process ?persistent state ~chat_id prompt =
   let events = ref [] in
   let emit event =
@@ -190,6 +290,82 @@ let test_session_isolation () =
     | Ok (), _ -> ()
     | Error err, _ -> fail err
   end
+
+let test_create_conversation_skips_legacy_chat_ids () =
+  let data_dir = temp_dir () in
+  let state = create_state data_dir in
+  with_db state (fun db ->
+      ignore (insert_legacy_text_node db ~chat_id:7 ~kind:"user_prompt" "legacy prompt" 1.0);
+      let new_chat_id = Agent_runtime.Session.create_conversation state () in
+      expect (new_chat_id = 8) "new conversations should avoid colliding with legacy transcript-only chat ids";
+      expect (conversation_exists db new_chat_id) "create_conversation should insert a conversations row")
+
+let test_legacy_prompt_backfills_conversation_row () =
+  let data_dir = temp_dir () in
+  let llm _provider ?emit:_ ~system_prompt:_ messages ~tools:_ =
+    let contents = text_messages messages in
+    expect (List.mem "legacy prompt" contents) "legacy prompt should still be present after backfill";
+    expect (List.mem "follow up" contents) "new prompt should be appended to the legacy chat";
+    text_response "done"
+  in
+  let state = create_state ~llm_call:llm data_dir in
+  with_db state (fun db ->
+      ignore (insert_legacy_text_node db ~chat_id:12 ~kind:"user_prompt" "legacy prompt" 1.0);
+      expect (not (conversation_exists db 12)) "setup should omit the legacy conversation row");
+  let result, events = capture_process ~persistent:true state ~chat_id:12 "follow up" in
+  begin
+    match result with
+    | Ok () -> expect_final_message "done" events
+    | Error err -> fail err
+  end;
+  with_db state (fun db ->
+      expect (conversation_exists db 12) "processing a legacy chat should backfill its conversation row")
+
+let test_fork_latest_conversation_backfills_legacy_parent () =
+  let data_dir = temp_dir () in
+  let state = create_state data_dir in
+  let latest_node_id =
+    with_db state (fun db ->
+        let _, prompt_path =
+          insert_legacy_text_node db ~chat_id:30 ~kind:"user_prompt" "legacy prompt" 1.0
+        in
+        let response_id, _ =
+          insert_legacy_text_node db ~chat_id:30 ~parent_path:prompt_path ~kind:"llm_response" "legacy answer" 2.0
+        in
+        expect (not (conversation_exists db 30)) "setup should omit the parent conversation row";
+        response_id)
+  in
+  let forked_chat_id =
+    match Agent_runtime.Session.fork_latest_conversation state ~chat_id:30 () with
+    | Ok chat_id -> chat_id
+    | Error err -> fail err
+  in
+  expect
+    (forked_chat_id = 31)
+    "forked conversations should allocate the next unused chat id after legacy transcript-only chats";
+  with_db state (fun db ->
+      expect (conversation_exists db 30) "forking should backfill the parent conversation row";
+      match conversation_parent_info db forked_chat_id with
+      | Some (Some parent_chat_id, Some parent_node_id) ->
+          expect (parent_chat_id = 30) "forked conversation should reference the source chat";
+          expect (parent_node_id = latest_node_id) "forked conversation should reference the fork point node"
+      | _ -> fail "forked conversation metadata should include parent chat and node");
+  let source_history = text_messages (Agent_runtime.Session.history state ~chat_id:30) in
+  let forked_history = text_messages (Agent_runtime.Session.history state ~chat_id:forked_chat_id) in
+  expect
+    (source_history = [ "legacy prompt"; "legacy answer" ])
+    "legacy source history should be readable after backfill";
+  expect
+    (forked_history = source_history)
+    "forked conversation history should match the source branch up to the latest node"
+
+let test_fork_latest_conversation_requires_history () =
+  let data_dir = temp_dir () in
+  let state = create_state data_dir in
+  match Agent_runtime.Session.fork_latest_conversation state ~chat_id:99 () with
+  | Ok _ -> fail "empty chats should not fork successfully"
+  | Error err ->
+      expect (err = "No conversation history to fork.") "empty fork errors should be stable"
 
 let test_tool_loop_and_resume () =
   let data_dir = temp_dir () in
@@ -527,6 +703,10 @@ let test_event_sequence_for_text_reply () =
 let () =
   test_persistent_session ();
   test_session_isolation ();
+  test_create_conversation_skips_legacy_chat_ids ();
+  test_legacy_prompt_backfills_conversation_row ();
+  test_fork_latest_conversation_backfills_legacy_parent ();
+  test_fork_latest_conversation_requires_history ();
   test_tool_loop_and_resume ();
   test_permission_request_and_resume ();
   test_permission_request_and_reject ();

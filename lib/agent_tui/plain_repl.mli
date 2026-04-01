@@ -3,16 +3,20 @@
 type command =
   [ `Ignore
   | `Exit
+  | `New
+  | `Fork
   | `Prompt of string
   ]
 
 type deps = {
   process : emit:(Acp.Message.t -> unit) -> string -> (unit, string) result;
+  create_conversation : unit -> (int, string) result;
+  fork_conversation : unit -> (int, string) result;
   resolve_permission : Acp.Message.permission_outcome -> (unit, string) result;
   history : unit -> Llm_types.message list;
   project_root : string;
   model_name : string;
-  chat_label : string;
+  chat_label : unit -> string;
 }
 
 val classify_input : string -> command

@@ -84,12 +84,14 @@ Current interactive behavior:
 - Renders transcript output with `layoutz` while still appending directly to stdout
 - Replays the current persistent branch on startup when `--persistent` is enabled
 - Uses boxed numbered approval prompts for tool permissions
+- Supports `/new` and `/fork` in the TUI REPL for creating or forking persistent conversations
 - Supports `/permissions` and `/permissions <read|write|exec|install>` for reviewing approvals
 - Exits with `/exit` or `/quit`
 
 ### Persistent Conversations
 
 Persistence is opt-in. When enabled, OClaw resumes the latest node for the selected `chat_id`.
+In TUI mode, `/new` creates a fresh conversation and `/fork` branches from the current latest node, then switches the active session to the new chat.
 
 ```bash
 dune exec ./bin/oclaw/oclaw.exe -- --persistent --chat-id 42

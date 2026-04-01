@@ -70,14 +70,24 @@ let run_loop_capture ~input_text ~persistent deps =
       close_out oc;
       slurp out_path)
 
-let make_deps ?(history=(fun () -> [])) ?(process=(fun ~emit:_ _ -> Ok ())) ?(resolve_permission=(fun _ -> Ok ())) () =
+let make_deps
+    ?(history=(fun () -> []))
+    ?(process=(fun ~emit:_ _ -> Ok ()))
+    ?(create_conversation=(fun () -> Error "create_conversation not configured"))
+    ?(fork_conversation=(fun () -> Error "fork_conversation not configured"))
+    ?(resolve_permission=(fun _ -> Ok ()))
+    ?(chat_label=(fun () -> "chat:1 ephemeral"))
+    ()
+  =
   {
     Agent_tui.Plain_repl.process;
+    create_conversation;
+    fork_conversation;
     resolve_permission;
     history;
     project_root = "/tmp/project";
     model_name = "test-model";
-    chat_label = "chat:1 ephemeral";
+    chat_label;
   }
 
 let allow_once =
@@ -162,6 +172,14 @@ let test_select_permission_option () =
     (invalid = Error "Enter a number between 1 and 2.")
     "out-of-range approval choices should be rejected"
 
+let test_classify_session_commands () =
+  expect
+    (Agent_tui.Plain_repl.classify_input "/new" = `New)
+    "/new should classify as a local session command";
+  expect
+    (Agent_tui.Plain_repl.classify_input "/fork" = `Fork)
+    "/fork should classify as a local session command"
+
 let test_markdown_rendering () =
   let plain =
     Agent_tui.Plain_repl.render_markdown_lines
@@ -244,6 +262,67 @@ let test_exit_commands_skip_process () =
   expect (!process_calls = 0) "/exit should terminate without calling process";
   ignore (run_loop_capture ~input_text:"/quit\n" ~persistent:false deps);
   expect (!process_calls = 0) "/quit should terminate without calling process"
+
+let test_session_commands_require_persistent_mode () =
+  let create_calls = ref 0 in
+  let fork_calls = ref 0 in
+  let deps =
+    make_deps
+      ~create_conversation:(fun () ->
+        incr create_calls;
+        Ok 2)
+      ~fork_conversation:(fun () ->
+        incr fork_calls;
+        Ok 3)
+      ()
+  in
+  let output = run_loop_capture ~input_text:"/new\n/fork\n/exit\n" ~persistent:false deps in
+  expect (!create_calls = 0) "/new should not run outside persistent mode";
+  expect (!fork_calls = 0) "/fork should not run outside persistent mode";
+  expect (contains output "/new requires --persistent.") "/new should explain the persistent-mode requirement";
+  expect (contains output "/fork requires --persistent.") "/fork should explain the persistent-mode requirement"
+
+let test_new_command_switches_active_session () =
+  let active_chat = ref 1 in
+  let prompts = ref [] in
+  let deps =
+    make_deps
+      ~chat_label:(fun () -> Printf.sprintf "chat:%d persistent" !active_chat)
+      ~create_conversation:(fun () ->
+        active_chat := 2;
+        Ok 2)
+      ~process:(fun ~emit prompt ->
+        prompts := !prompts @ [ (!active_chat, prompt) ];
+        emit (Acp.Message.Agent_message { content = "ok"; chat_id = None });
+        emit Acp.Message.Done;
+        Ok ())
+      ()
+  in
+  let output = run_loop_capture ~input_text:"/new\nhello\n/exit\n" ~persistent:true deps in
+  expect (!prompts = [ (2, "hello") ]) "/new should switch the active chat before the next prompt";
+  expect (contains output "Created new conversation and switched to chat:2.") "/new should print a local success message";
+  expect (contains output "chat:2 persistent") "/new should re-render the banner with the new session label"
+
+let test_fork_command_switches_active_session () =
+  let active_chat = ref 4 in
+  let prompts = ref [] in
+  let deps =
+    make_deps
+      ~chat_label:(fun () -> Printf.sprintf "chat:%d persistent" !active_chat)
+      ~fork_conversation:(fun () ->
+        active_chat := 9;
+        Ok 9)
+      ~process:(fun ~emit prompt ->
+        prompts := !prompts @ [ (!active_chat, prompt) ];
+        emit (Acp.Message.Agent_message { content = "ok"; chat_id = None });
+        emit Acp.Message.Done;
+        Ok ())
+      ()
+  in
+  let output = run_loop_capture ~input_text:"/fork\nafter fork\n/exit\n" ~persistent:true deps in
+  expect (!prompts = [ (9, "after fork") ]) "/fork should switch the active chat before the next prompt";
+  expect (contains output "Forked current conversation and switched to chat:9.") "/fork should print a local success message";
+  expect (contains output "chat:9 persistent") "/fork should re-render the banner with the new session label"
 
 let test_normal_prompt_calls_process () =
   let prompts = ref [] in
@@ -432,12 +511,16 @@ let test_streaming_table_renders_once_when_complete () =
 let () =
   test_render_history_message ();
   test_select_permission_option ();
+  test_classify_session_commands ();
   test_markdown_rendering ();
   test_table_rendering ();
   test_table_alignment_markers ();
   test_table_inline_markdown ();
   test_code_fence_ignores_table_detection ();
   test_exit_commands_skip_process ();
+  test_session_commands_require_persistent_mode ();
+  test_new_command_switches_active_session ();
+  test_fork_command_switches_active_session ();
   test_normal_prompt_calls_process ();
   test_persistent_startup_replays_history ();
   test_persistent_startup_hides_permissions_replay ();
