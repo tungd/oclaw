@@ -1,21 +1,16 @@
+;; Embed vocabulary files using crunch
+(rule
+ (targets vocab_cl100k_data.ml)
+ (deps (source_tree vocab_cl100k))
+ (action (run ocaml-crunch -m plain -o %{targets} vocab_cl100k)))
+
+(rule
+ (targets vocab_o200k_data.ml)
+ (deps (source_tree vocab_o200k))
+ (action (run ocaml-crunch -m plain -o %{targets} vocab_o200k)))
+
 (library
  (name tiktoken)
- (modules tiktoken vocab bpe encoding)
+ (modules tiktoken vocab bpe encoding vocab_cl100k_data vocab_o200k_data)
  (libraries re uutf unix)
  (preprocess (pps ppx_deriving_yojson)))
-
-;; Copy vocabulary files to build directory
-(rule
- (targets vocab_cl100k.txt)
- (deps (source_tree vocab_cl100k))
- (action (copy vocab_cl100k/vocab_cl100k.txt %{targets})))
-
-(rule
- (targets vocab_o200k.txt)
- (deps (source_tree vocab_o200k))
- (action (copy vocab_o200k/vocab_o200k.txt %{targets})))
-
-;; Install vocabulary files with the library
-(install
- (section lib)
- (files vocab_cl100k.txt vocab_o200k.txt))

@@ -165,35 +165,21 @@ let parse_vocab_content content =
   ) lines;
   vocab
 
-(** Find the vocabulary file in the installed location *)
-let find_vocab_file name =
-  (* Try multiple locations *)
-  let locations = [
-    (* Current directory *)
-    name;
-    (* Same directory as executable (for development) *)
-    Filename.concat (Filename.dirname Sys.executable_name) name;
-    (* Build directory (for dune exec) *)
-    Filename.concat "_build" (Filename.concat "default" (Filename.concat "lib" (Filename.concat "tiktoken" name)));
-    (* Installed lib directory *)
-    Filename.concat (Stdlib.Filename.dirname Sys.executable_name) (Filename.concat ".." (Filename.concat "lib" name));
-  ] in
-  let rec find = function
-    | [] -> failwith (Printf.sprintf "Cannot find vocabulary file: %s" name)
-    | path :: rest ->
-        if Sys.file_exists path then path
-        else find rest
-  in
-  find locations
+(** Get embedded vocabulary data *)
+let get_vocab_data name =
+  match name with
+  | "vocab_cl100k.txt" -> Vocab_cl100k_data.read name
+  | "vocab_o200k.txt" -> Vocab_o200k_data.read name
+  | _ -> failwith (Printf.sprintf "Unknown vocabulary: %s" name)
 
 (** Load the cl100k_base encoding *)
 let cl100k_base () =
-  (* Load vocabulary from file *)
-  let vocab_path = find_vocab_file "vocab_cl100k.txt" in
-  let ic = open_in_bin vocab_path in
-  let len = in_channel_length ic in
-  let content = really_input_string ic len in
-  close_in ic;
+  (* Load vocabulary from embedded data *)
+  let vocab_data = get_vocab_data "vocab_cl100k.txt" in
+  let content = match vocab_data with
+    | Some c -> c
+    | None -> failwith "Failed to load embedded vocab_cl100k.txt"
+  in
   let vocab = parse_vocab_content content in
   let inverse_vocab = build_inverse_vocab vocab in
   {
@@ -211,11 +197,11 @@ let cl100k_base () =
 
 (** Load the o200k_base encoding (used by GPT-4o, GPT-4o-mini) *)
 let o200k_base () =
-  let vocab_path = find_vocab_file "vocab_o200k.txt" in
-  let ic = open_in_bin vocab_path in
-  let len = in_channel_length ic in
-  let content = really_input_string ic len in
-  close_in ic;
+  let vocab_data = get_vocab_data "vocab_o200k.txt" in
+  let content = match vocab_data with
+    | Some c -> c
+    | None -> failwith "Failed to load embedded vocab_o200k.txt"
+  in
   let vocab = parse_vocab_content content in
   let inverse_vocab = build_inverse_vocab vocab in
   {
