@@ -176,6 +176,23 @@ let optional_int_arg json name =
   | `Int value -> Ok (Some value)
   | _ -> Error (Printf.sprintf "Invalid parameters: %s must be an integer" name)
 
+let optional_positive_int_arg json name =
+  match optional_int_arg json name with
+  | Error err -> Error err
+  | Ok None -> Ok None
+  | Ok (Some value) when value > 0 -> Ok (Some value)
+  | Ok (Some _) -> Error (Printf.sprintf "Invalid parameters: %s must be positive" name)
+
+let optional_bool_arg json name =
+  match Yojson.Safe.Util.member name json with
+  | `Null -> Ok None
+  | `Bool value -> Ok (Some value)
+  | _ -> Error (Printf.sprintf "Invalid parameters: %s must be a boolean" name)
+
+type prepared_execution =
+  | Immediate_result of tool_result
+  | Deferred_action of (unit -> tool_result)
+
 let make_tool name description input_schema execute =
   let definition = {
     Llm_types.name;
@@ -434,6 +451,31 @@ let tokenize_command command =
   in
   parse (skip_spaces 0) [] None
 
+let command_requires_shell command =
+  let len = String.length command in
+  let rec loop idx quote =
+    if idx >= len then false
+    else
+      let ch = String.unsafe_get command idx in
+      match quote with
+      | Some q ->
+          if ch = q then loop (idx + 1) None
+          else if q = '"' && ch = '\\' && idx + 1 < len then
+            loop (idx + 2) quote
+          else
+            loop (idx + 1) quote
+      | None ->
+          begin
+            match ch with
+            | '\'' | '"' -> loop (idx + 1) (Some ch)
+            | '\\' when idx + 1 < len -> loop (idx + 2) None
+            | '|' | '&' | ';' | '<' | '>' | '$' | '`' | '(' | ')' | '\n' | '\r' | '*' | '?' | '[' | ']' | '{' | '}' ->
+                true
+            | _ -> loop (idx + 1) None
+          end
+  in
+  loop 0 None
+
 let string_contains_ci haystack needle =
   let haystack = String.lowercase_ascii haystack in
   let needle = String.lowercase_ascii needle in
@@ -481,6 +523,49 @@ let read_file_full path =
   | Sys_error msg when String.starts_with ~prefix:"Permission denied" msg ->
       Error (Unix.Unix_error (Unix.EACCES, "open", path))
   | exn -> Error exn
+
+let validate_line_range ~line_from ~line_to =
+  match line_from, line_to with
+  | Some first, Some last when last < first ->
+      Error "Invalid parameters: line_to must be greater than or equal to line_from"
+  | _ -> Ok ()
+
+let find_line_start content target_line =
+  if target_line <= 1 then 0
+  else
+    let len = String.length content in
+    let rec loop idx current_line =
+      if idx >= len then len
+      else if String.unsafe_get content idx = '\n' then
+        let next_line = current_line + 1 in
+        if next_line = target_line then idx + 1
+        else loop (idx + 1) next_line
+      else
+        loop (idx + 1) current_line
+    in
+    loop 0 1
+
+let slice_content_by_lines content ~line_from ~line_to =
+  let len = String.length content in
+  let start_idx = find_line_start content (Option.value line_from ~default:1) in
+  let end_idx =
+    match line_to with
+    | None -> len
+    | Some line when line = max_int -> len
+    | Some line -> find_line_start content (line + 1)
+  in
+  if start_idx >= end_idx then ""
+  else String.sub content start_idx (end_idx - start_idx)
+
+let execute_prepared = function
+  | Immediate_result result -> result
+  | Deferred_action action ->
+      begin
+        try action ()
+        with exn ->
+          failure ~error_type:"exception" ~error_category:Other
+            (Printf.sprintf "Tool execution exception: %s" (Printexc.to_string exn))
+      end
 
 let write_file_atomic path content =
   try
@@ -649,6 +734,11 @@ let request_for_executable path =
     target = path;
     reason = "Executable access is not yet approved.";
   }
+
+let resolve_shell_executable () =
+  match resolve_executable_path "/bin/sh" with
+  | Ok shell -> Ok shell
+  | Error _ -> resolve_executable_path "sh"
 
 let request_for_install name =
   {
@@ -848,23 +938,120 @@ let activate_skill_tool registry =
       | Ok name -> activate_skill registry ~chat_id name);
   }
 
+let prepare_read_file_execution registry json =
+  match
+    required_string_arg json "path",
+    optional_positive_int_arg json "line_from",
+    optional_positive_int_arg json "line_to",
+    optional_bool_arg json "parallel"
+  with
+  | Error err, _, _, _ | _, Error err, _, _ | _, _, Error err, _ | _, _, _, Error err ->
+      Immediate_result (failure ~error_category:InvalidParameters err)
+  | Ok path, Ok line_from, Ok line_to, Ok _parallel ->
+      begin
+        match validate_line_range ~line_from ~line_to with
+        | Error err -> Immediate_result (failure ~error_category:InvalidParameters err)
+        | Ok () ->
+            let normalized = normalize_lossy_path path in
+            if not (approved registry ~scope:Read ~path:normalized) then
+              let request = request_for_root Read path in
+              Immediate_result (approval_required request (approval_message request))
+            else
+              Deferred_action (fun () ->
+                  match read_file_full normalized with
+                  | Ok content ->
+                      success ~status_code:200 (slice_content_by_lines content ~line_from ~line_to)
+                  | Error exn -> unix_error_result ~op:`Read ~path:normalized exn)
+      end
+
 let read_file_tool =
-  make_tool "read_file" "Read the contents of a file."
-    [
-      ("path", `Assoc [("type", `String "string"); ("description", `String "Path to the file to read")]);
-    ]
-    (fun ~registry ~chat_id:_ args ->
-      match required_string_arg (json_assoc_or_empty args) "path" with
-      | Error err -> failure ~error_category:InvalidParameters err
-      | Ok path ->
-          let normalized = normalize_lossy_path path in
-          if not (approved registry ~scope:Read ~path:normalized) then
-            let request = request_for_root Read path in
-            approval_required request (approval_message request)
-          else
-            match read_file_full normalized with
-            | Ok content -> success ~status_code:200 content
-            | Error exn -> unix_error_result ~op:`Read ~path:normalized exn)
+  {
+    definition = {
+      Llm_types.name = "read_file";
+      description = "Read the contents of a file, optionally limited to a line range.";
+      input_schema = `Assoc [
+        ("type", `String "object");
+        ("properties", `Assoc [
+          ("path", `Assoc [("type", `String "string"); ("description", `String "Path to the file to read")]);
+          ("line_from", `Assoc [("type", `String "integer"); ("description", `String "Optional 1-based starting line number (inclusive)")]);
+          ("line_to", `Assoc [("type", `String "integer"); ("description", `String "Optional 1-based ending line number (inclusive)")]);
+          ("parallel", `Assoc [("type", `String "boolean"); ("description", `String "Optional hint that this read can run in parallel with other parallel-safe tool calls")]);
+        ]);
+        ("required", `List [`String "path"]);
+      ];
+    };
+    execute = (fun ~registry ~chat_id:_ args ->
+      execute_prepared (prepare_read_file_execution registry (json_assoc_or_empty args)));
+  }
+
+let prepare_bash_execution registry json =
+  match
+    required_string_arg json "command",
+    optional_int_arg json "timeout_seconds",
+    optional_bool_arg json "parallel"
+  with
+  | Error err, _, _ | _, Error err, _ | _, _, Error err ->
+      Immediate_result (failure ~error_category:InvalidParameters err)
+  | Ok command, Ok timeout_arg, Ok _parallel ->
+      let timeout_value = Option.value timeout_arg ~default:default_bash_timeout_seconds in
+      begin
+        match validate_timeout registry timeout_value with
+        | Error err -> Immediate_result (failure ~error_category:InvalidParameters err)
+        | Ok timeout_seconds ->
+            if command_requires_shell command then
+              begin
+                match resolve_shell_executable () with
+                | Error err -> Immediate_result (failure ~error_category:CommandNotFound err)
+                | Ok shell ->
+                    if not (approved registry ~scope:Execute ~path:shell) then
+                      let request = request_for_executable shell in
+                      Immediate_result (approval_required request (approval_message request))
+                    else
+                      Deferred_action (fun () ->
+                          match run_command ~timeout_seconds ~command:shell ~argv:[shell; "-c"; command] with
+                          | Error err ->
+                              let category =
+                                if classify_error ~error_message:err = CommandTimeout then CommandTimeout else CommandFailed
+                              in
+                              failure ~error_category:category err
+                          | Ok (output, exit_code, duration_ms) ->
+                              let content = Printf.sprintf "Command output:\n%s\nExit status: %d" output exit_code in
+                              if exit_code = 0 then
+                                success ~status_code:exit_code ~duration_ms content
+                              else
+                                failure ~status_code:exit_code ~duration_ms ~error_type:"command_failed" ~error_category:CommandFailed
+                                  (Printf.sprintf "Command failed: %s" content))
+              end
+            else
+              begin
+                match tokenize_command command with
+                | Error err -> Immediate_result (failure ~error_category:InvalidParameters err)
+                | Ok argv ->
+                    begin
+                      match resolve_executable_path (List.hd argv) with
+                      | Error err -> Immediate_result (failure ~error_category:CommandNotFound err)
+                      | Ok executable ->
+                          if not (approved registry ~scope:Execute ~path:executable) then
+                            let request = request_for_executable executable in
+                            Immediate_result (approval_required request (approval_message request))
+                          else
+                            Deferred_action (fun () ->
+                                match run_command ~timeout_seconds ~command:executable ~argv:(executable :: List.tl argv) with
+                                | Error err ->
+                                    let category =
+                                      if classify_error ~error_message:err = CommandTimeout then CommandTimeout else CommandFailed
+                                    in
+                                    failure ~error_category:category err
+                                | Ok (output, exit_code, duration_ms) ->
+                                    let content = Printf.sprintf "Command output:\n%s\nExit status: %d" output exit_code in
+                                    if exit_code = 0 then
+                                      success ~status_code:exit_code ~duration_ms content
+                                    else
+                                      failure ~status_code:exit_code ~duration_ms ~error_type:"command_failed" ~error_category:CommandFailed
+                                        (Printf.sprintf "Command failed: %s" content))
+                    end
+              end
+      end
 
 let write_file_tool =
   make_tool "write_file" "Write content to a file (atomic writes)."
@@ -930,50 +1117,13 @@ let bash_tool =
         ("properties", `Assoc [
           ("command", `Assoc [("type", `String "string")]);
           ("timeout_seconds", `Assoc [("type", `String "integer")]);
+          ("parallel", `Assoc [("type", `String "boolean"); ("description", `String "Optional hint that this command can run in parallel with other parallel-safe tool calls")]);
         ]);
         ("required", `List [`String "command"]);
       ];
     };
     execute = (fun ~registry ~chat_id:_ args ->
-      let json = json_assoc_or_empty args in
-      match required_string_arg json "command", optional_int_arg json "timeout_seconds" with
-      | Error err, _ | _, Error err -> failure ~error_category:InvalidParameters err
-      | Ok command, Ok timeout_arg ->
-          begin
-            match tokenize_command command with
-            | Error err -> failure ~error_category:InvalidParameters err
-            | Ok argv ->
-                let timeout_value = Option.value timeout_arg ~default:default_bash_timeout_seconds in
-                begin
-                  match validate_timeout registry timeout_value with
-                  | Error err -> failure ~error_category:InvalidParameters err
-                  | Ok timeout_seconds ->
-                      begin
-                        match resolve_executable_path (List.hd argv) with
-                        | Error err -> failure ~error_category:CommandNotFound err
-                        | Ok executable ->
-                            if not (approved registry ~scope:Execute ~path:executable) then
-                              let request = request_for_executable executable in
-                              approval_required request (approval_message request)
-                            else
-                              begin
-                                match run_command ~timeout_seconds ~command:executable ~argv:(executable :: List.tl argv) with
-                                | Error err ->
-                                    let category =
-                                      if classify_error ~error_message:err = CommandTimeout then CommandTimeout else CommandFailed
-                                    in
-                                    failure ~error_category:category err
-                                | Ok (output, exit_code, duration_ms) ->
-                                    let content = Printf.sprintf "Command output:\n%s\nExit status: %d" output exit_code in
-                                    if exit_code = 0 then
-                                      success ~status_code:exit_code ~duration_ms content
-                                    else
-                                      failure ~status_code:exit_code ~duration_ms ~error_type:"command_failed" ~error_category:CommandFailed
-                                        (Printf.sprintf "Command failed: %s" content)
-                              end
-                      end
-                end
-          end);
+      execute_prepared (prepare_bash_execution registry (json_assoc_or_empty args)));
   }
 
 let create_default_registry ~db_path ~project_root ~skills () =
@@ -1007,6 +1157,49 @@ let execute registry ~chat_id name input =
         | Unix.Unix_error _ as exn -> unix_error_result ~op:`Exec ~path:name exn
         | exn -> failure (Printf.sprintf "Tool execution exception: %s" (Printexc.to_string exn))
       end
+
+let requests_parallel_execution name input =
+  match name with
+  | "bash" | "read_file" ->
+      begin
+        match optional_bool_arg (json_assoc_or_empty input) "parallel" with
+        | Ok (Some true) -> true
+        | Ok (Some false) | Ok None | Error _ -> false
+      end
+  | _ -> false
+
+let execute_parallel_batch registry ~chat_id calls =
+  let prepared =
+    calls
+    |> List.map (fun (name, input) ->
+           let json = json_assoc_or_empty input in
+           match name with
+           | "bash" -> prepare_bash_execution registry json
+           | "read_file" -> prepare_read_file_execution registry json
+           | _ -> Immediate_result (execute registry ~chat_id name json))
+    |> Array.of_list
+  in
+  let count = Array.length prepared in
+  if count = 0 then []
+  else if count = 1 then
+    [ execute_prepared prepared.(0) ]
+  else
+    let pool = registry.pool in
+    Domainslib.Task.run pool (fun () ->
+        let scheduled =
+          Array.map
+            (function
+              | Immediate_result result -> `Result result
+              | Deferred_action action ->
+                  `Promise (Domainslib.Task.async pool (fun () -> execute_prepared (Deferred_action action))))
+            prepared
+        in
+        Array.to_list
+          (Array.map
+             (function
+               | `Result result -> result
+               | `Promise promise -> Domainslib.Task.await pool promise)
+             scheduled))
 
 let approve_executable registry executable =
   match approve_executable_internal registry executable with

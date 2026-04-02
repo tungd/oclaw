@@ -118,6 +118,13 @@ let tool_kind_of_name = function
 let title_of_tool_call name =
   "Tool: " ^ name
 
+type scheduled_tool_call = {
+  tool_call_id : string;
+  name : string;
+  input : Yojson.Safe.t;
+  created_tool_call : Acp.Message.tool_call;
+}
+
 let tool_call_payload ~tool_call_id ~name ~input ?status ?content ?raw_output () =
   {
     Acp.Message.tool_call_id;
@@ -128,6 +135,28 @@ let tool_call_payload ~tool_call_id ~name ~input ?status ?content ?raw_output ()
     raw_input = Some input;
     raw_output;
   }
+
+let normalize_tool_call_id tool_call_id =
+  if String.trim tool_call_id = "" then
+    Printf.sprintf "tool-%f" (Unix.gettimeofday ())
+  else
+    tool_call_id
+
+let schedule_tool_call (tool_call_id, name, input) =
+  let tool_call_id = normalize_tool_call_id tool_call_id in
+  let created_tool_call =
+    tool_call_payload ~tool_call_id ~name ~input ~status:Acp.Message.Pending ()
+  in
+  { tool_call_id; name; input; created_tool_call }
+
+let queued_tool_call scheduled =
+  (scheduled.tool_call_id, scheduled.name, scheduled.input)
+
+let rec take_parallel_tool_calls acc = function
+  | ((_, name, input) as tool_call) :: rest
+    when Tools.requests_parallel_execution name input ->
+      take_parallel_tool_calls (tool_call :: acc) rest
+  | remaining -> (List.rev acc, remaining)
 
 let tool_result_content result =
   if String.trim result.Tools.content = "" then
@@ -338,123 +367,291 @@ let rec continue_llm_loop ~emit state ~chat_id ~system_prompt current_node_id ro
 and execute_tool_calls ~emit state ~chat_id ~system_prompt ~rounds_remaining ~current_node_id tool_calls =
   match tool_calls with
   | [] -> continue_llm_loop ~emit state ~chat_id ~system_prompt current_node_id (rounds_remaining - 1)
-  | (tool_call_id, name, input) :: remaining ->
-      let tool_call_id =
-        if String.trim tool_call_id = "" then
-          Printf.sprintf "tool-%f" (Unix.gettimeofday ())
-        else
-          tool_call_id
+  | (_, name, input) :: _ when Tools.requests_parallel_execution name input ->
+      let parallel_batch, remaining = take_parallel_tool_calls [] tool_calls in
+      execute_parallel_tool_calls
+        ~emit
+        state
+        ~chat_id
+        ~system_prompt
+        ~rounds_remaining
+        ~current_node_id
+        parallel_batch
+        remaining
+  | tool_call :: remaining ->
+      execute_single_tool_call
+        ~emit
+        state
+        ~chat_id
+        ~system_prompt
+        ~rounds_remaining
+        ~current_node_id
+        tool_call
+        remaining
+
+and execute_single_tool_call ~emit state ~chat_id ~system_prompt ~rounds_remaining ~current_node_id tool_call remaining =
+  let scheduled = schedule_tool_call tool_call in
+  let { tool_call_id; name; input; created_tool_call } = scheduled in
+  emit_tool_call emit ~chat_id created_tool_call;
+  let tool_call_node_id =
+    Transcript.add_tool_call state.Runtime.transcript ~parent_id:current_node_id ~tool_name:name ~input
+  in
+  let running_tool_call =
+    { created_tool_call with Acp.Message.status = Some Acp.Message.In_progress }
+  in
+  let result = execute_tool state ~chat_id name input in
+  match result.Tools.approval_request with
+  | Some request ->
+      let pending_tool_call =
+        {
+          created_tool_call with
+          Acp.Message.content = tool_result_content result;
+          status = Some Acp.Message.Pending;
+        }
       in
-      let created_tool_call =
-        tool_call_payload ~tool_call_id ~name ~input ~status:Acp.Message.Pending ()
+      let resume outcome =
+        match outcome with
+        | Acp.Message.Cancelled ->
+            emit (Acp.Message.Status { status = "cancelled"; message = Some "Permission request cancelled" });
+            emit Acp.Message.Done;
+            Ok ()
+        | Acp.Message.Selected "allow-once" ->
+            begin
+              match approve_request state request with
+              | Error err ->
+                  emit (Acp.Message.Error { message = err; code = 0 });
+                  Error err
+              | Ok _ ->
+                  emit_tool_call_update emit ~chat_id running_tool_call;
+                  let approved_result = execute_tool state ~chat_id name input in
+                  let completed_tool_call =
+                    {
+                      running_tool_call with
+                      Acp.Message.status =
+                        Some (if approved_result.Tools.is_error then Acp.Message.Failed else Acp.Message.Completed);
+                      content = tool_result_content approved_result;
+                      raw_output = tool_result_raw_output approved_result;
+                    }
+                  in
+                  emit_tool_call_update emit ~chat_id completed_tool_call;
+                  let next_node_id =
+                    add_tool_result_node state ~parent_id:tool_call_node_id ~tool_call_id approved_result
+                  in
+                  execute_tool_calls
+                    ~emit
+                    state
+                    ~chat_id
+                    ~system_prompt
+                    ~rounds_remaining
+                    ~current_node_id:next_node_id
+                    remaining
+            end
+        | Acp.Message.Selected "reject-once" ->
+            let rejected_result = rejection_result request in
+            let failed_tool_call =
+              {
+                created_tool_call with
+                Acp.Message.status = Some Acp.Message.Failed;
+                content = tool_result_content rejected_result;
+                raw_output = tool_result_raw_output rejected_result;
+              }
+            in
+            emit_tool_call_update emit ~chat_id failed_tool_call;
+            let next_node_id =
+              add_tool_result_node state ~parent_id:tool_call_node_id ~tool_call_id rejected_result
+            in
+            execute_tool_calls
+              ~emit
+              state
+              ~chat_id
+              ~system_prompt
+              ~rounds_remaining
+              ~current_node_id:next_node_id
+              remaining
+        | Acp.Message.Selected option_id ->
+            let err = "Unsupported permission option: " ^ option_id in
+            emit (Acp.Message.Error { message = err; code = 0 });
+            Error err
       in
-      emit_tool_call emit ~chat_id created_tool_call;
+      set_pending_permission state ~chat_id { Runtime.tool_call = pending_tool_call; request; resume };
+      emit_permission_request emit ~chat_id pending_tool_call;
+      Ok ()
+  | None ->
+      emit_tool_call_update emit ~chat_id running_tool_call;
+      let completed_tool_call =
+        {
+          running_tool_call with
+          Acp.Message.status =
+            Some (if result.Tools.is_error then Acp.Message.Failed else Acp.Message.Completed);
+          content = tool_result_content result;
+          raw_output = tool_result_raw_output result;
+        }
+      in
+      emit_tool_call_update emit ~chat_id completed_tool_call;
+      let next_node_id =
+        add_tool_result_node state ~parent_id:tool_call_node_id ~tool_call_id result
+      in
+      execute_tool_calls
+        ~emit
+        state
+        ~chat_id
+        ~system_prompt
+        ~rounds_remaining
+        ~current_node_id:next_node_id
+        remaining
+
+and execute_parallel_tool_calls ~emit state ~chat_id ~system_prompt ~rounds_remaining ~current_node_id parallel_batch remaining =
+  let scheduled_batch = List.map schedule_tool_call parallel_batch in
+  List.iter (fun scheduled -> emit_tool_call emit ~chat_id scheduled.created_tool_call) scheduled_batch;
+  let results =
+    Tools.execute_parallel_batch
+      state.Runtime.tools
+      ~chat_id
+      (List.map (fun scheduled -> (scheduled.name, scheduled.input)) scheduled_batch)
+  in
+  process_parallel_results
+    ~emit
+    state
+    ~chat_id
+    ~system_prompt
+    ~rounds_remaining
+    ~current_node_id
+    scheduled_batch
+    results
+    remaining
+
+and process_parallel_results ~emit state ~chat_id ~system_prompt ~rounds_remaining ~current_node_id scheduled_batch results remaining =
+  match scheduled_batch, results with
+  | [], [] ->
+      execute_tool_calls
+        ~emit
+        state
+        ~chat_id
+        ~system_prompt
+        ~rounds_remaining
+        ~current_node_id
+        remaining
+  | scheduled :: scheduled_rest, result :: result_rest ->
+      let { tool_call_id; name; input; created_tool_call } = scheduled in
       let tool_call_node_id =
         Transcript.add_tool_call state.Runtime.transcript ~parent_id:current_node_id ~tool_name:name ~input
       in
-      let running_tool_call =
-        { created_tool_call with Acp.Message.status = Some Acp.Message.In_progress }
-      in
-      let result = execute_tool state ~chat_id name input in
-      match result.Tools.approval_request with
-      | Some request ->
-          let pending_tool_call =
-            {
-              created_tool_call with
-              Acp.Message.content = tool_result_content result;
-              status = Some Acp.Message.Pending;
-            }
-          in
-          let resume outcome =
-            match outcome with
-            | Acp.Message.Cancelled ->
-                emit (Acp.Message.Status { status = "cancelled"; message = Some "Permission request cancelled" });
-                emit Acp.Message.Done;
-                Ok ()
-            | Acp.Message.Selected "allow-once" ->
-                begin
-                  match approve_request state request with
-                  | Error err ->
-                      emit (Acp.Message.Error { message = err; code = 0 });
-                      Error err
-                  | Ok _ ->
-                      emit_tool_call_update emit ~chat_id running_tool_call;
-                      let approved_result = execute_tool state ~chat_id name input in
-                      let completed_tool_call =
-                        {
-                          running_tool_call with
-                          Acp.Message.status =
-                            Some (if approved_result.Tools.is_error then Acp.Message.Failed else Acp.Message.Completed);
-                          content = tool_result_content approved_result;
-                          raw_output = tool_result_raw_output approved_result;
-                        }
-                      in
-                      emit_tool_call_update emit ~chat_id completed_tool_call;
-                      let next_node_id =
-                        add_tool_result_node state ~parent_id:tool_call_node_id ~tool_call_id approved_result
-                      in
-                      execute_tool_calls
-                        ~emit
-                        state
-                        ~chat_id
-                        ~system_prompt
-                        ~rounds_remaining
-                        ~current_node_id:next_node_id
-                        remaining
-                end
-            | Acp.Message.Selected "reject-once" ->
-                let rejected_result = rejection_result request in
-                let failed_tool_call =
-                  {
-                    created_tool_call with
-                    Acp.Message.status = Some Acp.Message.Failed;
-                    content = tool_result_content rejected_result;
-                    raw_output = tool_result_raw_output rejected_result;
-                  }
-                in
-                emit_tool_call_update emit ~chat_id failed_tool_call;
-                let next_node_id =
-                  add_tool_result_node state ~parent_id:tool_call_node_id ~tool_call_id rejected_result
-                in
-                execute_tool_calls
-                  ~emit
-                  state
-                  ~chat_id
-                  ~system_prompt
-                  ~rounds_remaining
-                  ~current_node_id:next_node_id
-                  remaining
-            | Acp.Message.Selected option_id ->
-                let err = "Unsupported permission option: " ^ option_id in
-                emit (Acp.Message.Error { message = err; code = 0 });
-                Error err
-          in
-          set_pending_permission state ~chat_id { Runtime.tool_call = pending_tool_call; request; resume };
-          emit_permission_request emit ~chat_id pending_tool_call;
-          Ok ()
-      | None ->
-          emit_tool_call_update emit ~chat_id running_tool_call;
-          let completed_tool_call =
-            {
-              running_tool_call with
-              Acp.Message.status =
-                Some (if result.Tools.is_error then Acp.Message.Failed else Acp.Message.Completed);
-              content = tool_result_content result;
-              raw_output = tool_result_raw_output result;
-            }
-          in
-          emit_tool_call_update emit ~chat_id completed_tool_call;
-          let next_node_id =
-            add_tool_result_node state ~parent_id:tool_call_node_id ~tool_call_id result
-          in
-          execute_tool_calls
-            ~emit
-            state
-            ~chat_id
-            ~system_prompt
-            ~rounds_remaining
-            ~current_node_id:next_node_id
-            remaining
+      begin
+        match result.Tools.approval_request with
+        | Some request ->
+            let pending_tool_call =
+              {
+                created_tool_call with
+                Acp.Message.content = tool_result_content result;
+                status = Some Acp.Message.Pending;
+              }
+            in
+            let resume outcome =
+              let remaining_after_approval =
+                List.map queued_tool_call scheduled_rest @ remaining
+              in
+              match outcome with
+              | Acp.Message.Cancelled ->
+                  emit (Acp.Message.Status { status = "cancelled"; message = Some "Permission request cancelled" });
+                  emit Acp.Message.Done;
+                  Ok ()
+              | Acp.Message.Selected "allow-once" ->
+                  begin
+                    match approve_request state request with
+                    | Error err ->
+                        emit (Acp.Message.Error { message = err; code = 0 });
+                        Error err
+                    | Ok _ ->
+                        let running_tool_call =
+                          { created_tool_call with Acp.Message.status = Some Acp.Message.In_progress }
+                        in
+                        emit_tool_call_update emit ~chat_id running_tool_call;
+                        let approved_result = execute_tool state ~chat_id name input in
+                        let completed_tool_call =
+                          {
+                            running_tool_call with
+                            Acp.Message.status =
+                              Some (if approved_result.Tools.is_error then Acp.Message.Failed else Acp.Message.Completed);
+                            content = tool_result_content approved_result;
+                            raw_output = tool_result_raw_output approved_result;
+                          }
+                        in
+                        emit_tool_call_update emit ~chat_id completed_tool_call;
+                        let next_node_id =
+                          add_tool_result_node state ~parent_id:tool_call_node_id ~tool_call_id approved_result
+                        in
+                        execute_tool_calls
+                          ~emit
+                          state
+                          ~chat_id
+                          ~system_prompt
+                          ~rounds_remaining
+                          ~current_node_id:next_node_id
+                          remaining_after_approval
+                  end
+              | Acp.Message.Selected "reject-once" ->
+                  let rejected_result = rejection_result request in
+                  let failed_tool_call =
+                    {
+                      created_tool_call with
+                      Acp.Message.status = Some Acp.Message.Failed;
+                      content = tool_result_content rejected_result;
+                      raw_output = tool_result_raw_output rejected_result;
+                    }
+                  in
+                  emit_tool_call_update emit ~chat_id failed_tool_call;
+                  let next_node_id =
+                    add_tool_result_node state ~parent_id:tool_call_node_id ~tool_call_id rejected_result
+                  in
+                  execute_tool_calls
+                    ~emit
+                    state
+                    ~chat_id
+                    ~system_prompt
+                    ~rounds_remaining
+                    ~current_node_id:next_node_id
+                    remaining_after_approval
+              | Acp.Message.Selected option_id ->
+                  let err = "Unsupported permission option: " ^ option_id in
+                  emit (Acp.Message.Error { message = err; code = 0 });
+                  Error err
+            in
+            set_pending_permission state ~chat_id { Runtime.tool_call = pending_tool_call; request; resume };
+            emit_permission_request emit ~chat_id pending_tool_call;
+            Ok ()
+        | None ->
+            let running_tool_call =
+              { created_tool_call with Acp.Message.status = Some Acp.Message.In_progress }
+            in
+            emit_tool_call_update emit ~chat_id running_tool_call;
+            let completed_tool_call =
+              {
+                running_tool_call with
+                Acp.Message.status =
+                  Some (if result.Tools.is_error then Acp.Message.Failed else Acp.Message.Completed);
+                content = tool_result_content result;
+                raw_output = tool_result_raw_output result;
+              }
+            in
+            emit_tool_call_update emit ~chat_id completed_tool_call;
+            let next_node_id =
+              add_tool_result_node state ~parent_id:tool_call_node_id ~tool_call_id result
+            in
+            process_parallel_results
+              ~emit
+              state
+              ~chat_id
+              ~system_prompt
+              ~rounds_remaining
+              ~current_node_id:next_node_id
+              scheduled_rest
+              result_rest
+              remaining
+      end
+  | _ ->
+      let err = "Tool batch result mismatch" in
+      emit (Acp.Message.Error { message = err; code = 0 });
+      Error err
 
 type approval_command_result =
   | Approval_text of (string, string) result

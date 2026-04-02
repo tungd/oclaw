@@ -53,6 +53,21 @@ let tool_response name args =
     usage = None;
   }
 
+let multi_tool_response tool_calls =
+  Ok {
+    Llm_types.content =
+      List.mapi
+        (fun idx (name, args) ->
+          Llm_types.Response_tool_use {
+            id = Printf.sprintf "call-%d" (idx + 1);
+            name;
+            input = `Assoc args;
+          })
+        tool_calls;
+    stop_reason = Some "tool_use";
+    usage = None;
+  }
+
 let make_config data_dir =
   {
     Agent_runtime.Config.default_config with
@@ -507,6 +522,57 @@ let test_permission_request_and_reject () =
           "expected failed tool call after rejection"
   end
 
+let test_parallel_tool_calls () =
+  let data_dir = temp_dir () in
+  let calls = ref 0 in
+  let llm _provider ?emit:_ ~system_prompt:_ messages ~tools:_ =
+    incr calls;
+    if !calls = 1 then
+      multi_tool_response [
+        ("bash", [
+          ("command", `String "sleep 1; printf one");
+          ("parallel", `Bool true);
+        ]);
+        ("bash", [
+          ("command", `String "sleep 1; printf two");
+          ("parallel", `Bool true);
+        ]);
+      ]
+    else (
+      let contents = text_messages messages in
+      expect (List.exists (fun text -> contains text "one") contents) "first parallel tool result should be present";
+      expect (List.exists (fun text -> contains text "two") contents) "second parallel tool result should be present";
+      text_response "done"
+    )
+  in
+  let state = create_state ~llm_call:llm data_dir in
+  begin
+    match Agent_runtime.Session.approve_exec state "/bin/sh" with
+    | Ok _ -> ()
+    | Error err -> fail err
+  end;
+  let start_time = Unix.gettimeofday () in
+  let result, events = capture_process state ~chat_id:20 "run both commands" in
+  let elapsed = Unix.gettimeofday () -. start_time in
+  begin
+    match result with
+    | Error err -> fail err
+    | Ok () ->
+        expect_final_message "done" events;
+        expect (elapsed < 1.8) "parallel tool calls should finish in less than two sequential sleeps";
+        let completed_updates =
+          List.fold_left
+            (fun count ->
+              function
+              | Acp.Message.Session_update { update = Acp.Message.Tool_call_update { status = Some Acp.Message.Completed; _ }; _ } ->
+                  count + 1
+              | _ -> count)
+            0
+            events
+        in
+        expect (completed_updates >= 2) "parallel tool calls should complete both tool updates"
+  end
+
 let test_project_root_db_and_approval_command () =
   let root = temp_dir () in
   let normalized_root = Unix.realpath root in
@@ -710,6 +776,7 @@ let () =
   test_tool_loop_and_resume ();
   test_permission_request_and_resume ();
   test_permission_request_and_reject ();
+  test_parallel_tool_calls ();
   test_project_root_db_and_approval_command ();
   test_permissions_command_lists_approvals ();
   test_permissions_command_read_filter ();

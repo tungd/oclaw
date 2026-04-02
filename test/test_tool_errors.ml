@@ -108,6 +108,106 @@ let test_read_file_succeeds_after_approval () =
   Agent_skills.Skills.close skills;
   print_endline "  ✓ read_file_succeeds_after_approval"
 
+let test_read_file_supports_line_ranges () =
+  let root, skills, registry = temp_registry () in
+  let file_path = Filename.concat root "range.txt" in
+  write_file file_path "alpha\nbeta\ngamma\ndelta\n" ;
+  let middle =
+    Tools.execute registry ~chat_id:1 "read_file"
+      (`Assoc [
+        ("path", `String file_path);
+        ("line_from", `Int 2);
+        ("line_to", `Int 3);
+      ])
+  in
+  expect (not middle.Tools.is_error) "read_file should support bounded line ranges";
+  expect (middle.Tools.content = "beta\ngamma\n") "read_file should return the selected bounded line range";
+  let suffix =
+    Tools.execute registry ~chat_id:1 "read_file"
+      (`Assoc [
+        ("path", `String file_path);
+        ("line_from", `Int 3);
+      ])
+  in
+  expect (not suffix.Tools.is_error) "read_file should support open-ended line_from";
+  expect (suffix.Tools.content = "gamma\ndelta\n") "read_file should return content from line_from through EOF";
+  let prefix =
+    Tools.execute registry ~chat_id:1 "read_file"
+      (`Assoc [
+        ("path", `String file_path);
+        ("line_to", `Int 2);
+      ])
+  in
+  expect (not prefix.Tools.is_error) "read_file should support open-ended line_to";
+  expect (prefix.Tools.content = "alpha\nbeta\n") "read_file should return content from BOF through line_to";
+  Tools.close registry;
+  Agent_skills.Skills.close skills;
+  print_endline "  ✓ read_file_supports_line_ranges"
+
+let test_read_file_validates_line_ranges () =
+  let root, skills, registry = temp_registry () in
+  let file_path = Filename.concat root "range.txt" in
+  write_file file_path "alpha\nbeta\ngamma\n" ;
+  let non_positive =
+    Tools.execute registry ~chat_id:1 "read_file"
+      (`Assoc [
+        ("path", `String file_path);
+        ("line_from", `Int 0);
+      ])
+  in
+  expect non_positive.Tools.is_error "read_file should reject non-positive line numbers";
+  expect (non_positive.Tools.error_category = Some Tools.InvalidParameters) "read_file should classify invalid line numbers";
+  expect (contains non_positive.Tools.content "line_from must be positive") "read_file should explain invalid line_from";
+  let reversed =
+    Tools.execute registry ~chat_id:1 "read_file"
+      (`Assoc [
+        ("path", `String file_path);
+        ("line_from", `Int 3);
+        ("line_to", `Int 2);
+      ])
+  in
+  expect reversed.Tools.is_error "read_file should reject reversed line ranges";
+  expect (reversed.Tools.error_category = Some Tools.InvalidParameters) "read_file should classify reversed ranges";
+  expect
+    (contains reversed.Tools.content "line_to must be greater than or equal to line_from")
+    "read_file should explain reversed ranges";
+  Tools.close registry;
+  Agent_skills.Skills.close skills;
+  print_endline "  ✓ read_file_validates_line_ranges"
+
+let test_parallel_flag_validation () =
+  let root, skills, registry = temp_registry () in
+  let file_path = Filename.concat root "range.txt" in
+  write_file file_path "alpha\nbeta\n" ;
+  begin
+    match Tools.approve_executable registry "echo" with
+    | Ok _ -> ()
+    | Error err -> fail err
+  end;
+  let invalid_read_file =
+    Tools.execute registry ~chat_id:1 "read_file"
+      (`Assoc [
+        ("path", `String file_path);
+        ("parallel", `String "yes");
+      ])
+  in
+  expect invalid_read_file.Tools.is_error "read_file should reject non-boolean parallel flags";
+  expect (invalid_read_file.Tools.error_category = Some Tools.InvalidParameters) "read_file should classify invalid parallel flags";
+  expect (contains invalid_read_file.Tools.content "parallel must be a boolean") "read_file should explain invalid parallel flags";
+  let invalid_bash =
+    Tools.execute registry ~chat_id:1 "bash"
+      (`Assoc [
+        ("command", `String "echo ok");
+        ("parallel", `Int 1);
+      ])
+  in
+  expect invalid_bash.Tools.is_error "bash should reject non-boolean parallel flags";
+  expect (invalid_bash.Tools.error_category = Some Tools.InvalidParameters) "bash should classify invalid parallel flags";
+  expect (contains invalid_bash.Tools.content "parallel must be a boolean") "bash should explain invalid parallel flags";
+  Tools.close registry;
+  Agent_skills.Skills.close skills;
+  print_endline "  ✓ parallel_flag_validation"
+
 let test_write_allowed_in_project_root () =
   let root, skills, registry = temp_registry () in
   let file_path = Filename.concat root "write.txt" in
@@ -189,6 +289,25 @@ let test_bash_requires_executable_approval () =
   Agent_skills.Skills.close skills;
   print_endline "  ✓ bash_requires_executable_approval"
 
+let test_bash_requires_shell_approval_for_shell_syntax () =
+  let _root, skills, registry = temp_registry () in
+  let result =
+    Tools.execute registry ~chat_id:1 "bash"
+      (`Assoc [("command", `String "printf one | cat")])
+  in
+  expect result.Tools.is_error "bash should require approval before running shell syntax";
+  expect (result.Tools.error_category = Some Tools.ApprovalRequired) "bash should request approval for shell execution";
+  begin
+    match result.Tools.approval_request with
+    | Some request ->
+        expect (request.scope = Tools.Execute) "shell approval should target executable scope";
+        expect (Filename.basename request.target = "sh") "shell approval should target sh"
+    | None -> fail "expected shell approval request"
+  end;
+  Tools.close registry;
+  Agent_skills.Skills.close skills;
+  print_endline "  ✓ bash_requires_shell_approval_for_shell_syntax"
+
 let test_bash_succeeds_after_executable_approval () =
   let _root, skills, registry = temp_registry () in
   begin
@@ -205,6 +324,23 @@ let test_bash_succeeds_after_executable_approval () =
   Tools.close registry;
   Agent_skills.Skills.close skills;
   print_endline "  ✓ bash_succeeds_after_executable_approval"
+
+let test_bash_supports_shell_syntax_after_shell_approval () =
+  let _root, skills, registry = temp_registry () in
+  begin
+    match Tools.approve_executable registry "/bin/sh" with
+    | Ok _ -> ()
+    | Error err -> fail err
+  end;
+  let result =
+    Tools.execute registry ~chat_id:1 "bash"
+      (`Assoc [("command", `String "printf one | cat")])
+  in
+  expect (not result.Tools.is_error) "bash should support shell syntax after shell approval";
+  expect (contains result.Tools.content "one") "bash shell syntax should produce command output";
+  Tools.close registry;
+  Agent_skills.Skills.close skills;
+  print_endline "  ✓ bash_supports_shell_syntax_after_shell_approval"
 
 let test_list_approvals_formatted () =
   let root, skills, registry = temp_registry () in
@@ -289,11 +425,16 @@ let () =
   print_endline "Running tool approval and error tests...";
   test_read_file_requires_approval ();
   test_read_file_succeeds_after_approval ();
+  test_read_file_supports_line_ranges ();
+  test_read_file_validates_line_ranges ();
+  test_parallel_flag_validation ();
   test_write_allowed_in_project_root ();
   test_write_requires_separate_write_approval_outside_project_root ();
   test_edit_pattern_errors_are_structured ();
   test_bash_timeout_validation ();
   test_bash_requires_executable_approval ();
+  test_bash_requires_shell_approval_for_shell_syntax ();
   test_bash_succeeds_after_executable_approval ();
+  test_bash_supports_shell_syntax_after_shell_approval ();
   test_list_approvals_formatted ();
   print_endline "[PASS] tool approval and error tests"

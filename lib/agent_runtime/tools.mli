@@ -59,6 +59,8 @@ val trust_project : ?path:string -> t -> (string, string) result
 
 val definitions : t -> Llm_types.tool_definition list
 val execute : t -> chat_id:int -> string -> Yojson.Safe.t -> tool_result
+val requests_parallel_execution : string -> Yojson.Safe.t -> bool
+val execute_parallel_batch : t -> chat_id:int -> (string * Yojson.Safe.t) list -> tool_result list
 val activate_skill : t -> chat_id:int -> string -> tool_result
 val visible_skills : ?include_untrusted:bool -> t -> Agent_skills.Skills.skill_metadata list
 val list_skills_formatted : ?include_untrusted:bool -> t -> string

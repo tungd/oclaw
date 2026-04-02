@@ -5,6 +5,15 @@ let fail msg =
 let expect cond msg =
   if not cond then fail msg
 
+let tool_definition registry name =
+  match
+    List.find_opt
+      (fun (tool : Llm_types.tool_definition) -> tool.name = name)
+      (Agent_runtime.Tools.definitions registry)
+  with
+  | Some tool -> tool
+  | None -> fail ("missing tool definition: " ^ name)
+
 let expected_tools = [
   "bash";
   "read_file";
@@ -47,7 +56,12 @@ let test_git_harden_argv () =
 let () =
   (* Run unit tests for internal logic *)
   test_git_harden_argv ();
-  let temp_root = Filename.get_temp_dir_name () in
+  let temp_root =
+    let path = Filename.temp_file "oclaw-tools-registry-" "" in
+    Sys.remove path;
+    Unix.mkdir path 0o755;
+    path
+  in
   let db_path = Filename.concat temp_root "oclaw-tools-registry.db" in
   let project_skills_dir = Filename.concat temp_root "project-skills" in
   let user_skills_dir = Filename.concat temp_root "user-skills" in
@@ -72,6 +86,29 @@ let () =
     |> List.map (fun (tool : Llm_types.tool_definition) -> tool.name)
   in
   expect (actual_tools = expected_tools) "default tool registry does not match expected surface";
+  let read_file = tool_definition registry "read_file" in
+  let read_file_properties = Yojson.Safe.Util.member "properties" read_file.input_schema in
+  expect (Yojson.Safe.Util.member "path" read_file_properties <> `Null) "read_file should expose path";
+  expect (Yojson.Safe.Util.member "line_from" read_file_properties <> `Null) "read_file should expose line_from";
+  expect (Yojson.Safe.Util.member "line_to" read_file_properties <> `Null) "read_file should expose line_to";
+  expect (Yojson.Safe.Util.member "parallel" read_file_properties <> `Null) "read_file should expose parallel";
+  let read_file_required =
+    Yojson.Safe.Util.member "required" read_file.input_schema
+    |> Yojson.Safe.Util.to_list
+    |> List.map Yojson.Safe.Util.to_string
+  in
+  expect (read_file_required = ["path"]) "read_file should only require path";
+  let bash = tool_definition registry "bash" in
+  let bash_properties = Yojson.Safe.Util.member "properties" bash.input_schema in
+  expect (Yojson.Safe.Util.member "command" bash_properties <> `Null) "bash should expose command";
+  expect (Yojson.Safe.Util.member "timeout_seconds" bash_properties <> `Null) "bash should expose timeout_seconds";
+  expect (Yojson.Safe.Util.member "parallel" bash_properties <> `Null) "bash should expose parallel";
+  let bash_required =
+    Yojson.Safe.Util.member "required" bash.input_schema
+    |> Yojson.Safe.Util.to_list
+    |> List.map Yojson.Safe.Util.to_string
+  in
+  expect (bash_required = ["command"]) "bash should only require command";
   Agent_runtime.Tools.close registry;
   Agent_skills.Skills.close skills;
   Printf.printf "[PASS] tool registry smoke test (%d tools)\n" (List.length actual_tools)
