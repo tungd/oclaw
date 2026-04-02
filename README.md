@@ -54,7 +54,7 @@ oclaw/
 - OCaml 5.0+
 - Dune 3.15+
 
-Main package dependencies are declared in [`dune-project`](/Users/tung/Projects/std23/oclaw/dune-project).
+Main package dependencies are declared in [`dune-project`](dune-project).
 
 ## Build
 
@@ -224,15 +224,6 @@ Supported models and their context limits:
 - GPT-4o, GPT-4o-mini: 128,000 tokens
 - Qwen models: 32,768 tokens (default)
 
-### Configuration
-
-Token warning threshold can be configured (default: 0.8 = 80%):
-
-```yaml
-# In config.yaml
-llm_model: gpt-4
-```
-
 The token estimator automatically detects the model and applies the appropriate encoding and context limit.
 
 ## Built-in Tools
@@ -297,7 +288,7 @@ Approval behavior:
 
 The public runtime entrypoint is exposed through `Agent_runtime.App`, `Agent_runtime.Session`, and `Agent_runtime.Export`.
 
-Internally, the core loop in [`lib/agent_runtime/agent_engine.ml`](/Users/tung/Projects/std23/oclaw/lib/agent_runtime/agent_engine.ml) does the following:
+Internally, the core loop in [`lib/agent_runtime/agent_engine.ml`](lib/agent_runtime/agent_engine.ml) does the following:
 
 1. Store the user prompt in the transcript
 2. Build the system prompt, including discovered skills
@@ -307,7 +298,7 @@ Internally, the core loop in [`lib/agent_runtime/agent_engine.ml`](/Users/tung/P
 
 ### Provider Layer
 
-The provider code in [`lib/llm_provider/llm_provider.ml`](/Users/tung/Projects/std23/oclaw/lib/llm_provider/llm_provider.ml) is an OpenAI-compatible transport adapter over the shared `Llm_types` AST and supports:
+The provider code in [`lib/llm_provider/llm_provider.ml`](lib/llm_provider/llm_provider.ml) is an OpenAI-compatible transport adapter over the shared `Llm_types` AST and supports:
 
 - Standard request serialization
 - Streaming response parsing
@@ -316,7 +307,7 @@ The provider code in [`lib/llm_provider/llm_provider.ml`](/Users/tung/Projects/s
 
 ### Interactive Frontend
 
-The interactive frontend in [`lib/agent_tui/plain_repl.ml`](/Users/tung/Projects/std23/oclaw/lib/agent_tui/plain_repl.ml) is a synchronous stdio REPL. It uses `layoutz` for the startup banner, approval blocks, and markdown-aware transcript rendering while still replaying persistent history on startup and appending output directly to stdout.
+The interactive frontend in [`lib/agent_tui/plain_repl.ml`](lib/agent_tui/plain_repl.ml) is a synchronous stdio REPL. It uses `layoutz` for the startup banner, approval blocks, and markdown-aware transcript rendering while still replaying persistent history on startup and appending output directly to stdout.
 
 ## Tests
 
@@ -328,14 +319,14 @@ dune runtest
 
 Current test suites include:
 
-- [`test/test_config.ml`](/Users/tung/Projects/std23/oclaw/test/test_config.ml)
-- [`test/test_http_client.ml`](/Users/tung/Projects/std23/oclaw/test/test_http_client.ml)
-- [`test/test_tools_registry.ml`](/Users/tung/Projects/std23/oclaw/test/test_tools_registry.ml)
-- [`test/test_assistant_runtime.ml`](/Users/tung/Projects/std23/oclaw/test/test_assistant_runtime.ml)
-- [`test/test_llm_provider.ml`](/Users/tung/Projects/std23/oclaw/test/test_llm_provider.ml)
-- [`test/test_retry.ml`](/Users/tung/Projects/std23/oclaw/test/test_retry.ml)
-- [`test/test_tool_errors.ml`](/Users/tung/Projects/std23/oclaw/test/test_tool_errors.ml)
-- [`test/test_plain_repl.ml`](/Users/tung/Projects/std23/oclaw/test/test_plain_repl.ml)
+- [`test/test_config.ml`](test/test_config.ml)
+- [`test/test_http_client.ml`](test/test_http_client.ml)
+- [`test/test_tools_registry.ml`](test/test_tools_registry.ml)
+- [`test/test_assistant_runtime.ml`](test/test_assistant_runtime.ml)
+- [`test/test_llm_provider.ml`](test/test_llm_provider.ml)
+- [`test/test_retry.ml`](test/test_retry.ml)
+- [`test/test_tool_errors.ml`](test/test_tool_errors.ml)
+- [`test/test_plain_repl.ml`](test/test_plain_repl.ml)
 
 ## License
 
