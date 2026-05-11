@@ -1,0 +1,10 @@
+(library
+ (name af_agent)
+ (modules af_agent)
+ (libraries
+  agent_runtime
+  acp
+  httpkit
+  yojson
+  yaml
+  unix))

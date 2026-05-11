@@ -25,16 +25,20 @@ let default_system_prompt =
     ]
 
 let build_system_prompt state ~chat_id:_ =
+  let base_prompt =
+    let skills_catalog = Tools.build_skills_catalog state.Runtime.tools in
+    if String.trim skills_catalog = "" then
+      default_system_prompt
+    else
+      default_system_prompt
+      ^ "\n\n# Skills\n\nThe following skills are available. Use `activate_skill` before following a skill-specific workflow. Users can also explicitly activate a skill with `/skill <name>` or `$skill-name`.\n\n"
+      ^ skills_catalog
+  in
   match state.Runtime.system_prompt_override with
-  | Some prompt -> prompt
-  | None ->
-      let skills_catalog = Tools.build_skills_catalog state.Runtime.tools in
-      if String.trim skills_catalog = "" then
-        default_system_prompt
-      else
-        default_system_prompt
-        ^ "\n\n# Skills\n\nThe following skills are available. Use `activate_skill` before following a skill-specific workflow. Users can also explicitly activate a skill with `/skill <name>` or `$skill-name`.\n\n"
-        ^ skills_catalog
+  | Some prompt when String.trim prompt <> "" ->
+      base_prompt ^ "\n\n# Agent\n\n" ^ prompt
+  | Some _ | None ->
+      base_prompt
 
 let response_text response =
   response.Llm.content

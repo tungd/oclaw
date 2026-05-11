@@ -11,6 +11,7 @@ type llm_call =
 val create :
   ?llm_call:llm_call ->
   ?system_prompt_override:string ->
+  ?extra_tools:Tools.custom_tool list ->
   Config.config ->
   (t, string) result
 

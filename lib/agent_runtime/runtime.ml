@@ -36,7 +36,7 @@ let default_llm_call provider_config ?emit ~system_prompt messages ~tools =
 
 let ensure_dir = Project_paths.ensure_dir
 
-let create_app_state ?(llm_call=default_llm_call) ?system_prompt_override config =
+let create_app_state ?(llm_call=default_llm_call) ?system_prompt_override ?(extra_tools=[]) config =
   let layout = Project_paths.discover ~start_dir:config.Config.data_dir () in
   try
     ensure_dir layout.agents_dir;
@@ -53,6 +53,7 @@ let create_app_state ?(llm_call=default_llm_call) ?system_prompt_override config
     in
     let tools =
       Tools.create_default_registry
+        ~extra_tools
         ~db_path:layout.db_path
         ~project_root:layout.project_root
         ~skills

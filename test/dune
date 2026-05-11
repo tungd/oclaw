@@ -42,6 +42,10 @@
  (name test_plain_repl)
  (libraries agent_tui acp llm_types unix))
 
+(test
+ (name test_af_agent)
+ (libraries af_agent agent_runtime acp llm_types yojson unix))
+
 (rule
  (copy ../lib/tiktoken/vocab_cl100k/vocab_cl100k.txt vocab_cl100k.txt))
 (rule

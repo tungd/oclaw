@@ -39,6 +39,7 @@ type tool_result = {
 
 type t = {
   tools : tool list;
+  extra_tools : custom_tool list;
   pool : Domainslib.Task.pool;
   db : Sqlite3.db;
   project_root : string;
@@ -50,6 +51,11 @@ and tool_exec_fn = registry:t -> chat_id:int -> Yojson.Safe.t -> tool_result
 and tool = {
   definition : Llm_types.tool_definition;
   execute : tool_exec_fn;
+}
+
+and custom_tool = {
+  definition : Llm_types.tool_definition;
+  execute : registry:t -> chat_id:int -> Yojson.Safe.t -> tool_result;
 }
 
 let close registry =
@@ -1126,7 +1132,7 @@ let bash_tool =
       execute_prepared (prepare_bash_execution registry (json_assoc_or_empty args)));
   }
 
-let create_default_registry ~db_path ~project_root ~skills () =
+let create_default_registry ?(extra_tools=[]) ~db_path ~project_root ~skills () =
   let db = Sqlite3.db_open db_path in
   init_db db;
   let pool = Domainslib.Task.setup_pool ~num_domains:2 () in
@@ -1135,22 +1141,42 @@ let create_default_registry ~db_path ~project_root ~skills () =
     pool;
     project_root = normalize_root_path ~scope:Read project_root;
     skills;
+    extra_tools;
     tools = [bash_tool; read_file_tool; write_file_tool; edit_file_tool; skill_list_tool; skill_search_tool; skill_install_tool];
   }
 
 let definitions registry =
-  let defs = List.map (fun t -> t.definition) registry.tools in
+  let defs =
+    List.map (fun (tool : tool) -> tool.definition) registry.tools
+    @ List.map (fun (tool : custom_tool) -> tool.definition) registry.extra_tools
+  in
   let skill_names = skill_names registry in
   if skill_names = [] then defs else defs @ [ (activate_skill_tool registry).definition ]
 
 let execute registry ~chat_id name input =
   let tool_opt =
-    if String.equal name "activate_skill" then Some (activate_skill_tool registry)
-    else List.find_opt (fun tool -> tool.definition.Llm_types.name = name) registry.tools
+    if String.equal name "activate_skill" then
+      `Builtin (activate_skill_tool registry)
+    else
+      match List.find_opt (fun tool -> tool.definition.Llm_types.name = name) registry.tools with
+      | Some tool -> `Builtin tool
+      | None ->
+          begin
+            match List.find_opt (fun (tool : custom_tool) -> tool.definition.Llm_types.name = name) registry.extra_tools with
+            | Some tool -> `Custom tool
+            | None -> `Missing
+          end
   in
   match tool_opt with
-  | None -> failure ("Tool not found: " ^ name)
-  | Some tool ->
+  | `Missing -> failure ("Tool not found: " ^ name)
+  | `Builtin tool ->
+      begin
+        try tool.execute ~registry ~chat_id (json_assoc_or_empty input)
+        with
+        | Unix.Unix_error _ as exn -> unix_error_result ~op:`Exec ~path:name exn
+        | exn -> failure (Printf.sprintf "Tool execution exception: %s" (Printexc.to_string exn))
+      end
+  | `Custom tool ->
       begin
         try tool.execute ~registry ~chat_id (json_assoc_or_empty input)
         with

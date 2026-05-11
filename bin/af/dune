@@ -1,0 +1,11 @@
+(executable
+ (public_name af)
+ (name af)
+ (libraries
+  af_agent
+  agent_runtime
+  agent_tui
+  acp
+  logs
+  logs.fmt
+  unix))

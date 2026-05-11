@@ -3,8 +3,8 @@ type t = Runtime.app_state
 type llm_call =
   Runtime.llm_call
 
-let create ?llm_call ?system_prompt_override config =
-  Runtime.create_app_state ?llm_call ?system_prompt_override config
+let create ?llm_call ?system_prompt_override ?extra_tools config =
+  Runtime.create_app_state ?llm_call ?system_prompt_override ?extra_tools config
 
 let close = Runtime.close_app_state
 

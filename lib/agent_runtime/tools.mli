@@ -39,12 +39,18 @@ type tool_result = {
 
 type t
 
+type custom_tool = {
+  definition : Llm_types.tool_definition;
+  execute : registry:t -> chat_id:int -> Yojson.Safe.t -> tool_result;
+}
+
 val success : ?status_code:int -> ?duration_ms:int -> ?error_type:string -> string -> tool_result
 val failure : ?status_code:int -> ?duration_ms:int -> ?error_type:string -> ?error_category:error_category -> string -> tool_result
 val approval_required : approval_request -> string -> tool_result
 val recovery_hint_for_error : category:error_category -> error_message:string -> string
 
 val create_default_registry :
+  ?extra_tools:custom_tool list ->
   db_path:string ->
   project_root:string ->
   skills:Agent_skills.Skills.t ->

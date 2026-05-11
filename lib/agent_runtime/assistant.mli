@@ -8,6 +8,7 @@ type llm_call =
 val create :
   ?llm_call:llm_call ->
   ?system_prompt:string ->
+  ?extra_tools:Tools.custom_tool list ->
   ?chat_id:int ->
   ?data_dir:string ->
   provider_config:Llm_provider.provider_config ->

@@ -28,5 +28,10 @@ type app_state = {
 
 val default_llm_call : llm_call
 val ensure_dir : string -> unit
-val create_app_state : ?llm_call:llm_call -> ?system_prompt_override:string -> Config.config -> (app_state, string) result
+val create_app_state :
+  ?llm_call:llm_call ->
+  ?system_prompt_override:string ->
+  ?extra_tools:Tools.custom_tool list ->
+  Config.config ->
+  (app_state, string) result
 val close_app_state : app_state -> unit

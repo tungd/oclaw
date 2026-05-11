@@ -8,7 +8,7 @@ type t = {
 type llm_call =
   App.llm_call
 
-let create ?llm_call ?system_prompt ?(chat_id=1) ?data_dir ~provider_config () =
+let create ?llm_call ?system_prompt ?(extra_tools=[]) ?(chat_id=1) ?data_dir ~provider_config () =
   let config =
     {
       Config.default_config with
@@ -18,7 +18,7 @@ let create ?llm_call ?system_prompt ?(chat_id=1) ?data_dir ~provider_config () =
       data_dir = Option.value ~default:"workspace" data_dir;
     }
   in
-  match App.create ?llm_call ?system_prompt_override:system_prompt config with
+  match App.create ?llm_call ?system_prompt_override:system_prompt ~extra_tools config with
   | Ok app ->
       let active_branch = Session.history app ~chat_id in
       let current_node_id = Session.latest_node_id app ~chat_id in
